@@ -71,7 +71,9 @@ Progress is chronicled in `INTEGRATION-PROCEDURE.md`.
       implemented across firmware/adapter/API/page; 22 tests, Yún compile,
       verified upload, and stopped live USB status pass. Homed/absolute position
       and software-margin gates are deliberately absent; staged physical motion
-      checks remain.
+      checks remain. The motor datasheet plus photographed all-ON SW5-SW8
+      setting now define 251.96850394 pulses/mm; matching firmware/laptop code
+      is uploaded and stopped `csps:378` status passes.
 - [ ] **I3b5 - USB Yún software E-STOP adapter.** A mode-independent firmware
       latch, compact capability/status, exact USB commands, dashboard APIs, and
       prominent top-level stop/reset controls are implemented. Reset requires

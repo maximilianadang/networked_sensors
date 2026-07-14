@@ -78,7 +78,7 @@ data acquisition and operator workflow:
     receive live status heartbeats on the localhost webpage.
   - [ ] Complete deliberate D4/D5/D6/D8 transition and USB-unplug browser smoke.
 - [ ] **Step 5C - bounded manual speed tuning over USB.**
-  - [x] Add a D4-off-only `V1 S10..1000` firmware command without remote
+  - [x] Add a D4-off-only `V1 S25..2520` firmware command without remote
     start/stop/direction authority.
   - [x] Report configured speed separately from effective speed.
   - [x] Add `/api/stepper/speed` and an Apply Manual Speed action while keeping
@@ -90,6 +90,9 @@ data acquisition and operator workflow:
   - [x] Make the browser action remain clickable for explicit validation errors,
     preserve its result message, and require a fresh Yún configured-speed echo
     before reporting success; verify the live 10.0 mm/s interface path.
+  - [x] Replace the provisional 100 pulses/mm conversion with the documented
+    0.00396875 mm/pulse at the photographed 200-pulse/rev driver setting;
+    compile/upload and verify stopped default `csps: 378`.
   - [ ] Complete staged 1.5/3.0/5.0 mm/s motion-away checks.
 - [x] **Step 5D - D4-off electrical direction mapping.**
   - [x] Add `V1 D0|1`, mapping status/capability, the guarded USB adapter/API,

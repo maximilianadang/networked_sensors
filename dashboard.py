@@ -28,6 +28,7 @@ try:
         DEFAULT_ESP32_TIMEOUT_S,
         DEFAULT_STEPPER_USB_BAUD,
         DEFAULT_STEPPER_USB_PORT,
+        DEFAULT_STEPPER_STEPS_PER_MM,
         DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
         DEFAULT_STEPPER_NETWORK_URL,
         DEFAULT_STALE_AFTER_S,
@@ -55,6 +56,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         DEFAULT_ESP32_TIMEOUT_S,
         DEFAULT_STEPPER_USB_BAUD,
         DEFAULT_STEPPER_USB_PORT,
+        DEFAULT_STEPPER_STEPS_PER_MM,
         DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
         DEFAULT_STEPPER_NETWORK_URL,
         DEFAULT_STALE_AFTER_S,
@@ -2165,7 +2167,11 @@ class DashboardRuntime:
             if isinstance(requested_speed, bool):
                 raise ValueError("speed_mm_s must be a finite number")
             try:
-                expected_speed = round(float(requested_speed) * 100.0) / 100.0
+                requested_speed_value = float(requested_speed)
+                expected_speed = (
+                    round(requested_speed_value * DEFAULT_STEPPER_STEPS_PER_MM)
+                    / DEFAULT_STEPPER_STEPS_PER_MM
+                )
             except (TypeError, ValueError) as exc:
                 raise ValueError("speed_mm_s must be a finite number") from exc
             before_sequence = self._stepper_payload_locked().get(

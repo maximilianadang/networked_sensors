@@ -74,7 +74,8 @@ DEFAULT_STEPPER_USB_PORT = "/dev/ttyACM0"
 DEFAULT_STEPPER_USB_BAUD = 9600
 DEFAULT_STEPPER_NETWORK_URL = "http://arduino.local:8080"
 DEFAULT_STEPPER_NETWORK_TIMEOUT_S = 0.75
-DEFAULT_STEPPER_STEPS_PER_MM = 100.0
+DEFAULT_STEPPER_MM_PER_PULSE = 0.00396875
+DEFAULT_STEPPER_STEPS_PER_MM = 1.0 / DEFAULT_STEPPER_MM_PER_PULSE
 DEFAULT_STEPPER_TRAVEL_MM = 137.18
 DEFAULT_STEPPER_HOME_SPEED_MM_S = 1.5
 
@@ -83,6 +84,10 @@ DEFAULT_STEPPER_HOME_SPEED_MM_S = 1.5
 DEFAULT_STEPPER_MAX_DISTANCE_MM = DEFAULT_STEPPER_TRAVEL_MM
 DEFAULT_STEPPER_MAX_SPEED_MM_S = 10.0
 DEFAULT_STEPPER_ACCELERATION_MM_S2 = 5.0
+DEFAULT_STEPPER_MIN_SPEED_SPS = round(0.1 * DEFAULT_STEPPER_STEPS_PER_MM)
+DEFAULT_STEPPER_MAX_SPEED_SPS = round(
+    DEFAULT_STEPPER_MAX_SPEED_MM_S * DEFAULT_STEPPER_STEPS_PER_MM
+)
 
 DXMR90_CORE_METRICS: tuple[Metric, ...] = tuple(
     metric for metric in (HEARTBEAT, *MEASUREMENTS) if metric.name in CORE_NAMES
@@ -757,10 +762,14 @@ class UsbStepperSource:
             configured_speed_sps = float(configured_speed_value)
             if (
                 not math.isfinite(configured_speed_sps)
-                or configured_speed_sps < 10
-                or configured_speed_sps > 1000
+                or configured_speed_sps < DEFAULT_STEPPER_MIN_SPEED_SPS
+                or configured_speed_sps > DEFAULT_STEPPER_MAX_SPEED_SPS
             ):
-                raise ValueError("USB stepper field csps must be in 10..1000")
+                raise ValueError(
+                    "USB stepper field csps must be in "
+                    f"{DEFAULT_STEPPER_MIN_SPEED_SPS}.."
+                    f"{DEFAULT_STEPPER_MAX_SPEED_SPS}"
+                )
         else:
             # Backward-compatible decoding keeps the currently uploaded T4A
             # firmware observable, but speed commands remain disabled until a

@@ -493,7 +493,7 @@ direction and usable travel, so allow the webpage to change speed now without
 prematurely granting remote start or distance control.
 
 **DE-RISKED:** the speed command cannot create motion. Firmware accepts the
-versioned `V1 S10..1000` command only while D4 reads OFF/HIGH. D4 still starts
+original versioned `V1 S10..1000` command only while D4 reads OFF/HIGH. D4 still starts
 and stops, D5 still chooses direction, and D6/D8 still block travel into their
 ends. Configured speed is reported separately from effective signed speed.
 
@@ -567,7 +567,7 @@ returns to stopped Local Velocity; unfinished commands are discarded at reset;
 and D6/D8 remain directional stops. Open-loop homed/position/target values are
 not authorization inputs and no absolute software envelope is enforced. One
 relative command remains capped at the measured 137.18 mm stroke. The installed
-normally-open limits remain a known broken-wire limitation. The 100 steps/mm
+normally-open limits remain a known broken-wire limitation. The then-current 100 steps/mm
 conversion is explicitly provisional until STEP pulses are checked against a
 DRO displacement.
 
@@ -802,3 +802,25 @@ login. Health resynchronized with no error, stopped firmware status resumed,
 and key-only maintenance SSH passed. The target `GL-MT3000-b3a` configuration
 is committed for the next power cycle. Association and bridge reachability on
 that target LAN remain a separate physical check, as do all moving-load gates.
+
+## Step 5H - motor/driver pulse calibration
+
+**Direction given:** correct the clearly slow Local Velocity scale using the
+full linear-stepper datasheet and the installed DM542T switch positions.
+
+**Evidence and inference:** `LN176S-E06008-210-S-200` specifies 0.79375 mm lead,
+1.8-degree steps, and 0.00396875 mm/full-step. The close-up identifies SW4—not
+SW5—as the lone opposite switch. SW5-SW8 are all ON, selecting 200
+pulses/revolution, so no microstep multiplier separates a PUL pulse from the
+datasheet full step. The conversion is therefore 251.96850394 pulses/mm.
+
+**Executed:** replaced provisional 100 pulses/mm in firmware and laptop
+decoding/command generation, including speed, distance, stroke, Home margin,
+and acceleration pulse quantities. Dashboard acknowledgement now compares the
+quantized physical speed rather than assuming hundredth-mm/s pulse resolution.
+
+**Verified:** the target compiles at 20,782 bytes/72% flash and 1,399 bytes/54%
+RAM. Upload passed with D4 OFF and zero motion. Fresh USB heartbeat reports the
+new default `csps:378`, zero effective speed, D6 active/latched, and no owner.
+Desktop contract tests and the generated protocol check pass. A measured
+short-distance DRO comparison and staged 2520-pulse/s smoothness test remain.

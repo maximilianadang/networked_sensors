@@ -60,17 +60,25 @@ Do not apply the 7-12 V commonly used on an Uno VIN.
 
 ## Speed and distance control
 
-The current calibration is 100 steps/mm. Therefore:
+The model `LN176S-E06008-210-S-200` datasheet supplied during physical
+calibration specifies a 0.79375 mm screw lead, 1.8 degree motor steps, and
+0.00396875 mm linear travel per full step. The installed DM542T photograph
+shows SW5-SW8 all ON, selecting 200 driver pulses/revolution. SW4 is the lone
+opposite switch and controls standstill current, not microstepping. Therefore
+one PUL input pulse equals one datasheet full step in this configuration:
 
 ```text
-steps_per_second = requested_mm_per_second * 100
-relative_steps   = requested_distance_mm * 100
+mm_per_driver_pulse = 0.00396875
+pulses_per_mm        = 1 / 0.00396875 = 251.96850394
+pulses_per_second    = round(requested_mm_per_second * 251.96850394)
+relative_pulses      = round(requested_distance_mm * 251.96850394)
 ```
 
-The present fixed setting of 1.5 mm/s is 150 steps/s. That is modest for a
-16 MHz ATmega32U4. The code's 1000 steps/s ceiling corresponds to 10 mm/s, but
-the safe mechanical limit must be established on the actual motor, driver,
-load, microstep setting, and screw.
+The 1.5 mm/s default is 378 pulses/s; 10 mm/s is 2520 pulses/s. The latter
+requires staged timing/smoothness verification on the 16 MHz ATmega32U4. The
+safe mechanical limit must still be established on the actual motor, driver,
+load, and screw. Any SW5-SW8 change invalidates this conversion and requires a
+new pulses/mm calculation.
 
 `runSpeed()` provides indefinite constant-velocity motion; it does not stop at
 a requested distance. For bounded moves, the adapted sketch should:
@@ -85,7 +93,7 @@ a requested distance. For bounded moves, the adapted sketch should:
 
 Do not use blocking `runToPosition()` in the network event loop. The official
 Bridge example's `delay(50)` is also unsuitable for this motor loop: at the
-current 150 steps/s, a step can be due every 6.67 ms. Network command handling
+default 378 pulses/s, a pulse can be due every 2.65 ms. Network command handling
 must be non-blocking and subordinate to frequent `stepper.run()` calls.
 
 Distance is open-loop: AccelStepper counts commanded pulses, not actual travel.

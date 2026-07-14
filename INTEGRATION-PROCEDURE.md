@@ -252,7 +252,7 @@ cause the Local Velocity fallback to begin stepping immediately.
 **Safety boundary:** D4 arms/aborts and D6/D8 are the directional travel stops.
 Home/reference state and an accumulated open-loop coordinate do not authorize
 motion. The measured 137.18 mm stroke caps one relative command and the D8
-search distance only. The 100 steps/mm quantity conversion remains provisional
+search distance only. At that stage the 100 steps/mm quantity conversion remained provisional
 until a counted STEP-pulse displacement is compared with the DRO.
 
 **Verified so far:** 22 unit/pseudo-terminal/runtime tests pass, including
@@ -385,3 +385,19 @@ After enabling the service, a physical Linux reboot returned Wi-Fi and
 synchronized stopped status without an SSH login, and passwordless maintenance
 access passed. `GL-MT3000-b3a` is committed for the next power cycle. Target-LAN
 association and all motion parity remain pending.
+
+## Step I3d - physical pulse calibration aligned end to end
+
+The supplied `LN176S-E06008-210-S-200` datasheet establishes a 0.79375 mm lead,
+1.8-degree full steps, and 0.00396875 mm linear travel per full step. A new
+driver close-up shows SW5-SW8 all ON, which the DM542T table maps to 200 input
+pulses/revolution; the lone opposite switch is SW4, the independent standstill
+current selector. Thus each PUL pulse is one datasheet full step and the shared
+conversion is 251.96850394 pulses/mm.
+
+Firmware and both real laptop adapters now share that factor. Default 1.5 mm/s
+is 378 pulses/s, the 10 mm/s ceiling is 2520 pulses/s, the 137.18 mm quantity
+bound is 34565 pulses, and fixed 5 mm/s² is approximately 1260 pulses/s². The
+target compiled at 20,782 bytes/72% flash and 1,399 bytes/54% RAM, uploaded with
+verification, and restarted stopped with D4 OFF, D6 active, zero motion, and
+`csps:378`. DRO travel and high-rate smoothness remain wet physical checks.

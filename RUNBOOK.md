@@ -265,10 +265,13 @@ In **Local Velocity** mode, speed may be changed without starting motion:
 3. Wait for **Configured speed** to show the requested value.
 4. Select the safe direction with D5, then use D4 to start/stop continuous motion.
 
-The firmware receives `V1 S10..1000`, where the integer is steps/s and the
-provisional conversion is 100 steps/mm. It rejects out-of-range commands and
-any speed change while D4 is ON. The laptop applies the same checks. The 10
-mm/s limit is provisional software protection, not a proven
+The firmware receives `V1 S25..2520`, where the integer is driver pulses/s.
+The calibrated conversion is 251.96850394 pulses/mm: the motor datasheet gives
+0.00396875 mm per 1.8-degree full step, and the photographed DM542T SW5-SW8
+all-ON setting selects 200 pulses/revolution. SW4 controls standstill current
+and does not change pulse resolution. Firmware rejects out-of-range commands
+and any speed change while D4 is ON; the laptop applies the same conversion and
+checks. The 10 mm/s limit is provisional software protection, not a proven
 mechanical rating: begin at 1.5 mm/s and increase through short 3.0 and 5.0 mm/s
 travel-away checks before attempting anything faster.
 
@@ -310,9 +313,9 @@ open-loop absolute target is checked. **Stop Motion**, D4 OFF, a D5 change, or
 the destination limit aborts motion in the ATmega loop. Acceleration is fixed
 at 5 mm/s² and is intentionally absent from the webpage.
 
-The coordinate uses provisional 100 steps/mm. Before accepting dimensional
-accuracy, compare a known STEP-pulse count with a DRO-measured displacement and
-update the constant if needed.
+The coordinate uses 251.96850394 pulses/mm. Confirm it empirically with a short
+known pulse count and DRO-measured displacement in both directions before
+accepting dimensional accuracy. Changing DM542T SW5-SW8 invalidates it.
 
 The red **SOFTWARE E-STOP** near the top is deliberately a one-click action: it
 sends `V1 E1`, aborts bounded motion or continuous Local Velocity, and remains

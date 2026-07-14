@@ -165,38 +165,38 @@ class SimulatedStepperSourceTests(unittest.TestCase):
 class UsbStepperSourceTests(unittest.TestCase):
     FORWARD_BLOCKED = (
         '{"v":1,"t":"s","q":7,"d4":0,"d5":1,"d6":0,"d8":1,'
-        '"lp":1,"ln":0,"b":1,"r":"positive_limit","sps":0,"csps":150,"ds":1}'
+        '"lp":1,"ln":0,"b":1,"r":"positive_limit","sps":0,"csps":378,"ds":1}'
     )
     REVERSE_MOVING = (
         '{"v":1,"t":"s","q":8,"d4":0,"d5":0,"d6":0,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"none","sps":-150,"csps":150,"ds":1}'
+        '"lp":0,"ln":0,"b":0,"r":"none","sps":-378,"csps":378,"ds":1}'
     )
     STOPPED_SPEED_READY = (
         '{"v":1,"t":"s","q":9,"d4":1,"d5":0,"d6":1,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":150,"ds":1}'
+        '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":378,"ds":1}'
     )
     INVERTED_REVERSE_MOVING = (
         '{"v":1,"t":"s","q":10,"d4":0,"d5":0,"d6":0,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"none","sps":150,"csps":150,"ds":-1}'
+        '"lp":0,"ln":0,"b":0,"r":"none","sps":378,"csps":378,"ds":-1}'
     )
     POSITION_LOCAL_OFF = (
         '{"v":1,"t":"s","q":20,"d4":1,"d5":0,"d6":1,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":150,"ds":1,'
+        '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":378,"ds":1,'
         '"m":0,"h":0,"a":1,"e":0,"mv":0,"st":0,"p":0,"g":0,"c":0}'
     )
     WEB_UNHOMED_REVERSE_ARMED = (
         '{"v":1,"t":"s","q":21,"d4":0,"d5":0,"d6":1,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":150,"ds":1,'
+        '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":378,"ds":1,'
         '"m":1,"h":0,"a":1,"e":0,"mv":0,"st":2,"p":0,"g":0,"c":0}'
     )
     WEB_READY_FORWARD_ARMED = (
         '{"v":1,"t":"s","q":22,"d4":0,"d5":1,"d6":1,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":150,"ds":1,'
+        '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":378,"ds":1,'
         '"m":1,"h":1,"a":1,"e":0,"mv":0,"st":5,"p":1000,"g":1000,"c":0}'
     )
     ESTOP_LOCAL_ON = (
         '{"v":1,"t":"s","q":23,"d4":0,"d5":1,"d6":1,"d8":1,'
-        '"lp":0,"ln":0,"b":1,"r":"emergency_stop","sps":0,"csps":150,"ds":1,'
+        '"lp":0,"ln":0,"b":1,"r":"emergency_stop","sps":0,"csps":378,"ds":1,'
         '"m":0,"h":0,"a":1,"e":1,"mv":0,"st":9,"p":0,"g":0,"c":0}'
     )
 
@@ -215,7 +215,7 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertTrue(status["stepper_speed_command_capable"])
         self.assertTrue(status["stepper_direction_command_capable"])
         self.assertEqual(status["stepper_direction_mapping"], "normal")
-        self.assertEqual(status["stepper_command_speed_mm_s"], 1.5)
+        self.assertEqual(status["stepper_command_speed_mm_s"], 1.5002)
 
     def test_decodes_reverse_motion_away_from_positive_limit(self) -> None:
         status = UsbStepperSource.decode_status_line(self.REVERSE_MOVING)
@@ -225,7 +225,7 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertFalse(status["stepper_positive_limit_latched"])
         self.assertFalse(status["stepper_blocked"])
         self.assertTrue(status["stepper_moving"])
-        self.assertEqual(status["stepper_speed_mm_s"], -1.5)
+        self.assertEqual(status["stepper_speed_mm_s"], -1.5002)
 
     def test_inverted_electrical_sign_preserves_logical_reverse_status(self) -> None:
         status = UsbStepperSource.decode_status_line(
@@ -234,7 +234,7 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertEqual(status["stepper_direction_mapping"], "inverted")
         self.assertEqual(status["stepper_manual_direction"], "reverse")
         self.assertEqual(status["stepper_direction"], "negative")
-        self.assertEqual(status["stepper_speed_mm_s"], -1.5)
+        self.assertEqual(status["stepper_speed_mm_s"], -1.5002)
 
     def test_decodes_mode_and_suppresses_open_loop_coordinates(self) -> None:
         status = UsbStepperSource.decode_status_line(
@@ -269,7 +269,7 @@ class UsbStepperSourceTests(unittest.TestCase):
             '{"v":2,"t":"s"}',
             self.FORWARD_BLOCKED.replace('"d6":0', '"d6":2'),
             self.FORWARD_BLOCKED.replace('"sps":0', '"sps":"fast"'),
-            self.FORWARD_BLOCKED.replace('"csps":150', '"csps":1001'),
+            self.FORWARD_BLOCKED.replace('"csps":378', '"csps":2521'),
             self.FORWARD_BLOCKED.replace('"ds":1', '"ds":0'),
             self.WEB_READY_FORWARD_ARMED.replace('"st":5', '"st":10'),
             self.WEB_READY_FORWARD_ARMED.replace('"p":1000', '"p":true'),
@@ -319,7 +319,7 @@ class UsbStepperSourceTests(unittest.TestCase):
             os.write(master_fd, (self.STOPPED_SPEED_READY + "\r\n").encode())
             self.assertIsNotNone(source.poll(0.1))
             source.set_speed(3.25)
-            self.assertEqual(os.read(master_fd, 32), b"V1 S325\n")
+            self.assertEqual(os.read(master_fd, 32), b"V1 S819\n")
             source.set_direction_mapping(True)
             self.assertEqual(os.read(master_fd, 32), b"V1 D1\n")
 
@@ -363,7 +363,7 @@ class UsbStepperSourceTests(unittest.TestCase):
             )
             self.assertIsNotNone(source.poll(0.2))
             source.move(-2.5, 3.25, "unreferenced-command")
-            self.assertEqual(os.read(master_fd, 64), b"V1 G-250,325,1\n")
+            self.assertEqual(os.read(master_fd, 64), b"V1 G-630,819,1\n")
             source.home()
             self.assertEqual(os.read(master_fd, 32), b"V1 H\n")
 
@@ -373,7 +373,7 @@ class UsbStepperSourceTests(unittest.TestCase):
             )
             self.assertIsNotNone(source.poll(0.3))
             source.move(2.5, 3.25, "operator-command")
-            self.assertEqual(os.read(master_fd, 64), b"V1 G250,325,2\n")
+            self.assertEqual(os.read(master_fd, 64), b"V1 G630,819,2\n")
             source.stop()
             self.assertEqual(os.read(master_fd, 32), b"V1 X\n")
         finally:
@@ -458,7 +458,7 @@ class NetworkStepperSourceTests(unittest.TestCase):
         source = NetworkStepperSource(f"http://{host}:{port}", timeout=0.5)
         initial = UsbStepperSourceTests.POSITION_LOCAL_OFF[:-1] + ',"o":0}'
         updated = initial.replace('"q":20', '"q":21').replace(
-            '"csps":150', '"csps":325'
+            '"csps":378', '"csps":819'
         ).replace('"o":0', '"o":2')
         received: list[bytes] = []
         try:
@@ -488,18 +488,18 @@ class NetworkStepperSourceTests(unittest.TestCase):
             source.set_speed(3.25)
             responder.join(timeout=1.0)
             self.assertFalse(responder.is_alive())
-            self.assertEqual(received, [b"V1 S325\n"])
+            self.assertEqual(received, [b"V1 S819\n"])
 
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline:
                 source.poll(elapsed)
                 elapsed += 0.1
                 status = source.status()
-                if status.get("stepper_command_speed_mm_s") == 3.25:
+                if status.get("stepper_command_speed_mm_s") == 3.2504:
                     break
                 time.sleep(0.02)
             status = source.status()
-            self.assertEqual(status["stepper_command_speed_mm_s"], 3.25)
+            self.assertEqual(status["stepper_command_speed_mm_s"], 3.2504)
             self.assertEqual(
                 status["stepper_control_owner"],
                 "manual_d4_d5+network_control",
@@ -745,7 +745,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 status = (
                     '{"v":1,"t":"s","q":21,"d4":1,"d5":0,"d6":1,"d8":1,'
                     '"lp":0,"ln":0,"b":1,"r":"emergency_stop","sps":0,'
-                    '"csps":150,"ds":1,"m":0,"h":0,"a":1,"e":1,'
+                    '"csps":378,"ds":1,"m":0,"h":0,"a":1,"e":1,'
                     '"mv":0,"st":9,"p":0,"g":0,"c":0}\r\n'
                 )
                 os.write(master_fd, status.encode())
@@ -765,7 +765,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 status = (
                     '{"v":1,"t":"s","q":22,"d4":1,"d5":0,"d6":1,"d8":1,'
                     '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,'
-                    '"csps":150,"ds":1,"m":0,"h":0,"a":1,"e":0,'
+                    '"csps":378,"ds":1,"m":0,"h":0,"a":1,"e":0,'
                     '"mv":0,"st":0,"p":0,"g":0,"c":0}\r\n'
                 )
                 os.write(master_fd, status.encode())
@@ -787,7 +787,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
         port = os.ttyname(slave_fd)
         stopped_status = (
             '{"v":1,"t":"s","q":9,"d4":1,"d5":0,"d6":1,"d8":1,'
-            '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":150,"ds":1}\r\n'
+            '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":378,"ds":1}\r\n'
         )
         runtime = DashboardRuntime(
             scenario="healthy",
@@ -825,7 +825,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 confirmed_status = (
                     '{"v":1,"t":"s","q":10,"d4":1,"d5":0,"d6":1,"d8":1,'
                     '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,'
-                    '"csps":400,"ds":1}\r\n'
+                    '"csps":1008,"ds":1}\r\n'
                 )
                 os.write(master_fd, confirmed_status.encode())
 
@@ -834,11 +834,11 @@ class UsbStepperDashboardTests(unittest.TestCase):
             payload = runtime.set_stepper_speed({"speed_mm_s": 4.0})
             responder.join(timeout=1.0)
             self.assertFalse(responder.is_alive())
-            self.assertEqual(speed_command, [b"V1 S400\n"])
+            self.assertEqual(speed_command, [b"V1 S1008\n"])
             self.assertTrue(payload["confirmed"])
             self.assertEqual(
                 payload["sample"]["stepper_command_speed_mm_s"],
-                4.0,
+                4.0005,
             )
             self.assertFalse(payload["stepper"]["stepper_command_capable"])
             self.assertTrue(
@@ -852,7 +852,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 confirmed_status = (
                     '{"v":1,"t":"s","q":11,"d4":1,"d5":0,"d6":1,"d8":1,'
                     '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,'
-                    '"csps":400,"ds":-1}\r\n'
+                    '"csps":1008,"ds":-1}\r\n'
                 )
                 os.write(master_fd, confirmed_status.encode())
 
@@ -914,7 +914,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 mode_command.append(os.read(master_fd, 32))
                 status = (
                     '{"v":1,"t":"s","q":21,"d4":1,"d5":0,"d6":1,"d8":1,'
-                    '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":150,"ds":1,'
+                    '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":378,"ds":1,'
                     '"m":1,"h":0,"a":1,"mv":0,"st":2,"p":0,"g":0,"c":0}\r\n'
                 )
                 os.write(master_fd, status.encode())
@@ -932,7 +932,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
 
             armed_reverse = (
                 '{"v":1,"t":"s","q":22,"d4":0,"d5":0,"d6":1,"d8":1,'
-                '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":150,"ds":1,'
+                '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":378,"ds":1,'
                 '"m":1,"h":0,"a":1,"mv":0,"st":2,"p":0,"g":0,"c":0}\r\n'
             )
             os.write(master_fd, armed_reverse.encode())
@@ -949,7 +949,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 home_command.append(os.read(master_fd, 32))
                 status = (
                     '{"v":1,"t":"s","q":23,"d4":0,"d5":0,"d6":1,"d8":1,'
-                    '"lp":0,"ln":0,"b":0,"r":"none","sps":-1,"csps":150,"ds":1,'
+                    '"lp":0,"ln":0,"b":0,"r":"none","sps":-1,"csps":378,"ds":1,'
                     '"m":1,"h":0,"a":1,"mv":1,"st":3,"p":0,"g":0,"c":1}\r\n'
                 )
                 os.write(master_fd, status.encode())
@@ -971,7 +971,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
             # operator magnitude into a negative low-level step delta.
             ready_reverse = (
                 '{"v":1,"t":"s","q":24,"d4":0,"d5":0,"d6":1,"d8":1,'
-                '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":150,"ds":1,'
+                '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":378,"ds":1,'
                 '"m":1,"h":0,"a":1,"mv":0,"st":5,"p":10000,"g":10000,"c":0}\r\n'
             )
             os.write(master_fd, ready_reverse.encode())
@@ -988,7 +988,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 move_command.append(os.read(master_fd, 64))
                 status = (
                     '{"v":1,"t":"s","q":25,"d4":0,"d5":0,"d6":1,"d8":1,'
-                    '"lp":0,"ln":0,"b":0,"r":"none","sps":-1,"csps":200,"ds":1,'
+                    '"lp":0,"ln":0,"b":0,"r":"none","sps":-1,"csps":504,"ds":1,'
                     '"m":1,"h":0,"a":1,"mv":1,"st":4,"p":10000,"g":9750,"c":1}\r\n'
                 )
                 os.write(master_fd, status.encode())
@@ -1004,7 +1004,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
             )
             responder.join(timeout=1.0)
             self.assertFalse(responder.is_alive())
-            self.assertEqual(move_command, [b"V1 G-250,200,1\n"])
+            self.assertEqual(move_command, [b"V1 G-630,504,1\n"])
             self.assertEqual(payload["travel_mm"], 2.5)
             self.assertEqual(payload["resolved_direction"], "reverse")
             self.assertEqual(payload["signed_distance_mm"], -2.5)

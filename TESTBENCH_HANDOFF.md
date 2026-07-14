@@ -148,6 +148,11 @@ The service is enabled at boot, a Linux restart returned synchronized status
 without an SSH login, and `GL-MT3000-b3a` is stored for the next power cycle.
 Use `provision_yun.sh` for one-time deployment/network changes and
 `run_lan_dashboard.sh` for ordinary operation.
+The uploaded firmware and laptop adapter now use 251.96850394 pulses/mm. That
+comes from the motor datasheet's 0.00396875 mm/full-step value and the observed
+DM542T SW5-SW8 all-ON 200-pulse/rev setting; SW4 is only the standstill-current
+selector. Stopped post-upload status reports `csps:378` for the 1.5 mm/s
+default. A repeated DRO distance check and high-rate smoothness test remain.
 Do not represent the stepper as motion-qualified until the remaining
 ownership/E-STOP checklist and
 the moving jitter/latency/restart/disconnect checks pass. The custom service

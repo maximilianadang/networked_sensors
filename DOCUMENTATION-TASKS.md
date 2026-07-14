@@ -158,3 +158,7 @@ translate as:
 - [x] **D22 - document Yún cold-start operation.** Add one-time provisioning
       and daily dashboard commands, record physical boot-service/key evidence,
       and keep target-LAN association separate from completed AsteraMesh checks.
+- [x] **D23 - document the linear pulse calibration.** Tie the motor datasheet's
+      0.00396875 mm/full-step value to the photographed DM542T all-ON SW5-SW8
+      200-pulse/rev setting, update pulse-domain contracts, and retain a DRO
+      verification gate.

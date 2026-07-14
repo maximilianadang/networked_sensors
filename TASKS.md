@@ -213,7 +213,7 @@ when runnable behavior changes.
     direction, and D6/D8 remain authoritative directional limits.
   - Accept only a positive 0.1..10.0 mm/s speed magnitude and only while D4 is
     OFF; changing the setpoint must never itself emit STEP pulses.
-  - Use a short versioned command (`V1 S10..1000` steps/s) so USB parsing remains
+  - Use a short versioned command (`V1 S25..2520` pulses/s) so USB parsing remains
     bounded inside the high-frequency firmware loop.
   - Report configured speed separately from effective signed speed so the page
     can distinguish a stopped 3 mm/s setpoint from actual zero motion.
@@ -319,8 +319,8 @@ when runnable behavior changes.
     application authentication and must never be router-forwarded.
   - Queue a compact command for the ATmega instead of performing motion inside
     the HTTP request handler.
-  - Remove the official example's 50 ms loop delay; at the current 150 steps/s,
-    a step can be due every 6.67 ms.
+  - Remove the official example's 50 ms loop delay; at the calibrated default
+    378 pulses/s, a pulse can be due every 2.65 ms.
   - Measure command-processing latency and step-pulse jitter while HTTP/status
     traffic is active.
   - Ensure Linux restart, Bridge failure, malformed requests, duplicate request
@@ -381,11 +381,11 @@ when runnable behavior changes.
   - Test with the load uncoupled or otherwise made safe.
   - Verify that boot, dashboard connection, Linux restart, and laptop disconnect
     never create a step pulse or unexpected movement.
-  - Verify local enable and each normally-closed limit, including broken-wire
-    behavior.
+  - Verify local enable and each installed normally-open limit, retaining the
+    known fact that a broken wire looks clear rather than fail-safe.
   - Verify direction signs from webpage -> API -> ATmega -> physical travel.
-  - Measure real distance over repeated positive/negative moves and correct
-    `STEPS_PER_MM` if required.
+  - Verify the documented 251.96850394 pulses/mm over repeated DRO-measured
+    positive/negative moves and refine it if required.
   - Establish demonstrated speed and acceleration limits below stall or missed
     step behavior.
   - Test Stop at minimum and maximum approved speeds.

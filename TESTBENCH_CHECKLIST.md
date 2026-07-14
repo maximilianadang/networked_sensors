@@ -199,9 +199,10 @@ Before using the laptop supervisor as the primary logger:
 - Confirm the operator page does not present Homed, Position, Target, or
   Remaining. Confirm USB/API position fields are null and any legacy homed flag
   is not consulted before Move.
-- Do not accept dimensional accuracy from the presumed 100 steps/mm. Count
-  commanded STEP pulses over a DRO-measured displacement, compute pulses/mm,
-  update the firmware if needed, and repeat both directions.
+- Confirm DM542T SW5-SW8 remain all ON (200 pulses/revolution) and SW4 is the
+  separate standstill-current switch. With that setting, verify the datasheet
+  conversion of 0.00396875 mm/pulse, or 251.96850394 pulses/mm, using a known
+  pulse count and DRO-measured displacement in both directions.
 - Acceleration must not appear as an operator-adjustable field; it remains the
   source-reviewed fixed 5 mm/s² provisional firmware value.
 

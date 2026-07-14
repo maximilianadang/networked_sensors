@@ -300,7 +300,7 @@ closed. The runbook and checklist state those limits explicitly.
 distance control.
 
 **Applied:** added T4B to the ordered task plan; documented the D4-off guard,
-`V1 S10..1000` firmware command, 0.1..10.0 mm/s provisional range, configured
+the original `V1 S10..1000` firmware command, 0.1..10.0 mm/s provisional range, configured
 versus effective speed, `/api/stepper/speed`, and the fact that D4/D5 and both
 limits retain motion authority. Updated the generated protocol, runbook,
 checklist, development, and integration surfaces in the same change.
@@ -343,7 +343,7 @@ Yún compile, verified upload, and stopped USB status echo pass. That live echo
 showed Local Velocity, D4 OFF, D5 Forward, D6/D8 clear, boot armed, null
 position/target/remaining, and zero effective speed. Deliberate motion checks remain.
 Neither the measured 137.18 mm stroke nor the presumed motor/screw figures
-independently validate 100 steps/mm; a pulse-count-versus-DRO check remains
+independently validate the then-provisional 100 steps/mm; a pulse-count-versus-DRO check remained
 required before distance accuracy is accepted.
 
 **Operator correction:** the page and `/api/stepper/move` now accept positive
@@ -464,3 +464,18 @@ passwordless maintenance access without operator SSH. The production
 `GL-MT3000-b3a` configuration is stored for the next power cycle. Its DHCP
 address and target-LAN reachability are not claimed until observed from a
 client on that LAN. Motion qualification remains unchanged.
+
+## Step D23 - calibrated motor pulse scale documented
+
+**Direction given:** use the complete linear-stepper datasheet and a clear
+driver-switch photograph to correct webpage speed and distance units.
+
+**Applied:** documented that 0.00396875 mm is the travel per 1.8-degree full
+step, SW5-SW8 all ON select 200 DM542T pulses/revolution, and the visibly
+different SW4 controls standstill current rather than microstepping. Updated
+the current firmware/laptop contract to 251.96850394 pulses/mm, `V1 S25..2520`,
+378 pulses/s default, and matching stroke/acceleration conversions.
+
+**Evidence boundary:** compile/upload and stopped `csps:378` status pass. The
+documentation does not yet claim DRO dimensional accuracy or reliable 10 mm/s
+operation; both remain staged physical checks.

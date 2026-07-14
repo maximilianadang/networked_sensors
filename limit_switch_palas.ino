@@ -3,11 +3,14 @@
 AccelStepper stepper(AccelStepper::DRIVER, 3, 2);  // STEP=D3, DIR=D2
 
 // --- Mechanism calibration ---
-// PROVISIONAL pulse calibration: 200 pulses/rev and a presumed 2 mm lead give
-// 100 steps/mm. The signed-distance engine uses this value, but it is not yet
-// physically accepted: count the emitted STEP pulses during a DRO-measured
-// displacement and update STEPS_PER_MM if those measurements disagree.
-const float STEPS_PER_MM = 100.0;
+// CALIBRATED pulse conversion (2026-07-13): the mechanism advances
+// 0.00396875 mm for each pulse accepted by the DM542T PUL input. This must be
+// travel per DRIVER PULSE, not travel per native motor full-step; changing the
+// DM542T microstep switches changes this conversion. The reciprocal is
+// 251.96850394 pulses/mm. Keep this exact physical quantity alongside the
+// reciprocal used by the command engine so the unit convention is explicit.
+const float MM_PER_DRIVER_PULSE = 0.00396875;
+const float STEPS_PER_MM = 1.0 / MM_PER_DRIVER_PULSE;
 
 // PHYSICAL STROKE CALIBRATION (2026-07-13): an external DRO measured
 // 137.18 mm between the two installed magnetic-limit trip positions:
@@ -16,21 +19,23 @@ const float STEPS_PER_MM = 100.0;
 // Home optionally approaches D8 and zeroes the diagnostic pulse counter. The
 // measured stroke bounds one relative command and the Home search, but no
 // absolute open-loop coordinate or software margin authorizes motion. D6/D8
-// are the directional travel stops even if the provisional step/mm is wrong.
+// remain the directional travel stops if later DRO testing refines pulses/mm.
 const float MEASURED_LIMIT_TO_LIMIT_TRAVEL_MM = 137.18;
-const long MAX_TRAVEL_STEPS = 13718L;
-const long MAX_HOME_SEARCH_STEPS = MAX_TRAVEL_STEPS + 500L;
+const long MAX_TRAVEL_STEPS = 34565L;       // nearest pulse to 137.18 mm
+const long HOME_SEARCH_MARGIN_STEPS = 1260L;  // approximately 5 mm
+const long MAX_HOME_SEARCH_STEPS =
+    MAX_TRAVEL_STEPS + HOME_SEARCH_MARGIN_STEPS;
 
 // --- Fixed motion settings ---
 // Acceleration is intentionally a firmware setting rather than an operator
 // field. The page controls speed and distance, while this conservative value
 // stays reviewable in source. The DM542T has already run smoothly with the
 // existing wiring; setMinPulseWidth(5) preserves a comfortably wide STEP pulse.
-const long MIN_SPEED_SPS = 10L;       // 0.1 mm/s at provisional calibration
-const long MAX_SPEED_SPS = 1000L;     // 10.0 mm/s, still a provisional ceiling
-const long DEFAULT_SPEED_SPS = 150L;  // 1.5 mm/s
-const long HOME_SPEED_SPS = 150L;     // fixed conservative homing speed
-const float FIXED_ACCELERATION_SPS2 = 500.0;  // 5 mm/s^2 provisionally
+const long MIN_SPEED_SPS = 25L;        // nearest pulse rate to 0.1 mm/s
+const long MAX_SPEED_SPS = 2520L;      // nearest pulse rate to 10.0 mm/s
+const long DEFAULT_SPEED_SPS = 378L;   // nearest pulse rate to 1.5 mm/s
+const long HOME_SPEED_SPS = 378L;      // fixed conservative homing speed
+const float FIXED_ACCELERATION_SPS2 = 1260.0;  // approximately 5 mm/s^2
 long targetSpeedSps = DEFAULT_SPEED_SPS;
 
 // --- Electrical direction mapping ---
@@ -117,7 +122,7 @@ const char *lastCommandError = "none";
 
 // --- USB command/status contract ---
 // Commands are newline-terminated ASCII:
-//   V1 S10..1000                 configure speed while D4 is OFF
+//   V1 S25..2520                 configure speed while D4 is OFF
 //   V1 D0|1                      normal/inverted DIR while D4 is OFF
 //   V1 M0|1                      Local Velocity / Web Position, D4 OFF
 //   V1 H                         home to D8 in Web Position mode
@@ -317,7 +322,7 @@ void startMoveCommand(long deltaSteps, long speedSps, long commandId) {
     return;
   }
   if (speedSps < MIN_SPEED_SPS || speedSps > MAX_SPEED_SPS) {
-    rejectCommand(F("speed must be 10..1000 steps/s."));
+    rejectCommand(F("speed must be 25..2520 steps/s."));
     return;
   }
   if (commandId < 1 || commandId > 65535L) {
@@ -418,7 +423,7 @@ void processCommandBody(char *commandBuffer, CommandTransport transport) {
     }
     if (requestedSpeedSps < MIN_SPEED_SPS ||
         requestedSpeedSps > MAX_SPEED_SPS) {
-      rejectCommand(F("speed must be 10..1000 steps/s."));
+      rejectCommand(F("speed must be 25..2520 steps/s."));
       return;
     }
     targetSpeedSps = requestedSpeedSps;
