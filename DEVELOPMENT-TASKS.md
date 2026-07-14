@@ -93,6 +93,12 @@ data acquisition and operator workflow:
   - [x] Replace the provisional 100 pulses/mm conversion with the documented
     0.00396875 mm/pulse at the photographed 200-pulse/rev driver setting;
     compile/upload and verify stopped default `csps: 378`.
+  - [x] Publish a 250 ms emitted-STEP measurement as `aps`, decode it into
+    pulses/s and mm/s, and show it separately from configured/scheduled speed;
+    desktop tests and the 75%-flash/55%-RAM target compile pass.
+  - [x] Upload the instrumented image with verification and confirm stopped
+    `aps:0`, D4 OFF, clear limits, and zero motion over USB.
+  - [ ] Compare its live 3.0/5.0 mm/s results with the DRO.
   - [ ] Complete staged 1.5/3.0/5.0 mm/s motion-away checks.
 - [x] **Step 5D - D4-off electrical direction mapping.**
   - [x] Add `V1 D0|1`, mapping status/capability, the guarded USB adapter/API,

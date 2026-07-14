@@ -56,6 +56,9 @@ when runnable behavior changes.
   absolute software-position envelope.
 - Acceleration is fixed in firmware at a provisional 5 mm/s² rather than being
   an operator-adjustable webpage/API field.
+- Firmware pulse instrumentation measures AccelStepper's emitted-step counter
+  over a 250 ms window. It distinguishes configured/scheduled rate from actual
+  D3 pulse attempts, but it is not driver-acceptance or piston-position feedback.
 - The standalone sketch now reads both limits, reports raw switch-level changes
   over Serial, and blocks only motion farther into the corresponding end.
 - The Yún Linux side is configured as a WPA2 client of `GL-MT3000-b3a` using
@@ -186,7 +189,8 @@ when runnable behavior changes.
     movement behavior.
   - Report D4 and D5 raw/interpreted states, D6/D8 raw/active/latched states,
     requested direction, whether STEP output is blocked, an explicit blocked
-    reason, effective speed, and a monotonically increasing sequence number.
+    reason, scheduled speed, measured emitted STEP rate, and a monotonically
+    increasing sequence number.
   - Add `--stepper-source usb` and `--stepper-port` to the laptop supervisor;
     the webpage remains at `localhost` and the laptop does not need the bench
     LAN or Yún Wi-Fi for this mode.
@@ -217,6 +221,9 @@ when runnable behavior changes.
     bounded inside the high-frequency firmware loop.
   - Report configured speed separately from effective signed speed so the page
     can distinguish a stopped 3 mm/s setpoint from actual zero motion.
+  - Instrument emitted STEP pulses separately from the requested AccelStepper
+    rate so the 5 mm/s qualification measures firmware output instead of
+    inferring it from the setpoint or DRO alone.
   - Add a separate `/api/stepper/speed` action and Apply Manual Speed button;
     keep USB Move and Stop disabled until T5.
   - Verification: unit and pseudo-terminal command tests, Yún compile, upload
@@ -229,7 +236,9 @@ when runnable behavior changes.
     tests are implemented. The 48%-flash/18%-RAM build was uploaded with
     verification under the motor-safe procedure. The live page advertises speed
     capability and echoed a D4-off 3.0 mm/s setpoint while effective speed stayed
-    zero. Physical 1.5/3.0/5.0 mm/s travel checks remain pending.
+    zero. The later 250 ms emitted-STEP instrument compiles at 75% flash/55%
+    RAM, is uploaded, and reports stopped `aps:0`; physical 1.5/3.0/5.0 mm/s
+    measured-pulse/DRO travel checks remain pending.
 
 - [ ] **ACTIVE - T4C - allow guarded electrical direction mapping.**
   - Add Normal/Inverted mapping to the existing page for correcting the

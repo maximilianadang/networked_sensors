@@ -794,7 +794,8 @@ INDEX_HTML = r"""<!doctype html>
                 <dt>Source / owner</dt><dd id="stepperOwner">--</dd>
                 <dt>Control mode</dt><dd id="stepperModeStatus">--</dd>
                 <dt>Configured speed</dt><dd id="stepperConfiguredSpeed">--</dd>
-                <dt>Effective speed</dt><dd id="stepperEffectiveSpeed">--</dd>
+                <dt>Scheduled speed</dt><dd id="stepperEffectiveSpeed">--</dd>
+                <dt>Measured STEP output</dt><dd id="stepperMeasuredSpeed">--</dd>
                 <dt>Command</dt><dd id="stepperCommand">--</dd>
               </dl>
             </section>
@@ -844,7 +845,7 @@ INDEX_HTML = r"""<!doctype html>
       "stepperForm", "stepperDistanceField", "stepperDistance", "stepperSpeed", "stepperSpeedLabel", "stepperControlMode", "stepperControlModeLabel", "stepperDirectionMapping", "stepperDirectionMappingLabel",
       "stepperCommandField", "stepperCommandInput", "stepperMove", "stepperHome", "stepperStop", "stepperApplySpeed", "stepperMessage",
       "stepperState",
-      "stepperConfiguredSpeed", "stepperEffectiveSpeed", "stepperCommand", "stepperOwner", "stepperModeStatus", "stepperLocal",
+      "stepperConfiguredSpeed", "stepperEffectiveSpeed", "stepperMeasuredSpeed", "stepperCommand", "stepperOwner", "stepperModeStatus", "stepperLocal",
       "stepperD5Label", "stepperManualDirection", "stepperDirectionStatus", "stepperPositiveLimit", "stepperNegativeLimit",
       "stepperBlocked", "stepperSequence", "stepperTransport"
     ]) {
@@ -984,6 +985,10 @@ INDEX_HTML = r"""<!doctype html>
       text("stepperModeStatus", webPositionMode ? "Web Position" : controlMode === "local_velocity" ? "Local Velocity" : "--");
       text("stepperConfiguredSpeed", `${numberValue("stepper_command_speed_mm_s", 3)} mm/s`);
       text("stepperEffectiveSpeed", `${numberValue("stepper_speed_mm_s", 3)} mm/s`);
+      const pulseMeasurementCapable = latest.stepper_pulse_measurement_capable === true;
+      text("stepperMeasuredSpeed", pulseMeasurementCapable
+        ? `${numberValue("stepper_measured_speed_mm_s", 3)} mm/s (${numberValue("stepper_measured_pulse_rate_sps", 0)} pulses/s)`
+        : "Unavailable — firmware update required");
       text("stepperCommand", latest.stepper_command_id || "--");
       text("stepperLocal", `${localEnabled ? (webPositionMode ? "Armed" : "Running") : (webPositionMode ? "Disarmed" : "Stopped")} / ${latest.stepper_d4_raw || "--"}`);
       text("stepperD5Label", webPositionMode ? "Travel direction (D5)" : "Manual direction (D5)");

@@ -144,6 +144,19 @@ const unsigned long STATUS_MOTION_MS = 100UL;
 unsigned long statusSequence = 0;
 bool statusDirty = true;
 
+// --- Emitted STEP instrumentation ---
+// AccelStepper's speed() reports its scheduled rate, not how often run()/
+// runSpeed() actually reached the STEP output. Measure the change in its
+// emitted-step counter over a fixed window so the dashboard can distinguish a
+// requested rate from the pulses the cooperative loop really generated. This
+// is still an open-loop electrical measurement: it proves D3 pulse attempts,
+// not DM542T acceptance or physical piston travel.
+const unsigned long PULSE_RATE_WINDOW_US = 250000UL;
+long measuredPulseRateSps = 0L;
+long pulseRateWindowStartPosition = 0L;
+unsigned long pulseRateWindowStartUs = 0UL;
+bool pulseRateWindowMoving = false;
+
 const byte USB_COMMAND_BUFFER_SIZE = 48;
 char usbCommandBuffer[USB_COMMAND_BUFFER_SIZE];
 byte usbCommandLength = 0;
@@ -636,6 +649,40 @@ void pollNetworkCommands() {
   }
 }
 
+void updateMeasuredPulseRate(bool moving) {
+  unsigned long nowUs = micros();
+  long currentPosition = stepper.currentPosition();
+
+  if (!moving) {
+    measuredPulseRateSps = 0L;
+    pulseRateWindowStartPosition = currentPosition;
+    pulseRateWindowStartUs = nowUs;
+    pulseRateWindowMoving = false;
+    return;
+  }
+
+  if (!pulseRateWindowMoving) {
+    pulseRateWindowStartPosition = currentPosition;
+    pulseRateWindowStartUs = nowUs;
+    pulseRateWindowMoving = true;
+    return;
+  }
+
+  unsigned long elapsedUs = nowUs - pulseRateWindowStartUs;
+  if (elapsedUs < PULSE_RATE_WINDOW_US) return;
+
+  long signedPulseCount = currentPosition - pulseRateWindowStartPosition;
+  unsigned long pulseCount = signedPulseCount < 0
+      ? (unsigned long)(-signedPulseCount)
+      : (unsigned long)signedPulseCount;
+  // 64-bit intermediate prevents overflow if other work delays this window.
+  unsigned long long scaledPulses =
+      (unsigned long long)pulseCount * 1000000ULL + elapsedUs / 2UL;
+  measuredPulseRateSps = (long)(scaledPulses / elapsedUs);
+  pulseRateWindowStartPosition = currentPosition;
+  pulseRateWindowStartUs = nowUs;
+}
+
 bool reportMachineStatus(
     int runRaw,
     int directionRaw,
@@ -654,7 +701,7 @@ bool reportMachineStatus(
       sizeof(line),
       "{\"v\":1,\"t\":\"s\",\"q\":%lu,\"d4\":%d,\"d5\":%d,"
       "\"d6\":%d,\"d8\":%d,\"lp\":%d,\"ln\":%d,\"b\":%d,"
-      "\"r\":\"%s\",\"sps\":%ld,\"csps\":%ld,\"ds\":%d,"
+      "\"r\":\"%s\",\"sps\":%ld,\"csps\":%ld,\"aps\":%ld,\"ds\":%d,"
       "\"m\":%d,\"h\":%d,\"a\":%d,\"e\":%d,\"mv\":%d,\"st\":%d,\"p\":%ld,"
       "\"g\":%ld,\"c\":%u,\"o\":%d}",
       ++statusSequence,
@@ -668,6 +715,7 @@ bool reportMachineStatus(
       reason,
       electricalSpeedSps,
       targetSpeedSps,
+      measuredPulseRateSps,
       directionSign,
       (int)controlMode,
       positionHomed ? 1 : 0,
@@ -836,6 +884,8 @@ void loop() {
       statusReason = motionReason;
     }
   }
+
+  updateMeasuredPulseRate(moving);
 
   unsigned long statusSignature =
       ((unsigned long)(runRaw == HIGH) << 0) |

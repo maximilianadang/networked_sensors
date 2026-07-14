@@ -153,6 +153,11 @@ comes from the motor datasheet's 0.00396875 mm/full-step value and the observed
 DM542T SW5-SW8 all-ON 200-pulse/rev setting; SW4 is only the standstill-current
 selector. Stopped post-upload status reports `csps:378` for the 1.5 mm/s
 default. A repeated DRO distance check and high-rate smoothness test remain.
+The next firmware revision adds optional compact status field `aps`, measuring
+the emitted STEP-counter change over 250 ms. The laptop presents this separately
+from configured and scheduled speed. Its desktop contract and Yún compile pass,
+and the verified USB upload reports stopped `aps:0`; it is electrical open-loop
+evidence rather than DM542T-acceptance or piston feedback.
 Do not represent the stepper as motion-qualified until the remaining
 ownership/E-STOP checklist and
 the moving jitter/latency/restart/disconnect checks pass. The custom service

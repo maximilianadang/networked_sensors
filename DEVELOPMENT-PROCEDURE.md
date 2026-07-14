@@ -824,3 +824,32 @@ RAM. Upload passed with D4 OFF and zero motion. Fresh USB heartbeat reports the
 new default `csps:378`, zero effective speed, D6 active/latched, and no owner.
 Desktop contract tests and the generated protocol check pass. A measured
 short-distance DRO comparison and staged 2520-pulse/s smoothness test remain.
+
+## Step 5I - emitted STEP-rate instrumentation
+
+**Direction given:** stop inferring the 5 mm/s shortfall and instrument the
+firmware's actual STEP output attempts.
+
+**Read/de-risk evidence:** the supplied 63-line original sketch explicitly
+limited AccelStepper to 1000 steps/s. The current calibrated 5 mm/s request is
+1260 pulses/s, while the observed approximately 4 mm/s corresponds to about
+1000 pulses/s. Existing `sps` reports the scheduled library rate and therefore
+cannot prove how often the cooperative loop reached D3.
+
+**Executed:** firmware now samples the change in AccelStepper's emitted-step
+counter over a 250 ms `micros()` window and publishes the non-negative integer
+as optional compact field `aps`. The USB/network decoder exposes capability,
+measured pulses/s, and calibrated measured mm/s. The dashboard relabels the old
+effective readout as Scheduled speed and adds Measured STEP output. Frames from
+older firmware remain valid and show the measurement as unavailable.
+
+**Boundary:** this measures software STEP pulse attempts. It does not verify
+DM542T input acceptance, motor steps, coupling behavior, or piston travel; the
+DRO comparison remains necessary.
+
+**Verified:** 40 desktop tests, Python compilation, protocol generation/check,
+and whitespace checks pass. The Yún target compiles at 21,786 bytes/75% flash
+and 1,422 bytes/55% RAM. After the Yún was reconnected at `/dev/ttyACM0`, upload
+verification passed. Fresh stopped status reports D4/D5 HIGH, D6/D8 clear,
+zero motion, `csps:378`, and the new `aps:0`. A moving pulse-rate result is not
+yet claimed.

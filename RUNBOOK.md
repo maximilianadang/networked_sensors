@@ -255,12 +255,14 @@ python3 networked_sensors/dashboard.py \
 
 Open `http://127.0.0.1:8000/`. This mode does not require the laptop to join the
 bench LAN; it can retain its normal internet Wi-Fi. It reports the physical D4
-enable, D5 manual direction, D6/D8 raw/active/latched state, configured and
-effective speed, and an explicit motion decision such as `positive_limit`.
+enable, D5 manual direction, D6/D8 raw/active/latched state, configured speed,
+scheduled speed, instrumented STEP output, and an explicit motion decision such
+as `positive_limit`.
 
 In **Local Velocity** mode, speed may be changed without starting motion:
 
-1. Put D4 in OFF; the page must show `Disabled / HIGH` and zero effective speed.
+1. Put D4 in OFF; the page must show `Disabled / HIGH`, zero scheduled speed,
+   and zero measured STEP output.
 2. Enter 0.1 through 10.0 mm/s and select **Apply Local Velocity Speed**.
 3. Wait for **Configured speed** to show the requested value.
 4. Select the safe direction with D5, then use D4 to start/stop continuous motion.
@@ -274,6 +276,16 @@ and any speed change while D4 is ON; the laptop applies the same conversion and
 checks. The 10 mm/s limit is provisional software protection, not a proven
 mechanical rating: begin at 1.5 mm/s and increase through short 3.0 and 5.0 mm/s
 travel-away checks before attempting anything faster.
+
+With the instrumented firmware, **Measured STEP output** is calculated from the
+change in AccelStepper's emitted-step counter over a 250 ms window. It shows
+both pulses/s and the corresponding magnitude in mm/s. Compare it with
+**Configured speed** and **Scheduled speed** during a continuous Local Velocity
+run. A 5 mm/s request should schedule about 1260 pulses/s; the measured field
+reveals how many D3 pulse attempts the firmware actually emitted. This remains
+open-loop electrical evidence: it does not prove that the DM542T accepted every
+pulse or that the piston travelled the converted distance, so retain the DRO
+comparison.
 
 With T4C uploaded, **Electrical direction mapping** corrects the relationship
 between logical D5 Forward/Reverse and the driver's DIR level. Put D4 OFF,

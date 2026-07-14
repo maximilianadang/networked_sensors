@@ -162,3 +162,7 @@ translate as:
       0.00396875 mm/full-step value to the photographed DM542T all-ON SW5-SW8
       200-pulse/rev setting, update pulse-domain contracts, and retain a DRO
       verification gate.
+- [x] **D24 - document emitted STEP instrumentation.** Distinguish configured,
+      scheduled, and measured emitted-pulse speed; document the optional `aps`
+      wire field, 250 ms window, dashboard display, compatibility behavior, and
+      the boundary that this is not driver or piston feedback.

@@ -401,3 +401,17 @@ bound is 34565 pulses, and fixed 5 mm/s² is approximately 1260 pulses/s². The
 target compiled at 20,782 bytes/72% flash and 1,399 bytes/54% RAM, uploaded with
 verification, and restarted stopped with D4 OFF, D6 active, zero motion, and
 `csps:378`. DRO travel and high-rate smoothness remain wet physical checks.
+
+## Step I3e - measured emitted-pulse status integrated
+
+The Yún firmware, USB/network decoder, common stepper schema, recorder stream,
+and dashboard now share optional compact field `aps`. Firmware derives it from
+the absolute AccelStepper counter change over 250 ms; adapters expose measured
+pulses/s and the calibrated mm/s magnitude separately from configured and
+scheduled speed. Older firmware remains observable with measurement capability
+false and null measured values.
+
+Forty desktop tests, the 21,786-byte/75%-flash, 1,422-byte/55%-RAM target
+compile, verified USB upload, and stopped `aps:0` status pass. The arm remains
+wet until its live 3/5 mm/s pulse measurements are compared with the external
+DRO. The field is not driver acknowledgement or mechanical feedback.

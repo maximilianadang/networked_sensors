@@ -169,7 +169,8 @@ class UsbStepperSourceTests(unittest.TestCase):
     )
     REVERSE_MOVING = (
         '{"v":1,"t":"s","q":8,"d4":0,"d5":0,"d6":0,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"none","sps":-378,"csps":378,"ds":1}'
+        '"lp":0,"ln":0,"b":0,"r":"none","sps":-378,"csps":378,'
+        '"aps":350,"ds":1}'
     )
     STOPPED_SPEED_READY = (
         '{"v":1,"t":"s","q":9,"d4":1,"d5":0,"d6":1,"d8":1,'
@@ -226,6 +227,9 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertFalse(status["stepper_blocked"])
         self.assertTrue(status["stepper_moving"])
         self.assertEqual(status["stepper_speed_mm_s"], -1.5002)
+        self.assertTrue(status["stepper_pulse_measurement_capable"])
+        self.assertEqual(status["stepper_measured_pulse_rate_sps"], 350)
+        self.assertEqual(status["stepper_measured_speed_mm_s"], 1.3891)
 
     def test_inverted_electrical_sign_preserves_logical_reverse_status(self) -> None:
         status = UsbStepperSource.decode_status_line(
@@ -271,6 +275,8 @@ class UsbStepperSourceTests(unittest.TestCase):
             self.FORWARD_BLOCKED.replace('"sps":0', '"sps":"fast"'),
             self.FORWARD_BLOCKED.replace('"csps":378', '"csps":2521'),
             self.FORWARD_BLOCKED.replace('"ds":1', '"ds":0'),
+            self.REVERSE_MOVING.replace('"aps":350', '"aps":true'),
+            self.REVERSE_MOVING.replace('"aps":350', '"aps":-1'),
             self.WEB_READY_FORWARD_ARMED.replace('"st":5', '"st":10'),
             self.WEB_READY_FORWARD_ARMED.replace('"p":1000', '"p":true'),
         )
@@ -278,6 +284,11 @@ class UsbStepperSourceTests(unittest.TestCase):
             with self.subTest(line=line):
                 with self.assertRaises(ValueError):
                     UsbStepperSource.decode_status_line(line)
+
+        legacy = UsbStepperSource.decode_status_line(self.FORWARD_BLOCKED)
+        self.assertFalse(legacy["stepper_pulse_measurement_capable"])
+        self.assertIsNone(legacy["stepper_measured_pulse_rate_sps"])
+        self.assertIsNone(legacy["stepper_measured_speed_mm_s"])
 
     def test_reads_latest_status_from_usb_like_pseudo_terminal(self) -> None:
         master_fd, slave_fd = pty.openpty()
@@ -669,6 +680,12 @@ class NetworkStepperSourceTests(unittest.TestCase):
 
 
 class UsbStepperDashboardTests(unittest.TestCase):
+    def test_dashboard_separates_scheduled_and_measured_step_output(self) -> None:
+        self.assertIn("Scheduled speed", INDEX_HTML)
+        self.assertIn('id="stepperMeasuredSpeed"', INDEX_HTML)
+        self.assertIn("stepper_measured_pulse_rate_sps", INDEX_HTML)
+        self.assertIn("stepper_measured_speed_mm_s", INDEX_HTML)
+
     def test_dashboard_exposes_and_latches_simulated_software_estop(self) -> None:
         self.assertIn('id="emergencyStop"', INDEX_HTML)
         self.assertIn('id="emergencyReset"', INDEX_HTML)

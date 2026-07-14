@@ -73,7 +73,9 @@ Progress is chronicled in `INTEGRATION-PROCEDURE.md`.
       and software-margin gates are deliberately absent; staged physical motion
       checks remain. The motor datasheet plus photographed all-ON SW5-SW8
       setting now define 251.96850394 pulses/mm; matching firmware/laptop code
-      is uploaded and stopped `csps:378` status passes.
+      is uploaded and stopped `csps:378` status passes. The backward-compatible
+      optional `aps` field and stable measured-pulse dashboard fields are now
+      uploaded and report stopped `aps:0`; moving 3/5 mm/s comparison remains.
 - [ ] **I3b5 - USB Yún software E-STOP adapter.** A mode-independent firmware
       latch, compact capability/status, exact USB commands, dashboard APIs, and
       prominent top-level stop/reset controls are implemented. Reset requires

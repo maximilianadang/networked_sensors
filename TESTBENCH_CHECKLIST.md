@@ -155,7 +155,7 @@ Before using the laptop supervisor as the primary logger:
 - Unplug USB and confirm only the stepper source becomes stale/disconnected;
   the webpage, ESP32/DXMR90 sources, and any active recording remain alive.
 - With D4 OFF, apply 1.5 mm/s and confirm Configured speed reads 1.5 mm/s while
-  Effective speed remains 0; repeat at 3.0 mm/s.
+  Scheduled speed and Measured STEP output remain 0; repeat at 3.0 mm/s.
 - With D4 ON, confirm Apply Manual Speed is disabled and a direct API request is
   rejected. A rejected request must not change the configured speed.
 - With D4 OFF, apply Normal and Inverted direction mappings and confirm each is
@@ -166,8 +166,11 @@ Before using the laptop supervisor as the primary logger:
   loads, slips, stalls, or moves farther into the hard stop; record the accepted
   mapping before any range test.
 - Run short motion-away tests at 1.5, 3.0, then 5.0 mm/s. Confirm direction,
-  smoothness, D4 stopping, and the destination limit at every stage; stop
-  escalation at the first missed step, stall, roughness, or unexpected motion.
+  smoothness, D4 stopping, and the destination limit at every stage. Record
+  Configured speed, Scheduled speed, Measured STEP pulses/s, converted measured
+  mm/s, and DRO speed. Stop escalation at the first missed step, stall,
+  roughness, or unexpected motion. The measured STEP field proves firmware D3
+  pulse attempts only, not driver acceptance or piston travel.
 - When deliberately testing legacy T4C firmware, confirm USB Move, Home, and
   Stop remain disabled rather than implying position capability.
 

@@ -354,6 +354,9 @@ class SimulatedStepperSource:
         "stepper_remaining_mm",
         "stepper_speed_mm_s",
         "stepper_command_speed_mm_s",
+        "stepper_pulse_measurement_capable",
+        "stepper_measured_pulse_rate_sps",
+        "stepper_measured_speed_mm_s",
         "stepper_acceleration_mm_s2",
         "stepper_command_id",
         "stepper_positive_limit_active",
@@ -634,6 +637,9 @@ class SimulatedStepperSource:
             "stepper_remaining_mm": round(remaining, 4),
             "stepper_speed_mm_s": round(self._velocity_mm_s, 4),
             "stepper_command_speed_mm_s": round(self._command_speed_mm_s, 4),
+            "stepper_pulse_measurement_capable": False,
+            "stepper_measured_pulse_rate_sps": None,
+            "stepper_measured_speed_mm_s": None,
             "stepper_acceleration_mm_s2": round(self._acceleration_mm_s2, 4),
             "stepper_command_id": self._command_id,
             "stepper_positive_limit_active": self._positive_limit_active,
@@ -775,6 +781,26 @@ class UsbStepperSource:
             # firmware observable, but speed commands remain disabled until a
             # T4B status containing csps proves the new firmware is running.
             configured_speed_sps = abs(speed_sps)
+
+        measured_pulse_rate_value = payload.get("aps")
+        pulse_measurement_capable = measured_pulse_rate_value is not None
+        if pulse_measurement_capable:
+            if (
+                isinstance(measured_pulse_rate_value, bool)
+                or not isinstance(measured_pulse_rate_value, int)
+                or measured_pulse_rate_value < 0
+            ):
+                raise ValueError(
+                    "USB stepper field aps must be a non-negative integer"
+                )
+            measured_pulse_rate_sps: int | None = measured_pulse_rate_value
+            measured_speed_mm_s: float | None = round(
+                measured_pulse_rate_sps / DEFAULT_STEPPER_STEPS_PER_MM,
+                4,
+            )
+        else:
+            measured_pulse_rate_sps = None
+            measured_speed_mm_s = None
 
         direction_sign_value = payload.get("ds")
         direction_command_capable = direction_sign_value is not None
@@ -954,6 +980,9 @@ class UsbStepperSource:
                 configured_speed_sps / DEFAULT_STEPPER_STEPS_PER_MM,
                 4,
             ),
+            "stepper_pulse_measurement_capable": pulse_measurement_capable,
+            "stepper_measured_pulse_rate_sps": measured_pulse_rate_sps,
+            "stepper_measured_speed_mm_s": measured_speed_mm_s,
             "stepper_acceleration_mm_s2": (
                 DEFAULT_STEPPER_ACCELERATION_MM_S2
                 if position_command_capable

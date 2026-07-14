@@ -479,3 +479,20 @@ the current firmware/laptop contract to 251.96850394 pulses/mm, `V1 S25..2520`,
 **Evidence boundary:** compile/upload and stopped `csps:378` status pass. The
 documentation does not yet claim DRO dimensional accuracy or reliable 10 mm/s
 operation; both remain staged physical checks.
+
+## Step D24 - emitted STEP instrumentation documented
+
+**Direction given:** instrument the suspected pulse-rate ceiling instead of
+guessing from the command and DRO.
+
+**Applied:** documented the optional compact `aps` field, its 250 ms emitted
+AccelStepper-counter window, backward-compatible decoder capability, stable
+measured pulses/s and mm/s schema, and the dashboard separation among
+Configured, Scheduled, and Measured STEP output. Updated protocol, runbook,
+checklist, handoff, and task surfaces in the same change.
+
+**Boundary recorded:** `aps` is software evidence that D3 pulse attempts were
+emitted. It is not closed-loop confirmation from the DM542T, motor, coupling,
+or piston. Forty desktop tests, the 75%-flash/55%-RAM Yún compile, verified USB
+upload, and stopped `aps:0` status pass; the live 3/5 mm/s DRO comparison
+remains pending.
