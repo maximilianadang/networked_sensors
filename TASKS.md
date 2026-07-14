@@ -342,8 +342,11 @@ when runnable behavior changes.
     D4-OFF, two-second idle release; Stop and E-STOP remain universal. The
     target compiles at 20,794 bytes/72% flash and 1,399 bytes/54% RAM. It was
     uploaded over `/dev/ttyACM0`; a fresh stopped USB heartbeat confirmed D4/D5
-    HIGH, D6/D8 clear, zero motion, E-STOP clear, and owner `none`. Linux-service
-    installation, LAN smoke, jitter/latency measurement, Linux restart, and
+    HIGH, D6/D8 clear, zero motion, E-STOP clear, and owner `none`. The Linux
+    service is installed on AsteraMesh at its current DHCP address; health,
+    advancing stopped status, reversible `askconsole` ownership, and an
+    expected firmware rejection pass over the physical LAN. Ownership/E-STOP
+    parity, jitter/latency measurement, Linux restart, and
     disconnect-during-motion checks remain before the gate.
 
 - [ ] **ACTIVE - T7 - harden both laptop real-Yún adapters and transport parity.**

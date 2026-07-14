@@ -29,7 +29,7 @@ Progress is chronicled in `INTEGRATION-PROCEDURE.md`.
 | DXMR90 simulator | Exists as `SimulatedDxmr90Source` | scenario controls landed | no-hardware 1 Hz stream |
 | Yún stepper simulator | `SimulatedStepperSource` and shared dashboard controls exist, including the latched software E-STOP | positive operator travel is resolved to the simulator's signed internal delta | move/stop/E-STOP, validation, limit, stale/missing, and shared-recorder smoke |
 | Yún stepper USB | Dual Local Velocity/Web Position and software E-STOP firmware are uploaded and live | localhost mode, D8-limit seek, positive travel magnitude with D5 direction, Stop, latched software E-STOP, and diagnostics | 26 tests, compile/upload/readback, fresh stopped latch/reset smoke pass; moving stops and other staged motion remain |
-| Yún stepper network | Non-blocking Serial1 firmware is uploaded/stopped USB-verified; AR9331 UART/HTTP service and `NetworkStepperSource` pass desktop loopback | physical Linux-service install and staged LAN parity | staged LAN, ownership, motor, limit, latency/jitter, and open-loop distance tests |
+| Yún stepper network | Non-blocking Serial1 firmware and AR9331 service are installed; AsteraMesh health, advancing stopped status, reversible `askconsole` ownership, and firmware rejection pass physically | staged LAN command and motion parity | ownership, E-STOP, motor, limit, latency/jitter, restart/disconnect, and open-loop distance tests |
 | Merge/clock | Exists as `SourceMerger` | stale/disconnect scenarios landed | laptop timestamp, latest-value hold, age fields |
 | Recorder/export | Disk-backed supervisor recorder exists in `recorder.py` | real-source parity after adapters land | simulated start/stop/export |
 

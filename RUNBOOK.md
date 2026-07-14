@@ -337,15 +337,19 @@ only into available UART capacity, and retains all D4/D5/D6/D8 and software
 E-STOP decisions. Linux validates and relays the exact same `V1` command lines;
 it never generates STEP/DIR itself.
 
-The custom service and the archived official Bridge daemon both use
-`/dev/ttyATH0`, so they cannot run together. First upload and verify the matching
-`limit_switch_palas.ino` over USB. With motor power still off, copy the service
-and start it manually over SSH, substituting the Yún's current DHCP address:
+LEDEYun launches `::askconsole` on `/dev/ttyATH0`; that login shell and the
+custom service cannot read the UART together. The init wrapper saves and
+comments that inittab entry on start, terminates only the process attached to
+the UART, and restores the exact saved console configuration on stop. First
+upload and verify the matching `limit_switch_palas.ino` over USB. With motor
+power still off, copy the service and start it manually over SSH, substituting
+the Yún's current DHCP address. Modern OpenSSH clients require the scoped
+legacy RSA and SCP flags shown here:
 
 ```bash
-scp networked_sensors/yun_stepper_bridge.py root@YUN_IP:/root/
-scp networked_sensors/yun-stepper-bridge.init root@YUN_IP:/etc/init.d/yun-stepper-bridge
-ssh root@YUN_IP 'chmod 700 /root/yun_stepper_bridge.py /etc/init.d/yun-stepper-bridge && /etc/init.d/yun-stepper-bridge start'
+scp -O -o HostKeyAlgorithms=+ssh-rsa networked_sensors/yun_stepper_bridge.py root@YUN_IP:/root/
+scp -O -o HostKeyAlgorithms=+ssh-rsa networked_sensors/yun-stepper-bridge.init root@YUN_IP:/etc/init.d/yun-stepper-bridge
+ssh -o HostKeyAlgorithms=+ssh-rsa root@YUN_IP 'chmod 700 /root/yun_stepper_bridge.py /etc/init.d/yun-stepper-bridge && /etc/init.d/yun-stepper-bridge start'
 curl --fail --max-time 2 http://YUN_IP:8080/v1/health
 curl --fail --max-time 2 http://YUN_IP:8080/v1/status
 ```
@@ -377,7 +381,7 @@ After the motor-off LAN status and command-rejection checks pass, enable the
 service at boot:
 
 ```bash
-ssh root@YUN_IP '/etc/init.d/yun-stepper-bridge enable'
+ssh -o HostKeyAlgorithms=+ssh-rsa root@YUN_IP '/etc/init.d/yun-stepper-bridge enable'
 ```
 
 The service listens without application authentication on port 8080. Keep it
@@ -394,8 +398,11 @@ new command's acknowledgement.
 Roll back to USB-only operation with:
 
 ```bash
-ssh root@YUN_IP '/etc/init.d/yun-stepper-bridge stop; /etc/init.d/yun-stepper-bridge disable; /etc/init.d/bridge start'
+ssh -o HostKeyAlgorithms=+ssh-rsa root@YUN_IP '/etc/init.d/yun-stepper-bridge stop; /etc/init.d/yun-stepper-bridge disable'
 ```
+
+`stop` restores the saved `::askconsole` entry. Reboot the Linux side if an
+immediate USB login prompt is required and procd has not respawned it yet.
 
 ## 3. Current mixed real-hardware run
 
@@ -446,7 +453,7 @@ Network assumptions:
 | missing scenario | `python3 networked_sensors/supervisor.py --scenario dxmr90_missing --samples 3` | DXMR90 fields are present as `null` |
 | stepper contract | `python3 -m unittest -v networked_sensors.test_stepper_control` | 33 tests cover D5-selected travel, mode, D8 seek, Stop, latched software E-STOP/reset, limits, USB/network bytes/acks, ownership, rejection/timeout, nonblocking UART reads, fresh runtime acknowledgements, legacy status, and merged schema |
 | Yún T5A compile/upload | temporary official CLI/core/library, `arduino:avr:yun` | 65% flash/28% RAM; 18,652 bytes uploaded and read back, fresh D4-off stopped latch/reset confirmed; moving-stop checks pending |
-| Yún T6 network compile/upload | same Yún toolchain | 20,794 bytes/72% flash and 1,399 bytes/54% RAM; upload passes and stopped USB status reports owner none, D4 OFF, clear limits, and zero motion; Linux service install pending |
+| Yún T6 network compile/upload | same Yún toolchain | 20,794 bytes/72% flash and 1,399 bytes/54% RAM; upload and Linux service install pass; AsteraMesh health/status report owner none, D4 OFF, clear limits/E-STOP, and zero motion; motion qualification pending |
 | Yún network loopback | `python3 -m unittest -v networked_sensors.test_stepper_control.NetworkStepperSourceTests` | 7 tests pass exact UART/HTTP relay, ownership status, rejection, timeout, nonblocking UART `EAGAIN`, CLI/factory, and fresh network E-STOP confirmation |
 | dashboard/API | `python3 networked_sensors/dashboard.py --host 127.0.0.1 --port 8000` | browser dashboard, JSON endpoints, SSE stream, metadata, run state, and simulated solenoid controls respond |
 | simulated stepper API | dashboard plus GET status and POST move/stop/E-STOP/reset endpoints | bounded moves and a latched mode-independent software stop remain on the shared stream |

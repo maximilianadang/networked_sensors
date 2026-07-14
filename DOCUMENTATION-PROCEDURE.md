@@ -439,7 +439,10 @@ contract, exact Linux install/rollback commands, trusted-LAN/no-auth boundary,
 USB/network ownership rules, fresh acknowledgement semantics, and a dedicated
 motor-off/moving checklist.
 
-**Boundary recorded:** six network tests, 38 combined desktop tests, and a
+**Boundary recorded:** seven network tests, 39 combined desktop tests, and a
 20,794-byte/72%-flash, 1,399-byte/54%-RAM Yún compile/upload pass. A stopped USB
-heartbeat reports owner none and zero motion. No Linux service install, LAN
-hardware status, jitter/latency, restart, disconnect, or motion result is claimed.
+heartbeat reports owner none and zero motion. The later physical installation
+found LEDEYun `askconsole` was the actual competing UART owner; the init wrapper
+now manages it reversibly. AsteraMesh health, advancing stopped status, and an
+expected firmware rejection pass. Ownership/E-STOP, jitter/latency,
+enabled-service restart, disconnect, and motion results remain unclaimed.

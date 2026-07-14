@@ -9,14 +9,42 @@ STOP=10
 PIDFILE=/var/run/yun-stepper-bridge.pid
 PROGRAM=/root/yun_stepper_bridge.py
 LOGFILE=/tmp/yun-stepper-bridge.log
+INITTAB=/etc/inittab
+CONSOLE_BACKUP=/root/inittab.before-yun-stepper-bridge
+
+disable_serial_console() {
+    # LEDEYun exposes its login shell through ::askconsole on /dev/ttyATH0.
+    # That shell and this service cannot read the ATmega UART concurrently.
+    # Preserve the exact prior inittab so stop() can restore USB recovery.
+    if grep -q '^::askconsole:' "$INITTAB"; then
+        cp "$INITTAB" "$CONSOLE_BACKUP"
+        sed -i 's/^::askconsole:/#::askconsole:/' "$INITTAB"
+        kill -HUP 1
+    fi
+
+    # procd may retain the already-running askconsole process until it exits.
+    # Kill only processes whose stdin is the internal UART, before opening it.
+    for descriptor in /proc/[0-9]*/fd/0; do
+        [ "$(readlink "$descriptor" 2>/dev/null)" = /dev/ttyATH0 ] || continue
+        pid=${descriptor#/proc/}
+        pid=${pid%%/*}
+        kill -9 "$pid" 2>/dev/null
+    done
+}
+
+restore_serial_console() {
+    if [ -f "$CONSOLE_BACKUP" ]; then
+        cp "$CONSOLE_BACKUP" "$INITTAB"
+        rm -f "$CONSOLE_BACKUP"
+        kill -HUP 1
+    fi
+}
 
 start() {
-    # The archived official Bridge daemon and this service cannot both own
-    # /dev/ttyATH0.  The ATmega sketch uses its own bounded line protocol.
-    /etc/init.d/bridge stop >/dev/null 2>&1
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
         return 0
     fi
+    disable_serial_console
     /usr/bin/python "$PROGRAM" --device /dev/ttyATH0 --baud 115200 \
         --host 0.0.0.0 --port 8080 >>"$LOGFILE" 2>&1 &
     echo $! >"$PIDFILE"
@@ -27,4 +55,5 @@ stop() {
         kill "$(cat "$PIDFILE")" 2>/dev/null
         rm -f "$PIDFILE"
     fi
+    restore_serial_console
 }

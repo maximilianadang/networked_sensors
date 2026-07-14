@@ -153,10 +153,12 @@ data acquisition and operator workflow:
     the Yún target at 72% flash and 54% RAM.
   - [x] Upload the T6 image and verify stopped USB status with D4 OFF, limits
     clear, E-STOP clear, and owner none.
-  - [x] Install the service manually on the physical Yún and verify its LAN HTTP
-    health response without enabling it at boot.
-  - [ ] Redeploy the normal-nonblocking-`EAGAIN` correction, verify ATmega LAN
-    status/ownership/rejection/E-STOP, then measure moving jitter and stop
+  - [x] Install the service manually on the physical Yún, handle LEDEYun
+    `askconsole` ownership reversibly, and verify LAN HTTP health plus advancing
+    stopped ATmega status without enabling it at boot.
+  - [x] Redeploy the normal-nonblocking-`EAGAIN` correction and verify an
+    expected firmware rejection traverses HTTP/UART in both directions.
+  - [ ] Verify ownership and E-STOP parity, then measure moving jitter and stop
     latency before enabling the service at boot.
 - [ ] **Step 6 - real ESP32 adapter.**
   - [x] Consume strict version-2 ESP32 SSE samples and the solenoid command

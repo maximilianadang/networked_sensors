@@ -362,15 +362,18 @@ Seven network-specific tests cover the full emulated chain from HTTP through a
 pseudo-terminal and back, plus rejection, timeout, CLI/factory selection,
 owner decoding, nonblocking UART `EAGAIN`, and fresh dashboard E-STOP status. The firmware compiles at
 72% flash/54% RAM, is uploaded, and emits a stopped owner-none USB heartbeat.
-This arm remains wet until the Linux service is installed on the physical Yún
-and LAN, competing-owner,
+This arm remains wet until competing-owner, E-STOP, enabled-service
 restart/disconnect, limit, motion, and timing parity checks pass.
 
 After an acknowledgement timeout, the relay refuses further commands until it
 is restarted; this is an intentional fail-closed command-correlation boundary.
 
-The service is now manually installed on the physical Yún and `/v1/health`
-responds over its local HTTP listener. The first physical status probe exposed
-that Python 2 reported normal nonblocking UART `EAGAIN` as a health error; the
-reader now ignores `EAGAIN`/`EWOULDBLOCK`/`EINTR`, with a regression test. A
-fresh `/v1/status` response is still required before claiming the UART path.
+The service is now manually installed on the physical Yún. The first probe
+exposed both normal nonblocking UART `EAGAIN` and LEDEYun `askconsole`
+competing for `/dev/ttyATH0`; both are handled explicitly and the console
+configuration is restored on service stop. Over AsteraMesh, health is fresh,
+error-free, and synchronized; stopped status advances with real D4/D5/D6/D8
+levels, clear limits/E-STOP, and owner none. An expected Local-Velocity Stop
+rejection completed the LAN HTTP/UART/firmware acknowledgement round trip
+without changing motion or ownership. Boot enable and motion parity remain
+pending.

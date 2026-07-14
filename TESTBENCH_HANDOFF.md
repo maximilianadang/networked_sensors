@@ -141,9 +141,12 @@ runs on the Yún AR9331 and exposes status/commands on trusted-LAN port 8080;
 the laptop selects it with `--stepper-source network --stepper-url
 http://YUN_IP:8080`.
 
-Software loopback and compile checks pass; the T6 image is uploaded and its
-stopped USB heartbeat passes, but the Linux service is not installed. Do not represent the stepper
-as LAN-ready until the motor-off install/status/ownership/E-STOP checklist and
+Software loopback and compile checks pass; the T6 image and Linux service are
+installed. Physical AsteraMesh health, advancing stopped status, and an
+expected Local-Velocity Stop rejection pass through the full HTTP/UART path.
+Do not represent the stepper as motion-qualified until the remaining
+ownership/E-STOP checklist and
 the moving jitter/latency/restart/disconnect checks pass. The custom service
-replaces the archived official Bridge daemon as `/dev/ttyATH0` owner and has no
-application authentication, so it belongs only on the isolated bench LAN.
+temporarily replaces LEDEYun's stock `askconsole` as `/dev/ttyATH0` owner and
+restores that console when stopped. It has no application authentication, so
+it belongs only on the isolated bench LAN.

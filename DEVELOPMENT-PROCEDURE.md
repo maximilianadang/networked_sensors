@@ -746,8 +746,10 @@ polls Serial1 in bounded chunks and drains status/ack lines only into UART bytes
 reported writable. `yun_stepper_bridge.py` runs on the AR9331, owns
 `/dev/ttyATH0`, validates exact V1 grammar, caches status, and exposes health,
 status, and command endpoints on trusted-LAN port 8080. The service performs no
-motion logic. The archived official Bridge daemon must stop because it owns the
-same UART.
+motion logic. On the physical LEDEYun image, `::askconsole`—not a separate
+Bridge init service—owns the same UART. The wrapper now saves/comments that
+entry on start, kills only the retained UART login process, and restores the
+exact console configuration on stop.
 
 **Ownership/failure decision:** an accepted mutating command claims either USB
 or network in firmware. A competing owner is rejected. Stop and `V1 E1` remain
@@ -768,11 +770,8 @@ ack timeout, nonblocking UART `EAGAIN`, source factory/CLI, and fresh dashboard
 E-STOP confirmation. The complete 39-test desktop suite passes. The Yún target compiles at 20,794 bytes
 (72%) flash and 1,399 bytes (54%) global RAM. The image was uploaded through
 `/dev/ttyACM0`; a fresh stopped USB heartbeat showed D4/D5 HIGH, D6/D8 clear,
-zero motion, E-STOP clear, and owner none. No Yún-side service installation,
-physical LAN response, jitter measurement, moving stop, Linux restart, or
-disconnect test is claimed yet. This host was on `AsteraMesh`, not the Yún's
-configured `GL-MT3000-b3a`, so it did not guess or install against an
-unidentified LAN address.
+zero motion, E-STOP clear, and owner none. Jitter measurement, moving stop,
+enabled-service reboot, and disconnect tests are not claimed yet.
 
 The Linux relay also latches its command channel unsynchronized after any UART
 write or acknowledgement timeout and rejects subsequent commands until the
@@ -780,8 +779,13 @@ service restarts. This prevents a late, uncorrelated acknowledgement from
 being accepted as proof of a later motion command.
 
 **Physical Linux-service follow-up:** the service and init wrapper were copied
-to the Yún and the health endpoint returned valid JSON. The first status probe
-returned HTTP 503 because no ATmega frame had yet been cached; health showed
-Python 2 `EAGAIN` from the nonblocking tty. That condition is now treated as a
-normal empty read rather than a transport error. Physical status remains
-unverified until the corrected service is redeployed and returns a `t=s` frame.
+to the Yún. The first status probe exposed both normal Python 2 `EAGAIN` and the
+stock `askconsole` shell competing for UART bytes. The reader now ignores
+`EAGAIN`, and the wrapper manages `askconsole` reversibly. The Yún was recovered
+onto `AsteraMesh` over its documented USB Linux console, the motor firmware was
+restored, and a Linux reboot proved the console stayed absent while SSH stayed
+available. Physical `/v1/health` now reports a fresh status age, synchronized
+commands, and no error. `/v1/status` advances with D4/D5/D6/D8 HIGH, zero
+motion, clear limits/E-STOP, and owner none. A LAN `V1 X` in Local Velocity
+returned the expected HTTP 409 firmware rejection, and health remained
+synchronized afterward. The service remains deliberately disabled at boot.

@@ -237,8 +237,9 @@ Before using the laptop supervisor as the primary logger:
 - Reserve the Yún DHCP address and confirm the dashboard laptop can reach that
   address on the isolated bench LAN. Do not expose TCP 8080 outside that LAN.
 - Copy `yun_stepper_bridge.py` and the init wrapper to the documented Yún
-  paths. Start manually but do not enable at boot yet; confirm the archived
-  official Bridge daemon stopped because both services use `/dev/ttyATH0`.
+  paths. Start manually but do not enable at boot yet; confirm the wrapper
+  saved/commented `::askconsole` and no `/bin/ash --login` process retains
+  `/dev/ttyATH0`.
 - `GET /v1/health` reports the expected UART and no error. `GET /v1/status`
   returns advancing compact status with the real D4/D5/D6/D8 values and zero
   motion.
