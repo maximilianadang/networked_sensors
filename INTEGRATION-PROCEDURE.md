@@ -467,3 +467,14 @@ and stale fields without delaying fresh ESP32/stepper data, browser SSE, or
 recording. Recovery publishes the next completed process-data generation
 without restarting the dashboard. Deterministic blocked-read coverage verifies
 both nonblocking behavior and recovery; field disconnect/reconnect remains wet.
+
+## Step I5D - 10 Hz browser and relay-command responsiveness integrated
+
+Browser state transport now has equivalent 10 Hz primary and degraded paths:
+SSE remains primary, while a non-overlapping 100 ms `/api/latest` fallback runs
+only while SSE is unavailable. Real relay HTTP work no longer owns the dashboard
+condition lock, allowing the ESP32's immediate `sol` generation and ordinary
+samples to merge while the command response is pending. Commands are serialized,
+duplicate clicks are guarded, and `testbench.local` resolves once per healthy
+transport epoch. Delayed-response and address-cache tests pass; physical field
+latency remains wet evidence.

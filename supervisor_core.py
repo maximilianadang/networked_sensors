@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import socket
 import termios
 import threading
 import time
@@ -1588,8 +1589,11 @@ class RealEsp32Source:
         # HTTP proxy inherited from the laptop environment.
         self._opener = build_opener(ProxyHandler({}))
         self._lock = threading.Lock()
+        self._command_lock = threading.Lock()
+        self._resolve_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._transport_base_url = self.base_url
         self._values: dict[str, float | int | bool | str | None] | None = None
         self._solenoids: list[bool | None] = [None] * ESP32_SOLENOID_COUNT
         self._generation = 0
@@ -1757,6 +1761,41 @@ class RealEsp32Source:
         with self._lock:
             self.last_error = message
 
+    def _resolve_transport_base_url(self) -> str:
+        """Resolve bench mDNS once so each command does not repeat the lookup."""
+
+        with self._resolve_lock:
+            with self._lock:
+                if self._transport_base_url != self.base_url:
+                    return self._transport_base_url
+            parsed = urlparse(self.base_url)
+            hostname = parsed.hostname
+            if (
+                parsed.scheme != "http"
+                or hostname is None
+                or not hostname.lower().endswith(".local")
+            ):
+                return self.base_url
+            port = parsed.port or 80
+            addresses = socket.getaddrinfo(
+                hostname,
+                port,
+                family=socket.AF_INET,
+                type=socket.SOCK_STREAM,
+            )
+            if not addresses:
+                raise OSError(f"could not resolve ESP32 host {hostname}")
+            address = addresses[0][4][0]
+            netloc = address if parsed.port is None else f"{address}:{parsed.port}"
+            resolved = parsed._replace(netloc=netloc).geturl()
+            with self._lock:
+                self._transport_base_url = resolved
+            return resolved
+
+    def _invalidate_transport_address(self) -> None:
+        with self._lock:
+            self._transport_base_url = self.base_url
+
     def _apply_event(self, event_name: str, data: str) -> None:
         try:
             if event_name == "reading":
@@ -1806,10 +1845,11 @@ class RealEsp32Source:
                 data_lines.append(value)
 
     def _run(self) -> None:
-        events_url = f"{self.base_url}/events"
         while not self._stop_event.is_set():
             response: BinaryIO | None = None
+            events_url = f"{self.base_url}/events"
             try:
+                events_url = f"{self._resolve_transport_base_url()}/events"
                 request = Request(
                     events_url,
                     headers={"Accept": "text/event-stream"},
@@ -1827,6 +1867,7 @@ class RealEsp32Source:
                 ValueError,
             ) as exc:
                 if not self._stop_event.is_set():
+                    self._invalidate_transport_address()
                     self._set_error(f"{events_url}: {exc}")
             finally:
                 if response is not None:
@@ -1846,14 +1887,20 @@ class RealEsp32Source:
     def toggle_solenoid(self, index: int) -> bool:
         if index < 0 or index >= ESP32_SOLENOID_COUNT:
             raise ValueError("solenoid index must be 0, 1, 2, or 3")
-        url = f"{self.base_url}/solenoid/toggle?{urlencode({'n': index})}"
-        request = Request(url, data=b"", method="POST")
-        try:
-            with self._opener.open(request, timeout=self.timeout) as response:
-                body = response.read(32).decode("utf-8", errors="replace").strip()
-        except (HTTPError, URLError, TimeoutError, OSError, HTTPException) as exc:
-            self._set_error(f"{url}: {exc}")
-            raise RuntimeError(f"ESP32 solenoid command failed: {exc}") from exc
+        with self._command_lock:
+            url = f"{self.base_url}/solenoid/toggle?{urlencode({'n': index})}"
+            try:
+                url = (
+                    f"{self._resolve_transport_base_url()}/solenoid/toggle?"
+                    f"{urlencode({'n': index})}"
+                )
+                request = Request(url, data=b"", method="POST")
+                with self._opener.open(request, timeout=self.timeout) as response:
+                    body = response.read(32).decode("utf-8", errors="replace").strip()
+            except (HTTPError, URLError, TimeoutError, OSError, HTTPException) as exc:
+                self._invalidate_transport_address()
+                self._set_error(f"{url}: {exc}")
+                raise RuntimeError(f"ESP32 solenoid command failed: {exc}") from exc
         if body not in ("ON", "OFF"):
             raise RuntimeError(f"unexpected ESP32 solenoid response: {body!r}")
         state = body == "ON"

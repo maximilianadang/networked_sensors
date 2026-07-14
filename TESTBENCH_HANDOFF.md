@@ -118,6 +118,12 @@ or slow device changes only its own error/stale state and cannot throttle fresh
 measurements from the others. A blocked-Modbus regression test covers the
 specific DXMR90-to-ESP32 coupling found during the field-readiness audit.
 
+ESP32 relay control is likewise isolated from the dashboard merge lock. The
+normal browser path and its GET fallback both update at 10 Hz; the firmware's
+1 Hz ADC-presence check does not govern buttons or telemetry. The adapter caches
+the resolved `testbench.local` address for serialized relay commands, while the
+page gives immediate pending feedback and prevents duplicate toggles.
+
 The archived dashboard (HTML, CSS, JavaScript, and the Chart.js reference) was embedded in the sketch and served by the ESP32 itself. This was convenient — one device, nothing to install — but it had real drawbacks worth flagging for whoever works with the legacy sketch:
 
 * It eats flash and a little RAM on the ESP32, and every UI tweak means recompiling and reflashing the firmware.

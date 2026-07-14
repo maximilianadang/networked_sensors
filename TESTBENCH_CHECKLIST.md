@@ -24,6 +24,11 @@ test-bench translation of `dpc-flight/FLIGHT_CHECKLIST.md`.
   `--esp32-url`; the laptop has a route to that address.
 - A deliberately safe laptop-dashboard solenoid toggle changes the expected
   relay and its state returns in complete readings and the immediate `sol` event.
+- The clicked solenoid button shows pending feedback immediately, relay state
+  updates without freezing plots/source ages, and repeated clicks do not queue
+  duplicate toggles. Record observed click-to-relay and click-to-page latency.
+- If the page reports `Polling` instead of `Live`, verify recent history still
+  advances near 0.1-second intervals; both browser paths are configured at 10 Hz.
 - Real ESP32 readings show version 3, advancing `sample_ms`, explicit
   `p_adc_ok`/`f_adc_ok`, pressure/flow, clamped sensor voltages, and all four
   solenoid states. An

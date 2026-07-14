@@ -821,10 +821,12 @@ INDEX_HTML = r"""<!doctype html>
     let runState = {};
     let history = [];
     let pollTimer = null;
+    let pollRequestPending = false;
     let controlModeDirty = false;
     let controlModeRequestPending = false;
     let stepperMessageSticky = false;
     let speedRequestPending = false;
+    const pendingSolenoids = new Set();
 
     const els = {};
     for (const id of [
@@ -880,10 +882,13 @@ INDEX_HTML = r"""<!doctype html>
         latest && latest.esp32_connected === true;
       const enabled = simulated || realAndLive;
       for (let i = 0; i < solenoidCount; i += 1) {
-        els[`sol${i}`].disabled = !enabled;
-        els[`sol${i}`].title = enabled
-          ? `Toggle Solenoid ${i + 1}`
-          : "ESP32 control stream is not live";
+        const pending = pendingSolenoids.has(i);
+        els[`sol${i}`].disabled = !enabled || pending;
+        els[`sol${i}`].title = pending
+          ? `Sending Solenoid ${i + 1} command`
+          : enabled
+            ? `Toggle Solenoid ${i + 1}`
+            : "ESP32 control stream is not live";
       }
     }
 
@@ -1310,6 +1315,8 @@ INDEX_HTML = r"""<!doctype html>
     function startPollingFallback() {
       if (pollTimer) return;
       pollTimer = window.setInterval(async () => {
+        if (pollRequestPending) return;
+        pollRequestPending = true;
         try {
           const response = await fetch("/api/latest");
           const payload = await response.json();
@@ -1321,8 +1328,16 @@ INDEX_HTML = r"""<!doctype html>
           setStreamStatus("Polling", "warn");
         } catch (error) {
           setStreamStatus("Offline", "bad");
+        } finally {
+          pollRequestPending = false;
         }
-      }, 1000);
+      }, 100);
+    }
+
+    function stopPollingFallback() {
+      if (!pollTimer) return;
+      window.clearInterval(pollTimer);
+      pollTimer = null;
     }
 
     function connectEvents() {
@@ -1331,7 +1346,10 @@ INDEX_HTML = r"""<!doctype html>
         return;
       }
       const events = new EventSource("/api/events");
-      events.addEventListener("open", () => setStreamStatus("Live", "ok"));
+      events.addEventListener("open", () => {
+        stopPollingFallback();
+        setStreamStatus("Live", "ok");
+      });
       events.addEventListener("sample", event => {
         setStreamStatus("Live", "ok");
         applySample(JSON.parse(event.data));
@@ -1364,11 +1382,18 @@ INDEX_HTML = r"""<!doctype html>
 
     for (let i = 0; i < solenoidCount; i += 1) {
       els[`sol${i}`].addEventListener("click", async () => {
+        if (pendingSolenoids.has(i)) return;
+        pendingSolenoids.add(i);
+        updateSolenoidControls();
+        text("espTransport", `Sending Solenoid ${i + 1} command`);
         try {
           const payload = await postJson(`/api/solenoid/toggle?n=${i}`);
           if (payload.sample) applySample(payload.sample);
         } catch (error) {
           text("espTransport", `Command failed: ${error.message}`);
+        } finally {
+          pendingSolenoids.delete(i);
+          updateSolenoidControls();
         }
       });
     }
@@ -1629,6 +1654,7 @@ class DashboardRuntime:
         self._stop_event = threading.Event()
         self._condition = threading.Condition(threading.RLock())
         self._thread: threading.Thread | None = None
+        self._solenoid_command_lock = threading.Lock()
         with self._condition:
             self._poll_locked(0.0)
 
@@ -1806,7 +1832,22 @@ class DashboardRuntime:
             )
             if esp32 is None or not hasattr(esp32, "toggle_solenoid"):
                 raise RuntimeError("ESP32 source does not support solenoid controls")
+            if (
+                esp32.mode == "real"
+                and (
+                    self.latest is None
+                    or self.latest.get("esp32_connected") is not True
+                )
+            ):
+                raise RuntimeError("ESP32 control stream is not live")
+
+        # Network I/O must not hold the condition used by the 10 Hz merge/SSE
+        # loop. The ESP32's immediate sol event can now reach the browser while
+        # this request is still completing.
+        with self._solenoid_command_lock:
             state = esp32.toggle_solenoid(index)  # type: ignore[attr-defined]
+
+        with self._condition:
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
             states = (

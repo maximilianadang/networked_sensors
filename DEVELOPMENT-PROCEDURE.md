@@ -954,6 +954,33 @@ down through the existing runtime close path. A deterministic test blocks the
 Modbus client, proves ESP32 merged samples still advance, releases the read, and
 proves DXMR90 data then becomes live.
 
-**Verification boundary:** the source-independence regression and all 45 desktop
-tests pass. Existing live direct-process 10 Hz evidence remains valid; the
+**Verification boundary:** the source-independence regression and the then-current
+45 desktop tests passed. Existing live direct-process 10 Hz evidence remains valid; the
 field-LAN disconnect/recovery check remains a hardware smoke test.
+
+## Step 7D - responsive field solenoid controls
+
+**Direction given:** the field page appeared to update at 1 Hz and relay buttons
+blocked for more than one second; preserve 10 Hz behavior and remove the
+unresponsive command path.
+
+**READ / INFER:** firmware telemetry and immediate `sol` events were still 10 Hz;
+the 1 Hz firmware constant governed only ADC presence checks. Two laptop paths
+could nevertheless produce the reported behavior. The browser fallback fetched
+`/api/latest` every 1000 ms and was never stopped after SSE recovered. More
+critically, `DashboardRuntime.toggle_solenoid()` held the same condition lock
+used by the 10 Hz merge/SSE loop while waiting for the ESP32 HTTP response.
+Each command to `testbench.local` could also repeat mDNS resolution.
+
+**DE-RISK / executed:** changed the bounded browser fallback to 100 ms, prevented
+overlapping fallback requests, and stop it when SSE reopens. Relay POSTs are
+serialized outside the merge lock; the clicked button enters an immediate
+pending state and rejects duplicate clicks. The background ESP32 source resolves
+an HTTP `.local` target once, reuses the numeric address for SSE and commands,
+and invalidates it after transport failure so DHCP changes can recover.
+
+**Verification boundary:** eight focused ESP32 tests pass. A delayed fake relay
+response proves the dashboard sequence advances at least twice during a 250 ms
+blocked POST, and deterministic resolution coverage proves the mDNS result is
+cached. All 46 desktop tests pass. Physical click-to-relay/page latency must be
+retested on the field WLAN.

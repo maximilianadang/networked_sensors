@@ -23,7 +23,7 @@ Progress is chronicled in `INTEGRATION-PROCEDURE.md`.
 
 | Arm | Current state | Target landing | Verification |
 | --- | --- | --- | --- |
-| ESP32 analog/control | `RealEsp32Source` consumes healthy v2 or sensor-health-aware v3 SSE readings/four-state solenoid events and forwards toggle POSTs for indices 0–3; missing ADC families stay explicit without taking control offline | physical stream/toggle/recording smoke | 7 loopback layout/parser/adapter/CLI/runtime tests, target compile, and hash-verified flash pass; field-LAN SSE/HTTP smoke and merged CSV pending |
+| ESP32 analog/control | `RealEsp32Source` consumes healthy v2 or sensor-health-aware v3 SSE readings/four-state solenoid events and forwards serialized toggle POSTs for indices 0–3 without holding the merge lock; missing ADC families stay explicit | physical stream/toggle/recording smoke | 8 loopback layout/parser/adapter/CLI/runtime tests, target compile, and hash-verified flash pass; field command latency retest and merged CSV pending |
 | DXMR90 Modbus | Background `RealDxmr90Source` reads both live SICK process windows at 10 Hz without blocking the shared merge loop | direct process data by default; republished ScriptBasic block retained as fallback | heartbeat/schema/10 Hz hardware smoke plus blocked-read source-independence regression |
 | ESP32 simulator | Exists as `SimulatedEsp32Source` | scenario controls and dashboard solenoid toggles landed | no-hardware 10 Hz stream plus simulated control smoke |
 | DXMR90 simulator | Exists as `SimulatedDxmr90Source` | scenario controls landed | no-hardware 1 Hz stream |
@@ -108,8 +108,9 @@ Progress is chronicled in `INTEGRATION-PROCEDURE.md`.
 - [ ] **I4 - ESP32 real adapter.** Existing SSE/HTTP is implemented with
       `--esp32-url`, background reconnect, health/error state, solenoid control,
       healthy-v2 compatibility, strict version-3 ADC-health/null validation, and
-      loopback contract coverage. Physical stream/toggle/recording smoke remains
-      before this source arm is dry.
+      loopback contract coverage. Relay POSTs are serialized outside the merge
+      lock, `.local` resolution is cached, and browser SSE/fallback remain at
+      10 Hz. Physical latency/recording smoke remains before this source arm is dry.
 - [ ] **I5 - headless firmware split.** The former ESP32-hosted page is archived
       under `legacy/`; the primary firmware emits version-3 samples even when
       either ADC is missing, controls four active-low relays including GPIO 10,

@@ -108,6 +108,15 @@ The firmware checks each ADC independently at 1 Hz and retries unavailable ADCs
 every 5 seconds. The page reports Pressure ADC and Flow ADC separately. This is
 different from a stale ESP transport: `ESP32 live / ADC unavailable` means the
 controller is reachable and only the displayed sensor family is unavailable.
+The 1 Hz interval here applies only to ADC presence checks. ESP32 samples,
+dashboard SSE, and the browser polling fallback remain at 10 Hz.
+
+Solenoid POSTs are serialized but run outside the shared dashboard state lock,
+so the immediate `sol` event can be rendered while the command response is still
+finishing. The clicked button shows a pending state and rejects duplicate clicks.
+For the default `testbench.local` URL, the adapter resolves mDNS in its background
+source path and reuses the numeric address for commands; it resolves again after
+a transport failure or restart.
 
 Real ESP32 SSE, DXMR90 Modbus, and Yún network acquisition run in separate
 source-owned workers. A disconnected device updates only its own transport
@@ -188,12 +197,12 @@ Useful endpoints:
 | --- | --- |
 | `/` | local browser dashboard with separate ESP32/SICK pressure plots in bar and individual/total SICK mass-flow traces |
 | `/api/state` | latest sample, run state/config, metadata, history size |
-| `/api/latest` | latest sample and run state |
+| `/api/latest` | latest sample and run state; 10 Hz browser fallback when SSE is unavailable |
 | `/api/history?limit=240` | recent in-memory merged samples |
 | `/api/events` | SSE live stream with `state` and `sample` events |
 | `/api/run/start`, `/api/run/stop` | disk-backed recording lifecycle |
 | `/api/metadata` | in-memory metadata save |
-| `/api/solenoid/toggle?n=0..3` | simulated or real ESP32 solenoid control; index 3 is GPIO 10 |
+| `/api/solenoid/toggle?n=0..3` | serialized simulated or real ESP32 control outside the merge lock; index 3 is GPIO 10 |
 | `/api/stepper/status` | mode, D4/D5 authority, fixed physical direction, D6/D8 limits, D9/ENA driver output, command, speed, and transport health; open-loop position fields are null |
 | `/api/stepper/control-mode` | `{"web_position": true|false}`; D4 must be OFF and motion stopped |
 | `/api/stepper/home` | optional move to the D8 limit at fixed 1.5 mm/s; Web Position, D4 armed, D5 Reverse |
@@ -538,7 +547,7 @@ Network assumptions:
 | SICK-only direct 10 Hz | `python3 networked_sensors/dashboard.py --esp32-source off --dxmr90-source real --dxmr90-host HOST --dxmr90-data-path direct --dxmr90-rate-hz 10` | dashboard runs without ESP32 and receives fresh direct process-data samples at 10 Hz |
 | source-independence contract | `python3 -m unittest -v networked_sensors.test_source_independence` | a deliberately blocked DXMR90 Modbus read does not delay advancing ESP32 merged samples; DXMR90 values appear after the read recovers |
 | DXMR90 CLI one-shot | current reader command | heartbeat and values print without Modbus errors |
-| ESP32 adapter contract | `python3 -m unittest -v networked_sensors.test_real_esp32` | 7 tests pass healthy-v2 compatibility, strict v3 health/null validation, missing-ADC live transport, complete four-solenoid projection, GPIO 10 layout, solenoid POST, and dashboard real-source selection against a loopback firmware-contract server |
+| ESP32 adapter contract | `python3 -m unittest -v networked_sensors.test_real_esp32` | 8 tests pass healthy-v2 compatibility, strict v3 health/null validation, missing-ADC live transport, mDNS command-address caching, delayed-POST merge responsiveness, four-solenoid projection, GPIO 10 layout, and dashboard real-source selection |
 | ESP32 headless compile/upload | temporary official Arduino CLI with `esp32:esp32@3.3.10`, Adafruit ADS1X15/BusIO, ESP Async WebServer, and Async TCP | sensor-health-aware four-solenoid sketch compiles for `esp32:esp32:adafruit_feather_esp32s3_nopsram` at 1,095,853 bytes/52% flash and 80,956 bytes/24% global RAM; physical `/dev/ttyACM1` flash hashes verified and board reset without issuing a solenoid command |
 | ESP32 physical source | `--esp32-source real --esp32-url http://ESP32_HOST` | sustained live pressure/flow, truthful source health, one deliberately safe solenoid command, and recorded ESP32 rows work |
 | DXMR90 real source | implemented | direct process windows sustain 10 Hz; heartbeat and selected metrics update |

@@ -21,8 +21,9 @@ the reasoning; source files remain the interface of record.
   Its real ESP32 adapter accepts healthy version-2 `/events` samples and the
   primary firmware's version-3 stream with explicit per-ADC availability,
   nullable unavailable sensor families, and four solenoid states. It forwards
-  the solenoid-toggle endpoint and rejects older, partial, or inconsistent
-  samples.
+  the solenoid-toggle endpoint outside the shared 10 Hz merge lock, caches the
+  field mDNS address for command latency, and rejects older, partial, or
+  inconsistent samples.
   The live board now has explicit Local Velocity/Web Position modes, optional
   D8-limit seek, positive travel magnitude with D5-selected direction, and Stop; compile,
   verified upload, and stopped live USB status pass, with staged physical motion
@@ -79,7 +80,7 @@ the reasoning; source files remain the interface of record.
 
 ```
 networked_sensors/
-  Flow_management_unit_sch1.ino   # primary headless ESP32-S3 sensor/solenoid API, strict telemetry v1
+  Flow_management_unit_sch1.ino   # primary headless ESP32-S3 sensor/solenoid API, telemetry v3
   legacy/Flow_management_unit_sch1/Flow_management_unit_sch1.ino # archived ESP32-hosted dashboard firmware
   limit_switch_palas.ino          # dual-mode engine, limits, USB motion/status, latched software E-STOP
   yun_stepper_bridge.py           # Yún Linux /dev/ttyATH0 to trusted-LAN HTTP relay

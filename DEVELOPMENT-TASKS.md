@@ -207,8 +207,12 @@ data acquisition and operator workflow:
     real-source dashboard controls, and loopback HTTP/SSE contract tests.
   - [x] Require explicit per-ADC health in v3, null values for unavailable sensor
     families, and four solenoid states; reject partial or contradictory readings.
-  - [x] Verification: 7 firmware-layout/adapter/parser/CLI/dashboard-runtime
-    tests cover healthy v2/v3 and missing-ADC live-controller behavior.
+  - [x] Keep relay commands outside the shared merge lock, cache the resolved
+    field mDNS address, provide pending-button feedback, and retain 10 Hz browser
+    updates through both SSE and the polling fallback.
+  - [x] Verification: 8 firmware-layout/adapter/parser/CLI/dashboard-runtime
+    tests cover healthy v2/v3, missing-ADC live-controller behavior, mDNS address
+    caching, and uninterrupted 10 Hz merge cadence during a delayed relay POST.
   - [ ] Verification: physical live stream smoke and safe solenoid toggle test.
 - [ ] **Step 7 - headless ESP32 firmware.**
   - [x] Archive the former self-hosted-dashboard sketch under `legacy/`.

@@ -558,3 +558,18 @@ handoff, and generated protocol surfaces with the blocked-read/recovery test.
 **Boundary recorded:** deterministic desktop coverage proves software
 isolation. A physical Ethernet disconnect/reconnect while another source is live
 remains part of field handoff.
+
+## Step D28 - responsive solenoid controls documented
+
+**Direction given:** restore a usable 10 Hz field interface and explain whether
+the observed one-second relay delay came from intentional button polling.
+
+**Applied:** clarified that 1 Hz is only the ADC-presence diagnostic. Documented
+10 Hz SSE and non-overlapping fallback polling, stopping fallback on SSE recovery,
+serialized merge-lock-free relay POSTs, immediate pending/duplicate-click UI
+behavior, and cached `.local` resolution with invalidation after failures.
+Updated task, runbook, checklist, handoff, and generated protocol surfaces.
+
+**Boundary recorded:** deterministic delayed-response and resolution tests prove
+the software behavior. The field operator must still record click-to-relay and
+click-to-page latency on the GL-MT3000 WLAN.

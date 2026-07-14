@@ -183,3 +183,7 @@ translate as:
       connection/read timeouts run outside the shared merge loop, preserve
       source-scoped stale/error behavior, and cannot reduce live ESP32,
       stepper, dashboard, or recorder cadence.
+- [x] **D28 - document responsive solenoid control.** Distinguish the 1 Hz ADC
+      presence check from 10 Hz browser state, record 10 Hz SSE/fallback parity,
+      merge-lock-free serialized relay POSTs, pending-button feedback, cached
+      field mDNS resolution, and the remaining physical latency retest.

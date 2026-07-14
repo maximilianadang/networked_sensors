@@ -61,6 +61,9 @@ Use the ESP32's printed IP in `--esp32-url` if `testbench.local` does not
 resolve, and replace `/dev/ttyACM0` with its stable `/dev/serial/by-id/...`
 path when available. The archived self-hosted ESP32 sketch emits an older,
 partial stream and is intentionally rejected by the current laptop adapter.
+The page receives state at 10 Hz over SSE and retains a 10 Hz polling fallback.
+Relay commands do not pause that stream; the adapter resolves a `.local` ESP32
+once and reuses its address so each button press avoids another mDNS lookup.
 
 After installing the matching T6 firmware and `yun_stepper_bridge.py` service
 on the Yún, use its reserved DHCP address instead of a USB device:

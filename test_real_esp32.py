@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
 from networked_sensors.dashboard import DashboardRuntime, INDEX_HTML, parse_args
@@ -45,6 +46,9 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertIn('id="espFlowAdc"', INDEX_HTML)
         self.assertIn('mode === "off"', INDEX_HTML)
         self.assertIn("realAndLive", INDEX_HTML)
+        self.assertIn("const pendingSolenoids = new Set()", INDEX_HTML)
+        self.assertIn("function stopPollingFallback()", INDEX_HTML)
+        self.assertIn("}, 100);", INDEX_HTML)
 
 
 class _Esp32ContractServer(ThreadingHTTPServer):
@@ -54,6 +58,9 @@ class _Esp32ContractServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), _Esp32ContractHandler)
         self.solenoids = [False, True, False, True]
         self.toggle_requests: list[int] = []
+        self.toggle_started = threading.Event()
+        self.release_toggle = threading.Event()
+        self.release_toggle.set()
         self.release_stream = threading.Event()
         self.reading_payload = (
             b'{"v":3,"sample_ms":100,"p_adc_ok":true,"f_adc_ok":true,'
@@ -96,6 +103,8 @@ class _Esp32ContractHandler(BaseHTTPRequestHandler):
         self.server.toggle_requests.append(index)
         self.server.solenoids[index] = not self.server.solenoids[index]
         body = b"ON" if self.server.solenoids[index] else b"OFF"
+        self.server.toggle_started.set()
+        self.server.release_toggle.wait(2.0)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
@@ -119,6 +128,7 @@ class RealEsp32SourceTests(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
+        self.server.release_toggle.set()
         self.server.release_stream.set()
         self.source.close()
         self.server.shutdown()
@@ -281,6 +291,26 @@ class RealEsp32SourceTests(unittest.TestCase):
         self.assertEqual(self.server.toggle_requests, [3])
         self.assertEqual(self.source.solenoid_states(), (False, True, False, False))
 
+    def test_mdns_address_is_cached_for_control_requests(self) -> None:
+        source = RealEsp32Source("http://testbench.local")
+        address = (2, 1, 6, "", ("192.168.8.42", 80))
+        try:
+            with patch(
+                "networked_sensors.supervisor_core.socket.getaddrinfo",
+                return_value=[address],
+            ) as resolver:
+                self.assertEqual(
+                    source._resolve_transport_base_url(),
+                    "http://192.168.8.42",
+                )
+                self.assertEqual(
+                    source._resolve_transport_base_url(),
+                    "http://192.168.8.42",
+                )
+                resolver.assert_called_once()
+        finally:
+            source.close()
+
     def test_dashboard_runtime_accepts_real_esp32_source(self) -> None:
         host, port = self.server.server_address
         runtime = DashboardRuntime(
@@ -320,7 +350,30 @@ class RealEsp32SourceTests(unittest.TestCase):
             state = runtime.state()
             self.assertEqual(state["run"]["esp32_source"], "real")
             self.assertEqual(state["sample"]["esp32_p3_bar"], 3.75)
-            toggled = runtime.toggle_solenoid(3)
+            self.server.release_toggle.clear()
+            result: dict[str, object] = {}
+            errors: list[BaseException] = []
+
+            def issue_toggle() -> None:
+                try:
+                    result["payload"] = runtime.toggle_solenoid(3)
+                except BaseException as exc:  # pragma: no cover - surfaced below
+                    errors.append(exc)
+
+            before_sequence = runtime.sequence
+            command_thread = threading.Thread(target=issue_toggle)
+            command_thread.start()
+            self.assertTrue(self.server.toggle_started.wait(1.0))
+            time.sleep(0.25)
+            self.assertTrue(command_thread.is_alive())
+            self.assertGreaterEqual(runtime.sequence, before_sequence + 2)
+            self.server.release_toggle.set()
+            command_thread.join(timeout=1.0)
+            self.assertFalse(command_thread.is_alive())
+            if errors:
+                raise errors[0]
+            toggled = result["payload"]
+            assert isinstance(toggled, dict)
             self.assertFalse(toggled["state"])
             self.assertEqual(self.server.toggle_requests, [3])
         finally:
