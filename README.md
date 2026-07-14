@@ -90,8 +90,9 @@ networked_sensors/provision_yun.sh CURRENT_YUN_IP GL-MT3000-b3a
 The first run creates `~/.ssh/yun_stepper`, may ask once for the Yún root
 password to install its public key, installs the bridge, and enables it at
 boot. When a target SSID is supplied, it also asks once for that Wi-Fi password.
-Passwords are not stored in this repository. Reserve the Yún's address in the
-LAN router when possible.
+The provisioner does not store entered passwords in this repository. The ESP32
+uses its compile-time lab-WLAN credential from `Flow_management_unit_sch1.ino`.
+Reserve device addresses in the LAN router when possible.
 
 Ordinary cold starts require no SSH: power the Yún, allow roughly one minute
 for its Linux/Wi-Fi side to boot, and run:
@@ -100,12 +101,14 @@ for its Linux/Wi-Fi side to boot, and run:
 networked_sensors/run_lan_dashboard.sh
 ```
 
-That wrapper defaults to `http://arduino.local:8080`, the real DXMR90 at
-`192.168.0.1`, and ESP32 off. Override only what differs, for example:
+That wrapper defaults to the network Yún at `http://arduino.local:8080`, the
+real DXMR90 at `192.168.0.1`, and the real ESP32 at
+`http://testbench.local`. Each source remains independent; an unavailable
+device reports disconnected without preventing the other sources from running.
+Override only what differs, for example:
 
 ```bash
-YUN_URL=http://192.168.0.137:8080 \
-ESP32_SOURCE=real ESP32_URL=http://testbench.local \
+YUN_URL=http://192.168.8.137:8080 \
 networked_sensors/run_lan_dashboard.sh
 ```
 

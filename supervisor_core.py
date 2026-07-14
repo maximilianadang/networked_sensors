@@ -337,6 +337,9 @@ class SimulatedStepperSource:
         "stepper_command_capable",
         "stepper_speed_command_capable",
         "stepper_direction_command_capable",
+        "stepper_direction_calibration_safe",
+        "stepper_driver_enable_capable",
+        "stepper_driver_enabled",
         "stepper_mode_command_capable",
         "stepper_home_capable",
         "stepper_estop_capable",
@@ -620,6 +623,9 @@ class SimulatedStepperSource:
             "stepper_command_capable": True,
             "stepper_speed_command_capable": False,
             "stepper_direction_command_capable": False,
+            "stepper_direction_calibration_safe": True,
+            "stepper_driver_enable_capable": True,
+            "stepper_driver_enabled": self._moving,
             "stepper_mode_command_capable": True,
             "stepper_home_capable": True,
             "stepper_estop_capable": True,
@@ -803,8 +809,7 @@ class UsbStepperSource:
             measured_speed_mm_s = None
 
         direction_sign_value = payload.get("ds")
-        direction_command_capable = direction_sign_value is not None
-        if direction_command_capable:
+        if direction_sign_value is not None:
             if (
                 isinstance(direction_sign_value, bool)
                 or not isinstance(direction_sign_value, int)
@@ -815,11 +820,27 @@ class UsbStepperSource:
         else:
             # T4A/T4B firmware without a ds field used the normal mapping.
             direction_sign = 1
+        # ds is retained as read-only compatibility telemetry. Runtime direction
+        # inversion was removed because it could reverse physical travel without
+        # reversing the D6/D8 interlock selection.
+        direction_command_capable = False
+        direction_calibration_safe = direction_sign == 1
 
         estop_capable = "e" in payload
         estop_latched = (
             cls._wire_level(payload, "e") == 1 if estop_capable else False
         )
+
+        driver_enable_capable = "en" in payload
+        driver_enabled = (
+            cls._wire_level(payload, "en") == 1
+            if driver_enable_capable
+            else None
+        )
+        if driver_enabled and (blocked or estop_latched):
+            raise ValueError(
+                "USB stepper cannot report driver enabled while interlocked"
+            )
 
         owner_value = payload.get("o")
         owner_capable = owner_value is not None
@@ -939,6 +960,9 @@ class UsbStepperSource:
             "stepper_command_capable": position_command_capable,
             "stepper_speed_command_capable": speed_command_capable,
             "stepper_direction_command_capable": direction_command_capable,
+            "stepper_direction_calibration_safe": direction_calibration_safe,
+            "stepper_driver_enable_capable": driver_enable_capable,
+            "stepper_driver_enabled": driver_enabled,
             "stepper_mode_command_capable": position_command_capable,
             "stepper_home_capable": position_command_capable,
             "stepper_estop_capable": estop_capable,
@@ -956,8 +980,6 @@ class UsbStepperSource:
                 if position_command_capable and control_mode == "web_position"
                 else "manual_d4_d5+usb_control"
                 if position_command_capable
-                else "manual_d4_d5+usb_calibration"
-                if speed_command_capable and direction_command_capable
                 else "manual_d4_d5+usb_speed"
                 if speed_command_capable
                 else "manual_switches"
@@ -1013,6 +1035,9 @@ class UsbStepperSource:
             "stepper_travel_min_mm": None,
             "stepper_travel_max_mm": None,
             "stepper_fault": (
+                "unsafe_direction_calibration"
+                if not direction_calibration_safe
+                else
                 reason_value
                 if blocked or state in ("aborted", "limit_blocked", "emergency_stop")
                 else None
@@ -1143,27 +1168,6 @@ class UsbStepperSource:
         self._write_command(f"V1 S{speed_sps}\n".encode("ascii"), "speed")
         return self.status()
 
-    def set_direction_mapping(
-        self,
-        inverted: object,
-    ) -> Mapping[str, float | int | bool | str | None]:
-        """Invert electrical DIR mapping without starting or selecting motion."""
-
-        if not isinstance(inverted, bool):
-            raise ValueError("inverted must be true or false")
-        values = self._require_connected()
-        if values.get("stepper_estop_latched"):
-            raise RuntimeError("reset the software E-STOP before changing direction mapping")
-        if not values.get("stepper_direction_command_capable"):
-            raise RuntimeError("Yún firmware does not support direction mapping")
-        if values.get("stepper_d4_raw") != "HIGH":
-            raise RuntimeError("turn D4 OFF before changing direction mapping")
-        self._write_command(
-            f"V1 D{1 if inverted else 0}\n".encode("ascii"),
-            "direction",
-        )
-        return self.status()
-
     def set_control_mode(
         self,
         web_position: object,
@@ -1173,6 +1177,8 @@ class UsbStepperSource:
         values = self._require_connected()
         if values.get("stepper_estop_latched"):
             raise RuntimeError("reset the software E-STOP before changing control mode")
+        if not values.get("stepper_direction_calibration_safe"):
+            raise RuntimeError("replace unsafe legacy direction-mapping firmware")
         if not values.get("stepper_mode_command_capable"):
             raise RuntimeError("Yún firmware does not support control modes")
         if values.get("stepper_d4_raw") != "HIGH" or values.get("stepper_moving"):
@@ -1187,6 +1193,8 @@ class UsbStepperSource:
         values = self._require_connected()
         if values.get("stepper_estop_latched"):
             raise RuntimeError("reset the software E-STOP before Home")
+        if not values.get("stepper_direction_calibration_safe"):
+            raise RuntimeError("replace unsafe legacy direction-mapping firmware")
         if not values.get("stepper_home_capable"):
             raise RuntimeError("Yún firmware does not support Home")
         if values.get("stepper_control_mode") != "web_position":
@@ -1243,6 +1251,8 @@ class UsbStepperSource:
         values = self._require_connected()
         if values.get("stepper_estop_latched"):
             raise RuntimeError("reset the software E-STOP before moving")
+        if not values.get("stepper_direction_calibration_safe"):
+            raise RuntimeError("replace unsafe legacy direction-mapping firmware")
         if not values.get("stepper_command_capable"):
             raise RuntimeError("Yún firmware does not support bounded moves")
         if values.get("stepper_control_mode") != "web_position":

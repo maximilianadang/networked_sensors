@@ -26,8 +26,8 @@
 #include <ESPAsyncWebServer.h>
 
 // ── WiFi ─────────────────────────────────────────────────────────────
-const char* WIFI_SSID = "Dynamic_2p4Ghz";
-const char* WIFI_PASS = "So@ring24";
+const char* WIFI_SSID = "GL-MT3000-b3a";
+const char* WIFI_PASS = "4ACZ53S976";
 const char* MDNS_NAME = "testbench";
 // ────────────────────────────────────────────────────────────────────
 

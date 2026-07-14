@@ -95,6 +95,25 @@ class SimulatedStepperSourceTests(unittest.TestCase):
         self.advance(2.0)
         self.assertEqual(self.stepper.status()["stepper_position_mm"], 67.59)
 
+    def test_each_physical_limit_blocks_only_motion_into_that_endpoint(self) -> None:
+        cases = (
+            (True, False, 1.0, "positive limit"),
+            (False, True, -1.0, "negative limit"),
+        )
+        for positive, negative, blocked_distance, message in cases:
+            with self.subTest(
+                positive=positive,
+                negative=negative,
+                blocked_distance=blocked_distance,
+            ):
+                stepper = SimulatedStepperSource()
+                stepper.poll(0.0)
+                stepper.set_limits(positive=positive, negative=negative)
+                with self.assertRaisesRegex(RuntimeError, message):
+                    stepper.move(blocked_distance, 1.0)
+                allowed = stepper.move(-blocked_distance, 1.0)
+                self.assertTrue(allowed["stepper_moving"])
+
     def test_limit_activation_during_motion_stops_immediately(self) -> None:
         self.stepper.move(5.0, 2.0, 10.0)
         self.stepper.poll(0.2)
@@ -165,16 +184,18 @@ class SimulatedStepperSourceTests(unittest.TestCase):
 class UsbStepperSourceTests(unittest.TestCase):
     FORWARD_BLOCKED = (
         '{"v":1,"t":"s","q":7,"d4":0,"d5":1,"d6":0,"d8":1,'
-        '"lp":1,"ln":0,"b":1,"r":"positive_limit","sps":0,"csps":378,"ds":1}'
+        '"lp":1,"ln":0,"b":1,"r":"positive_limit","sps":0,"csps":378,'
+        '"ds":1,"en":0}'
     )
     REVERSE_MOVING = (
         '{"v":1,"t":"s","q":8,"d4":0,"d5":0,"d6":0,"d8":1,'
         '"lp":0,"ln":0,"b":0,"r":"none","sps":-378,"csps":378,'
-        '"aps":350,"ds":1}'
+        '"aps":350,"ds":1,"en":1}'
     )
     STOPPED_SPEED_READY = (
         '{"v":1,"t":"s","q":9,"d4":1,"d5":0,"d6":1,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":378,"ds":1}'
+        '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":378,'
+        '"ds":1,"en":0}'
     )
     INVERTED_REVERSE_MOVING = (
         '{"v":1,"t":"s","q":10,"d4":0,"d5":0,"d6":0,"d8":1,'
@@ -182,24 +203,58 @@ class UsbStepperSourceTests(unittest.TestCase):
     )
     POSITION_LOCAL_OFF = (
         '{"v":1,"t":"s","q":20,"d4":1,"d5":0,"d6":1,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":378,"ds":1,'
+        '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,"csps":378,"ds":1,"en":0,'
         '"m":0,"h":0,"a":1,"e":0,"mv":0,"st":0,"p":0,"g":0,"c":0}'
     )
     WEB_UNHOMED_REVERSE_ARMED = (
         '{"v":1,"t":"s","q":21,"d4":0,"d5":0,"d6":1,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":378,"ds":1,'
+        '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":378,"ds":1,"en":0,'
         '"m":1,"h":0,"a":1,"e":0,"mv":0,"st":2,"p":0,"g":0,"c":0}'
     )
     WEB_READY_FORWARD_ARMED = (
         '{"v":1,"t":"s","q":22,"d4":0,"d5":1,"d6":1,"d8":1,'
-        '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":378,"ds":1,'
+        '"lp":0,"ln":0,"b":0,"r":"none","sps":0,"csps":378,"ds":1,"en":0,'
         '"m":1,"h":1,"a":1,"e":0,"mv":0,"st":5,"p":1000,"g":1000,"c":0}'
     )
     ESTOP_LOCAL_ON = (
         '{"v":1,"t":"s","q":23,"d4":0,"d5":1,"d6":1,"d8":1,'
-        '"lp":0,"ln":0,"b":1,"r":"emergency_stop","sps":0,"csps":378,"ds":1,'
+        '"lp":0,"ln":0,"b":1,"r":"emergency_stop","sps":0,"csps":378,"ds":1,"en":0,'
         '"m":0,"h":0,"a":1,"e":1,"mv":0,"st":9,"p":0,"g":0,"c":0}'
     )
+
+    def test_firmware_locks_direction_and_centralizes_physical_interlocks(self) -> None:
+        firmware = Path(__file__).with_name("limit_switch_palas.ino").read_text()
+        self.assertIn("const int FIXED_DIRECTION_SIGN = 1;", firmware)
+        self.assertIn("stepper.setPinsInverted(false, false, false);", firmware)
+        self.assertNotIn("V1 D0", firmware)
+        self.assertNotIn("V1 D1", firmware)
+        self.assertNotIn("directionSign", firmware)
+        self.assertGreaterEqual(firmware.count("limitBlocksPhysicalDirection("), 5)
+        self.assertIn("const int PIN_DRIVER_ENABLE_NEG = 9;", firmware)
+        self.assertIn("const unsigned long DRIVER_ENABLE_DELAY_MS = 200UL;", firmware)
+        self.assertIn("activePhysicalDirection", firmware)
+        self.assertIn("updatePhysicalEndpointLatches", firmware)
+        latch_body = firmware.split(
+            "void updatePhysicalEndpointLatches", 1
+        )[1].split("void disableDriverOutput", 1)[0]
+        self.assertIn("negativeLimitLatched = false;", latch_body)
+        self.assertIn("positiveLimitLatched = false;", latch_body)
+        self.assertIn(
+            "positiveLimitActive && negativeLimitActive", latch_body
+        )
+        self.assertIn("const unsigned long STATUS_MOTION_MS = 100UL;", firmware)
+        self.assertIn("networkTxActiveSharedWithUsb", firmware)
+        self.assertIn("Serial.availableForWrite();", firmware)
+        self.assertIn("Serial.flush();", firmware)
+        self.assertIn("void serviceTransports()", firmware)
+        self.assertNotIn("Serial.println(line);", firmware)
+        self.assertIn("ISR(TIMER1_COMPA_vect)", firmware)
+        self.assertIn("startLocalPulseTimer(effectivePhysicalSpeedSps);", firmware)
+        self.assertIn("stopLocalPulseTimerAndSync();", firmware)
+        stop_body = firmware.split("void stopStepperImmediately()", 1)[1].split(
+            "void abortWebMotion", 1
+        )[0]
+        self.assertIn("disableDriverOutput();", stop_body)
 
     def test_decodes_forward_blocked_by_positive_limit(self) -> None:
         status = UsbStepperSource.decode_status_line(self.FORWARD_BLOCKED)
@@ -214,8 +269,11 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertFalse(status["stepper_moving"])
         self.assertFalse(status["stepper_command_capable"])
         self.assertTrue(status["stepper_speed_command_capable"])
-        self.assertTrue(status["stepper_direction_command_capable"])
+        self.assertFalse(status["stepper_direction_command_capable"])
+        self.assertTrue(status["stepper_direction_calibration_safe"])
         self.assertEqual(status["stepper_direction_mapping"], "normal")
+        self.assertTrue(status["stepper_driver_enable_capable"])
+        self.assertFalse(status["stepper_driver_enabled"])
         self.assertEqual(status["stepper_command_speed_mm_s"], 1.5002)
 
     def test_decodes_reverse_motion_away_from_positive_limit(self) -> None:
@@ -226,12 +284,13 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertFalse(status["stepper_positive_limit_latched"])
         self.assertFalse(status["stepper_blocked"])
         self.assertTrue(status["stepper_moving"])
+        self.assertTrue(status["stepper_driver_enabled"])
         self.assertEqual(status["stepper_speed_mm_s"], -1.5002)
         self.assertTrue(status["stepper_pulse_measurement_capable"])
         self.assertEqual(status["stepper_measured_pulse_rate_sps"], 350)
         self.assertEqual(status["stepper_measured_speed_mm_s"], 1.3891)
 
-    def test_inverted_electrical_sign_preserves_logical_reverse_status(self) -> None:
+    def test_legacy_inverted_mapping_is_flagged_unsafe(self) -> None:
         status = UsbStepperSource.decode_status_line(
             self.INVERTED_REVERSE_MOVING
         )
@@ -239,6 +298,11 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertEqual(status["stepper_manual_direction"], "reverse")
         self.assertEqual(status["stepper_direction"], "negative")
         self.assertEqual(status["stepper_speed_mm_s"], -1.5002)
+        self.assertFalse(status["stepper_direction_calibration_safe"])
+        self.assertEqual(status["stepper_fault"], "unsafe_direction_calibration")
+        self.assertFalse(status["stepper_direction_command_capable"])
+        self.assertFalse(status["stepper_driver_enable_capable"])
+        self.assertIsNone(status["stepper_driver_enabled"])
 
     def test_decodes_mode_and_suppresses_open_loop_coordinates(self) -> None:
         status = UsbStepperSource.decode_status_line(
@@ -275,6 +339,8 @@ class UsbStepperSourceTests(unittest.TestCase):
             self.FORWARD_BLOCKED.replace('"sps":0', '"sps":"fast"'),
             self.FORWARD_BLOCKED.replace('"csps":378', '"csps":2521'),
             self.FORWARD_BLOCKED.replace('"ds":1', '"ds":0'),
+            self.FORWARD_BLOCKED.replace('"en":0', '"en":2'),
+            self.FORWARD_BLOCKED.replace('"en":0', '"en":1'),
             self.REVERSE_MOVING.replace('"aps":350', '"aps":true'),
             self.REVERSE_MOVING.replace('"aps":350', '"aps":-1'),
             self.WEB_READY_FORWARD_ARMED.replace('"st":5', '"st":10'),
@@ -331,8 +397,6 @@ class UsbStepperSourceTests(unittest.TestCase):
             self.assertIsNotNone(source.poll(0.1))
             source.set_speed(3.25)
             self.assertEqual(os.read(master_fd, 32), b"V1 S819\n")
-            source.set_direction_mapping(True)
-            self.assertEqual(os.read(master_fd, 32), b"V1 D1\n")
 
             os.write(master_fd, (self.REVERSE_MOVING + "\r\n").encode())
             self.assertIsNotNone(source.poll(0.2))
@@ -350,12 +414,30 @@ class UsbStepperSourceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     source.set_speed(speed)
 
-    def test_rejects_non_boolean_direction_mapping(self) -> None:
+    def test_runtime_direction_mapping_surface_is_removed(self) -> None:
         source = UsbStepperSource()
-        for inverted in (0, 1, "true", None):
-            with self.subTest(inverted=inverted):
-                with self.assertRaises(ValueError):
-                    source.set_direction_mapping(inverted)
+        self.assertFalse(hasattr(source, "set_direction_mapping"))
+        self.assertNotIn("stepperDirectionMapping", INDEX_HTML)
+        self.assertNotIn("/api/stepper/direction-mapping", INDEX_HTML)
+
+    def test_unsafe_legacy_mapping_rejects_motion_commands(self) -> None:
+        master_fd, slave_fd = pty.openpty()
+        source = UsbStepperSource(port=os.ttyname(slave_fd))
+        try:
+            self.assertIsNone(source.poll(0.0))
+            unsafe = self.WEB_UNHOMED_REVERSE_ARMED.replace('"ds":1', '"ds":-1')
+            os.write(master_fd, (unsafe + "\r\n").encode())
+            self.assertIsNotNone(source.poll(0.1))
+            with self.assertRaisesRegex(RuntimeError, "unsafe legacy"):
+                source.move(-1.0, 1.0)
+            with self.assertRaisesRegex(RuntimeError, "unsafe legacy"):
+                source.home()
+            readable, _, _ = select.select([master_fd], [], [], 0.05)
+            self.assertFalse(readable)
+        finally:
+            source.close()
+            os.close(master_fd)
+            os.close(slave_fd)
 
     def test_writes_mode_home_move_and_stop_commands_with_guards(self) -> None:
         master_fd, slave_fd = pty.openpty()
@@ -607,7 +689,14 @@ class NetworkStepperSourceTests(unittest.TestCase):
         bridge_source = Path(__file__).with_name("yun_stepper_bridge.py").read_bytes()
         bridge_source.decode("ascii")
         self.assertEqual(validate_command(" V1 E1\n"), "V1 E1")
-        for command in ("V1 Q", "V1 G1,2", "V2 E1", "V1 S" + "1" * 60):
+        for command in (
+            "V1 Q",
+            "V1 D0",
+            "V1 D1",
+            "V1 G1,2",
+            "V2 E1",
+            "V1 S" + "1" * 60,
+        ):
             with self.subTest(command=command):
                 with self.assertRaises(ValueError):
                     validate_command(command)
@@ -643,7 +732,7 @@ class NetworkStepperSourceTests(unittest.TestCase):
         bridge.open()
         try:
             def reject() -> None:
-                self.assertEqual(os.read(master_fd, 64), b"V1 D1\n")
+                self.assertEqual(os.read(master_fd, 64), b"V1 M1\n")
                 os.write(
                     master_fd,
                     b'{"v":1,"t":"a","ok":0,"e":"owned_by_usb"}\n',
@@ -652,7 +741,7 @@ class NetworkStepperSourceTests(unittest.TestCase):
             responder = threading.Thread(target=reject)
             responder.start()
             with self.assertRaisesRegex(CommandRejected, "owned_by_usb"):
-                bridge.command("V1 D1")
+                bridge.command("V1 M1")
             responder.join(timeout=1.0)
             self.assertFalse(responder.is_alive())
 
@@ -860,32 +949,6 @@ class UsbStepperDashboardTests(unittest.TestCase):
             self.assertFalse(payload["stepper"]["stepper_command_capable"])
             self.assertTrue(
                 payload["stepper"]["stepper_speed_command_capable"]
-            )
-
-            direction_command: list[bytes] = []
-
-            def acknowledge_direction() -> None:
-                direction_command.append(os.read(master_fd, 32))
-                confirmed_status = (
-                    '{"v":1,"t":"s","q":11,"d4":1,"d5":0,"d6":1,"d8":1,'
-                    '"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,'
-                    '"csps":1008,"ds":-1}\r\n'
-                )
-                os.write(master_fd, confirmed_status.encode())
-
-            responder = threading.Thread(target=acknowledge_direction)
-            responder.start()
-            payload = runtime.set_stepper_direction_mapping({"inverted": True})
-            responder.join(timeout=1.0)
-            self.assertFalse(responder.is_alive())
-            self.assertEqual(direction_command, [b"V1 D1\n"])
-            self.assertTrue(payload["confirmed"])
-            self.assertEqual(
-                payload["sample"]["stepper_direction_mapping"],
-                "inverted",
-            )
-            self.assertTrue(
-                payload["stepper"]["stepper_direction_command_capable"]
             )
         finally:
             runtime.stop()

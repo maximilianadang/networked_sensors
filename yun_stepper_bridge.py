@@ -46,7 +46,6 @@ COMMAND_PATTERNS = tuple(
     for pattern in (
         r"^V1 E[01]$",
         r"^V1 S[0-9]{1,4}$",
-        r"^V1 D[01]$",
         r"^V1 M[01]$",
         r"^V1 H$",
         r"^V1 X$",

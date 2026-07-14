@@ -56,9 +56,11 @@ when runnable behavior changes.
   absolute software-position envelope.
 - Acceleration is fixed in firmware at a provisional 5 mm/s² rather than being
   an operator-adjustable webpage/API field.
-- Firmware pulse instrumentation measures AccelStepper's emitted-step counter
-  over a 250 ms window. It distinguishes configured/scheduled rate from actual
-  D3 pulse attempts, but it is not driver-acceptance or piston-position feedback.
+- Firmware pulse instrumentation measures the shared pulse-position counter
+  over a 250 ms window. Timer1 advances it in Local Velocity and AccelStepper
+  advances it in Web Position. It distinguishes configured/scheduled rate from
+  actual D3 pulse attempts, but it is not driver-acceptance or piston-position
+  feedback.
 - The standalone sketch now reads both limits, reports raw switch-level changes
   over Serial, and blocks only motion farther into the corresponding end.
 - The Yún Linux side is configured as a WPA2 client of `GL-MT3000-b3a` using
@@ -76,8 +78,9 @@ when runnable behavior changes.
     flow measurements share one run timeline.
   - Preserve one status/command shape across `sim`, `usb`, and `network`.
   - Execution order is T2-T4 (contract/simulation/UI), T4A (USB diagnostics),
-    T4B (manual speed tuning without remote motion), T4C (D4-off electrical
-    direction mapping), T5 (bounded USB motion), T5A (latched software
+    T4B (manual speed tuning without remote motion), retired T4C (runtime
+    direction mapping), T4D (fixed physical direction and D9 driver disable),
+    T5 (bounded USB motion), T5A (latched software
     E-STOP), T6 (network/Bridge), T7
     (transport parity), then T8-T9 (hardware and acceptance). T1
     hardware-envelope values remain a gate before remotely started motion, but
@@ -240,7 +243,7 @@ when runnable behavior changes.
     RAM, is uploaded, and reports stopped `aps:0`; physical 1.5/3.0/5.0 mm/s
     measured-pulse/DRO travel checks remain pending.
 
-- [ ] **ACTIVE - T4C - allow guarded electrical direction mapping.**
+- [x] **RETIRED - T4C - guarded electrical direction mapping.**
   - Add Normal/Inverted mapping to the existing page for correcting the
     logical-to-electrical DIR sign without rewiring motor phases.
   - Accept only `V1 D0` (normal) or `V1 D1` (inverted), only while D4 is OFF;
@@ -259,6 +262,36 @@ when runnable behavior changes.
     race that reset the selected mapping before Apply was fixed; the restarted
     page now reports `inverted` with D4 OFF and zero effective speed. Physical
     Normal/Inverted identification remains pending.
+  - **Retirement reason:** runtime inversion can reverse physical motion without
+    reversing the D6/D8 endpoint selected by the interlock. This unsafe design
+    is removed by T4D; `V1 D`, its API, and its page control are not supported.
+
+- [ ] **ACTIVE - T4D - lock physical direction and remove stopped holding current.**
+  - [x] Fix the verified relationship in firmware: D5 Forward/positive travels
+    toward D6 and D5 Reverse/negative travels toward D8.
+  - [x] Remove `V1 D0|1` from firmware and the Yún bridge, remove the adapter/API
+    and page control, and reject Web Position commands from legacy status that
+    reports inverted calibration.
+  - [x] Route Local Velocity, Web Position, Home, and idle display through one
+    physical-direction interlock helper so each endpoint blocks only motion
+    into itself and permits retreat.
+  - [x] Assign Yún D9 to the DM542T `ENA-` terminal while `ENA+` stays at 5 V.
+    Drive D9 LOW whenever stopped, limit-blocked, or software-E-stopped; drive
+    it HIGH and wait the manual-required 200 ms before emitting STEP pulses.
+  - [x] Add compact `en` status, stable driver capability/state fields, and a
+    read-only dashboard display for fixed direction plus D9/ENA state.
+  - [x] Verify 37 desktop tests and compile the final Timer1 Local Velocity
+    image for `arduino:avr:yun` at 22,620 bytes/78% flash and 1,453 bytes/56%
+    RAM.
+  - [x] Upload with verification, confirm D4 OFF, `ds:1`, `en:0`, `aps:0`, and
+    no motion, then obtain an operator-confirmed working Local Velocity run.
+  - [x] Fix stale opposite-end history: an exclusively active raw endpoint
+    clears the opposite latch; simultaneous raw LOW inputs remain fail-closed.
+  - [x] Use Timer1 for Local Velocity STEP timing so dashboard/transport work
+    cannot impose the former cooperative-loop pulse ceiling.
+  - [ ] At each active limit, confirm STEP output reaches zero, D9 reports LOW,
+    motor holding torque disappears, and the opposite D5 direction re-enables
+    after at least 200 ms and moves away.
 
 - [ ] **ACTIVE - T5 - refactor Yún firmware into a non-blocking distance engine.**
   - Preserve D2-D6 and D8 assignments and local safety inputs.
@@ -358,7 +391,9 @@ when runnable behavior changes.
     enabled at boot, a Linux reboot returned synchronized status without an SSH
     login, and `provision_yun.sh` plus `run_lan_dashboard.sh` cover one-time
     deployment/Wi-Fi setup and ordinary LAN startup. `GL-MT3000-b3a` is stored
-    for the next power cycle. Ownership/E-STOP parity, jitter/latency
+    for the next power cycle. The current repository bridge removes retired
+    `V1 D` handling and must be redeployed to the AR9331 after the Timer1
+    firmware update. Ownership/E-STOP parity, jitter/latency
     measurement, target-LAN association, and disconnect-during-motion checks
     remain before the gate.
 

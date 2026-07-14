@@ -10,13 +10,18 @@ The local dashboard/API and disk-backed recorder/exporter run without hardware.
 ESP32, DXMR90, and Yún stepper sources are simulated by default. Real ESP32
 HTTP/SSE input, real DXMR90 Modbus input, and Yún `usb` mode are implemented.
 The stepper USB path has Local Velocity, Web Position, optional D8-limit seek,
-move, Stop, and calibration controls. T5 is currently uploaded and stopped-live
-verified on the bench Yún; the latched software E-STOP revision is now uploaded
-and its stopped-state latch/reset path is live-verified. Moving-stop tests remain.
+move, Stop, and calibration controls. The current fixed-direction image is
+compiled, uploaded, and operator-confirmed for Local Velocity. It uses Timer1
+for Local Velocity pulses, controls DM542T `ENA-` from D9, and fixes stale
+opposite-limit history. The exact-image two-endpoint retreat/D9 matrix and Web
+Position timing qualification remain.
 The page's **SOFTWARE E-STOP** inhibits
-STEP output through the laptop/USB/Yún-firmware chain. It does not remove motor
-power and is not a hardwired, safety-rated emergency stop. Yún `network` is
-reserved but not yet implemented. Start the all-simulated dashboard with:
+STEP output through the laptop/USB/Yún-firmware chain. D9 removes holding
+current, but it does not isolate the 24 V driver supply and is not a hardwired,
+safety-rated emergency stop.
+Yún `network` is implemented; the repository bridge must be redeployed to the
+Yún Linux side after this firmware revision before LAN motion testing. Start
+the all-simulated dashboard with:
 
 ```bash
 python3 networked_sensors/dashboard.py --host 127.0.0.1 --port 8000 --record-dir networked_sensors/recordings
@@ -176,15 +181,14 @@ Useful endpoints:
 | `/api/run/start`, `/api/run/stop` | disk-backed recording lifecycle |
 | `/api/metadata` | in-memory metadata save |
 | `/api/solenoid/toggle?n=0..3` | simulated or real ESP32 solenoid control; index 3 is GPIO 10 |
-| `/api/stepper/status` | mode, D4/D5 authority, D6/D8 limits, command, speed, and transport health; open-loop position fields are null |
+| `/api/stepper/status` | mode, D4/D5 authority, fixed physical direction, D6/D8 limits, D9/ENA driver output, command, speed, and transport health; open-loop position fields are null |
 | `/api/stepper/control-mode` | `{"web_position": true|false}`; D4 must be OFF and motion stopped |
 | `/api/stepper/home` | optional move to the D8 limit at fixed 1.5 mm/s; Web Position, D4 armed, D5 Reverse |
 | `/api/stepper/move` | positive relative travel magnitude and speed; D5 selects direction; fixed acceleration; simulation and T5 USB |
 | `/api/stepper/stop` | immediate Web Position motion abort; simulation and T5 USB |
 | `/api/stepper/estop` | latch the software E-STOP in either control mode; waits for fresh Yún confirmation |
 | `/api/stepper/estop/reset` | reset the latch while stopped with physical D4 OFF; waits for fresh Yún confirmation |
-| `/api/stepper/speed` | USB Local Velocity speed setpoint; `{"speed_mm_s": 3.0}`, D4 must be OFF; success waits for a fresh Yún configured-speed echo |
-| `/api/stepper/direction-mapping` | USB electrical DIR mapping; `{"inverted": true}`, D4 must be OFF; the page toggle submits immediately and success waits for a fresh Yún mapping echo |
+| `/api/stepper/speed` | USB/network Local Velocity speed setpoint; `{"speed_mm_s": 3.0}`, D4 must be OFF; success waits for a fresh Yún configured-speed echo |
 | `/api/recordings` | completed recordings and active recording status |
 | `/api/export/latest` | latest completed export CSV |
 | `/api/export?run_id=...&file=...` | selected artifact download |
@@ -278,8 +282,10 @@ mechanical rating: begin at 1.5 mm/s and increase through short 3.0 and 5.0 mm/s
 travel-away checks before attempting anything faster.
 
 With the instrumented firmware, **Measured STEP output** is calculated from the
-change in AccelStepper's emitted-step counter over a 250 ms window. It shows
-both pulses/s and the corresponding magnitude in mm/s. Compare it with
+change in the firmware's signed pulse-position counter over a 250 ms window.
+Timer1 advances that counter in Local Velocity; AccelStepper advances it in Web
+Position. It shows both pulses/s and the corresponding magnitude in mm/s.
+Compare it with
 **Configured speed** and **Scheduled speed** during a continuous Local Velocity
 run. A 5 mm/s request should schedule about 1260 pulses/s; the measured field
 reveals how many D3 pulse attempts the firmware actually emitted. This remains
@@ -287,15 +293,23 @@ open-loop electrical evidence: it does not prove that the DM542T accepted every
 pulse or that the piston travelled the converted distance, so retain the DRO
 comparison.
 
-With T4C uploaded, **Electrical direction mapping** corrects the relationship
-between logical D5 Forward/Reverse and the driver's DIR level. Put D4 OFF,
-toggle Normal/Inverted and wait for confirmation. The firmware receives `V1 D0`
-or `V1 D1`; the setting does not move the motor. D5 remains the
-direction selector, and D6/D8 continue to protect logical positive/negative
-travel. Starting at an active D6, test Reverse briefly at 1.5 mm/s under Normal;
-if the mechanism loads into the stop rather than moving away, stop with D4,
-apply Inverted while D4 is OFF, and repeat. Do not switch mapping during motion.
-Like speed, direction mapping resets to Normal after an ATmega restart.
+T4C runtime direction mapping is retired. The physically verified relationship
+is immutable: D5 Forward/positive travels toward D6, and D5 Reverse/negative
+travels toward D8. `V1 D0|1`, its API, and its dashboard toggle no longer
+exist. Status retains `ds:1` only as read-only deployment evidence. A legacy
+`ds:-1` frame is marked unsafe and Web Position commands are refused until the
+fixed-direction firmware is uploaded.
+
+The fixed-direction firmware also controls DM542T motor current. With all
+power off, leave `ENA+` on the existing Yún 5 V common-anode connection and
+connect `ENA-` to Yún D9. Never connect or disconnect a DM542T terminal while
+the driver is powered. D9 LOW disables the driver output stage and removes
+motor holding current; D9 HIGH enables it. Firmware keeps D9 LOW whenever
+stopped, limit-blocked, or software-E-stopped. Before motion it raises D9,
+waits the DM542T manual's required 200 ms without blocking limit/E-STOP checks,
+and only then emits STEP pulses. The dashboard must show **DISABLED / D9 LOW**
+at rest. This does not remove the DM542T's 24 V supply and is not a substitute
+for safety-rated energy isolation.
 
 With T5 firmware, use the webpage **Control mode** toggle while D4 is OFF:
 
@@ -358,8 +372,12 @@ comments that inittab entry on start, terminates only the process attached to
 the UART, and restores the exact saved console configuration on stop. First
 upload and verify the matching `limit_switch_palas.ino` over USB.
 
-The preferred one-time install is the provisioner. Run it while the Yún is
-reachable at its current DHCP address. Supplying a target SSID stores that
+The preferred install/update path is the provisioner. Run it while the Yún is
+reachable at its current DHCP address. Run it once more after checking out this
+fixed-direction/Timer1 revision: uploading the ATmega sketch over USB does not
+replace `/root/yun_stepper_bridge.py` on the AR9331 Linux side. With no SSID
+argument, the provisioner redeploys the service without changing Wi-Fi.
+Supplying a target SSID stores that
 network for the next cold start without reloading Wi-Fi during provisioning:
 
 ```bash
@@ -496,9 +514,10 @@ Network assumptions:
 | simulated supervisor | `python3 networked_sensors/supervisor.py --samples 12` | JSONL contains source modes, connected flags, age fields |
 | stale scenario | `python3 networked_sensors/supervisor.py --scenario dxmr90_stale --samples 45 --drop-after-s 1 --stale-after-s 1` | `dxmr90_connected` flips false after age threshold |
 | missing scenario | `python3 networked_sensors/supervisor.py --scenario dxmr90_missing --samples 3` | DXMR90 fields are present as `null` |
-| stepper contract | `python3 -m unittest -v networked_sensors.test_stepper_control` | 33 tests cover D5-selected travel, mode, D8 seek, Stop, latched software E-STOP/reset, limits, USB/network bytes/acks, ownership, rejection/timeout, nonblocking UART reads, fresh runtime acknowledgements, legacy status, and merged schema |
+| stepper contract | `python3 -m unittest -v networked_sensors.test_stepper_control` | 37 tests cover fixed physical direction, D9 state, D5-selected travel, mode, D8 seek, Stop, latched software E-STOP/reset, limits, USB/network bytes/acks, ownership, rejection/timeout, nonblocking UART reads, fresh runtime acknowledgements, legacy status, and merged schema |
 | Yún T5A compile/upload | temporary official CLI/core/library, `arduino:avr:yun` | 65% flash/28% RAM; 18,652 bytes uploaded and read back, fresh D4-off stopped latch/reset confirmed; moving-stop checks pending |
 | Yún T6 network compile/upload | same Yún toolchain | 20,794 bytes/72% flash and 1,399 bytes/54% RAM; upload and Linux service install pass; AsteraMesh health/status report owner none, D4 OFF, clear limits/E-STOP, and zero motion; motion qualification pending |
+| Yún fixed-direction Timer1 compile/upload | same Yún toolchain, `arduino:avr:yun`, `/dev/ttyACM0` | 22,620 bytes/78% flash and 1,453 bytes/56% RAM; verified upload, stopped status, and operator-confirmed Local Velocity motion pass; exact two-endpoint D9 retreat matrix and Web Position timing remain |
 | Yún network loopback | `python3 -m unittest -v networked_sensors.test_stepper_control.NetworkStepperSourceTests` | 7 tests pass exact UART/HTTP relay, ownership status, rejection, timeout, nonblocking UART `EAGAIN`, CLI/factory, and fresh network E-STOP confirmation |
 | dashboard/API | `python3 networked_sensors/dashboard.py --host 127.0.0.1 --port 8000` | browser dashboard, JSON endpoints, SSE stream, metadata, run state, and simulated solenoid controls respond |
 | simulated stepper API | dashboard plus GET status and POST move/stop/E-STOP/reset endpoints | bounded moves and a latched mode-independent software stop remain on the shared stream |

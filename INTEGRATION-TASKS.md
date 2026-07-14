@@ -59,10 +59,19 @@ Progress is chronicled in `INTEGRATION-PROCEDURE.md`.
       implemented without remote start/stop/direction authority; desktop tests,
       Yún compile/upload, and the live zero-motion 3.0 mm/s echo pass, while
       staged physical-speed checks remain.
-- [ ] **I3b3 - USB Yún direction-mapping adapter.** Normal/Inverted electrical
-      mapping is implemented as a D4-off calibration parameter while D5 and the
-      logical limits retain authority; desktop tests, Yún compile/upload, and
-      live capability pass, while physical sign verification remains.
+- [x] **RETIRED - I3b3 - USB Yún direction-mapping adapter.** Normal/Inverted
+      runtime mapping was implemented and uploaded, then retired after physical
+      testing proved electrical inversion could disagree with the D6/D8
+      interlock selection. It is historical evidence, not a supported control.
+- [ ] **I3b3a - fixed direction and driver-enable adapter.** Normal is the
+      immutable physical calibration; legacy inverted status blocks Web
+      Position commands; D9 drives common-anode DM542T ENA- LOW whenever
+      stopped/blocked/E-stopped and waits 200 ms after HIGH before STEP. Compact
+      `en`, adapter fields, dashboard status, authoritative raw-endpoint latch
+      clearing, and Timer1 Local Velocity timing are integrated. Thirty-seven
+      tests, the 78%-flash/56%-RAM compile, verified upload, and a working local
+      run pass; matching bridge redeployment and the exact-image two-endpoint
+      matrix remain.
 - [ ] **I3b4 - USB Yún dual-mode position adapter.** Local Velocity preserves
       D4/D5 continuous control; Web Position gives D4 arm/abort and uses D5 as
       the direction selector for a positive travel magnitude. Mode, fixed-speed

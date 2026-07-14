@@ -166,3 +166,10 @@ translate as:
       scheduled, and measured emitted-pulse speed; document the optional `aps`
       wire field, 250 ms window, dashboard display, compatibility behavior, and
       the boundary that this is not driver or piston feedback.
+- [x] **D25 - document fixed direction and driver-output control.** Retire the
+      unsafe runtime mapping contract, record immutable Normal physical
+      direction, D9-to-ENA- common-anode wiring, LOW-disabled/HIGH-enabled
+      polarity, the 200 ms wake-up, compact `en`, legacy inversion refusal,
+      authoritative raw-endpoint latch clearing, Timer1 Local Velocity timing,
+      compile/upload/tests, the working physical run, and the remaining exact-
+      image two-endpoint hardware matrix.

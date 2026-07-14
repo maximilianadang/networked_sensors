@@ -28,6 +28,17 @@ the reasoning; source files remain the interface of record.
   verified upload, and stopped live USB status pass, with staged physical motion
   checks still required. Signed deltas exist only below the page/API boundary.
   D4 and D6/D8—not homed/absolute open-loop position—are the motion safety inputs.
+  Runtime Normal/Inverted direction mapping is retired after it was shown to
+  decouple physical travel from the selected endpoint interlock. The current
+  revision fixes Normal (Forward -> D6, Reverse -> D8), refuses Web Position
+  commands from legacy `ds:-1` status, and controls common-anode DM542T ENA-
+  from D9. It disables motor holding current whenever stopped/blocked/E-stopped
+  and waits 200 ms after re-enable before STEP. Local Velocity STEP timing now
+  uses Timer1 rather than cooperative `runSpeed()`, removing the observed
+  webpage-traffic speed ceiling. Thirty-seven desktop tests, a
+  22,620-byte/78%-flash, 1,453-byte/56%-RAM Yún compile, verified upload, and
+  an operator-confirmed working Local Velocity run pass; the complete
+  two-endpoint D9/retreat matrix on this exact image remains.
   A prominent dashboard software E-STOP now latches in the ATmega across both
   modes and requires D4 OFF to reset. It depends on the host/USB/firmware path
   and must never be represented as a hardwired safety-rated E-stop. The T5A
@@ -96,7 +107,7 @@ DXMR90 Modbus TCP          -> RealDxmr90Source      /
 Simulated DXMR90 readings  -> SimulatedDxmr90Source/
 Simulated Yún stepper      -> SimulatedStepperSource/
 Yún native USB status      -> UsbStepperSource      /
-Yún Wi-Fi/UART bridge API  -> NetworkStepperSource /  (software landed; physical install pending)
+Yún Wi-Fi/UART bridge API  -> NetworkStepperSource /  (older service installed; current bridge redeploy pending)
 ```
 
 The supervisor should expose one merged sample model with laptop timestamps,

@@ -134,14 +134,13 @@ legacy investigation, not as the data source for the current laptop UI.
 
 ## Yún stepper transport handoff
 
-The last physically verified Yún image is the T6 stepper firmware. It includes
-a second, non-blocking Serial1 path and exclusive
-USB/network mutation ownership. The matching `yun_stepper_bridge.py` service
-runs on the Yún AR9331 and exposes status/commands on trusted-LAN port 8080;
-the laptop selects it with `--stepper-source network --stepper-url
-http://YUN_IP:8080`.
+The current physically uploaded Yún image is the fixed-direction Timer1
+revision. It includes a non-blocking Serial1 path, exclusive USB/network
+mutation ownership, D9/ENA control, and timer-backed Local Velocity pulses.
+It compiles at 22,620 bytes/78% flash and 1,453 bytes/56% RAM. Upload and
+operator-confirmed Local Velocity motion pass.
 
-Software loopback and compile checks pass; the T6 image and Linux service are
+Software loopback and compile checks pass; the earlier T6 Linux service is
 installed. Physical AsteraMesh health, advancing stopped status, and an
 expected Local-Velocity Stop rejection pass through the full HTTP/UART path.
 The service is enabled at boot, a Linux restart returned synchronized status
@@ -153,14 +152,29 @@ comes from the motor datasheet's 0.00396875 mm/full-step value and the observed
 DM542T SW5-SW8 all-ON 200-pulse/rev setting; SW4 is only the standstill-current
 selector. Stopped post-upload status reports `csps:378` for the 1.5 mm/s
 default. A repeated DRO distance check and high-rate smoothness test remain.
-The next firmware revision adds optional compact status field `aps`, measuring
-the emitted STEP-counter change over 250 ms. The laptop presents this separately
-from configured and scheduled speed. Its desktop contract and Yún compile pass,
-and the verified USB upload reports stopped `aps:0`; it is electrical open-loop
-evidence rather than DM542T-acceptance or piston feedback.
+Compact status field `aps` measures the emitted pulse-counter change over
+250 ms. The laptop presents this separately from configured and scheduled
+speed. It is electrical open-loop evidence rather than DM542T acceptance or
+piston feedback.
 Do not represent the stepper as motion-qualified until the remaining
 ownership/E-STOP checklist and
 the moving jitter/latency/restart/disconnect checks pass. The custom service
 temporarily replaces LEDEYun's stock `askconsole` as `/dev/ttyATH0` owner and
 restores that console when stopped. It has no application authentication, so
 it belongs only on the isolated bench LAN.
+
+The current safety revision retires the former runtime Normal/Inverted
+direction mapping. Physical endpoint testing established Normal as
+Forward/positive to D6 and Reverse/negative to D8, but the old toggle could
+reverse the motor while the interlock still selected the logical endpoint. It removes
+`V1 D` across firmware/bridge/adapter/page, centralizes physical-direction
+interlocks, and flags legacy `ds:-1` status as unsafe for Web Position commands.
+It also connects DM542T `ENA-` to Yún D9 while `ENA+` remains at 5 V. Firmware
+holds D9 LOW whenever stopped, blocked, or software-E-stopped, raises it only
+for permitted motion, waits 200 ms before STEP, and publishes compact `en`.
+Thirty-seven desktop tests, the current target compile, verified USB upload,
+stopped `ds:1`/`en:0`/`aps:0`, stale opposite-limit correction, and an
+operator-confirmed Local Velocity run pass. The installed AR9331 bridge is an
+older deployment and must be replaced from this checkout before LAN testing.
+The exact-image two-endpoint D9/retreat matrix and Web Position timing remain;
+do not claim full physical motion qualification before those pass.

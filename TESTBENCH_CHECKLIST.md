@@ -137,7 +137,7 @@ Before using the laptop supervisor as the primary logger:
   `stepper_raw.csv` on the same timestamps as flow-source records.
 - The UI clearly reports `sim` source mode during no-hardware checks.
 
-## 11. USB-backed Yún diagnostics and calibration (T4A-T4C)
+## 11. USB-backed Yún diagnostics and fixed direction (T4A-T4D)
 
 - Before upload, compile the repository sketch for `arduino:avr:yun`; do not
   infer compile success from Python tests.
@@ -158,21 +158,30 @@ Before using the laptop supervisor as the primary logger:
   Scheduled speed and Measured STEP output remain 0; repeat at 3.0 mm/s.
 - With D4 ON, confirm Apply Manual Speed is disabled and a direct API request is
   rejected. A rejected request must not change the configured speed.
-- With D4 OFF, apply Normal and Inverted direction mappings and confirm each is
-  echoed without effective motion. With D4 ON, confirm mapping changes are
-  disabled/rejected.
-- Starting at active D6, use a brief 1.5 mm/s Reverse test to identify the one
-  mapping that physically moves away from D6. Stop immediately if the coupling
-  loads, slips, stalls, or moves farther into the hard stop; record the accepted
-  mapping before any range test.
+- Confirm the page has no direction-mapping control or endpoint and reports
+  fixed Normal: D5 Forward toward D6 and D5 Reverse toward D8. Status must show
+  `ds:1`; treat legacy `ds:-1` as unsafe firmware requiring replacement.
+- With DM542T power off, confirm ENA+ remains on Yún 5 V and ENA- is connected
+  to D9. Do not plug or unplug driver terminals while the DM542T is powered.
+- After fixed-direction firmware upload, keep D4 OFF and confirm compact status
+  `en:0`, dashboard **DISABLED / D9 LOW**, `aps:0`, and no motor holding torque.
+- At active D6 with D5 Forward, confirm positive motion is blocked, STEP output
+  reaches zero, and D9 goes LOW. Select Reverse and confirm D9 goes HIGH, no
+  STEP pulse occurs during the 200 ms wake-up, then motion retreats from D6.
+- Mirror the same check at D8: Reverse is blocked/de-energized; Forward
+  re-enables after at least 200 ms and retreats. This complete two-endpoint
+  matrix is required before treating the correction as physically verified.
 - Run short motion-away tests at 1.5, 3.0, then 5.0 mm/s. Confirm direction,
   smoothness, D4 stopping, and the destination limit at every stage. Record
   Configured speed, Scheduled speed, Measured STEP pulses/s, converted measured
   mm/s, and DRO speed. Stop escalation at the first missed step, stall,
   roughness, or unexpected motion. The measured STEP field proves firmware D3
   pulse attempts only, not driver acceptance or piston travel.
-- When deliberately testing legacy T4C firmware, confirm USB Move, Home, and
-  Stop remain disabled rather than implying position capability.
+- Local Velocity is Timer1-backed in the current image. Verify requested versus
+  measured D3 pulse rate at both 1.5 and 5.0 mm/s. Qualify Web Position timing
+  separately because bounded moves still use cooperative AccelStepper `run()`.
+- Do not deliberately move with legacy T4C inverted firmware. The current
+  laptop adapter must refuse Web Position mode/Home/Move when `ds:-1` is seen.
 
 ## 12. USB bounded position control (T5)
 
@@ -235,14 +244,17 @@ Before using the laptop supervisor as the primary logger:
 
 ## 14. Yún Linux/LAN bridge (T6-T7)
 
-- Keep DM542T motor power off. Compile and upload the exact repository T6
-  firmware; confirm the build is approximately 20,794 bytes flash and 1,399
-  bytes global RAM, then verify USB stopped status before touching Linux.
+- Keep DM542T motor power off. Compile and upload the exact repository firmware;
+  the current Timer1 image uses 22,620 bytes flash and 1,453 bytes global RAM.
+  Verify USB stopped status before touching Linux.
 - Reserve the Yún DHCP address and confirm the dashboard laptop can reach that
   address on the isolated bench LAN. Do not expose TCP 8080 outside that LAN.
 - Run `provision_yun.sh CURRENT_YUN_HOST [TARGET_WIFI_SSID]`, or use the
   documented manual recovery commands. Confirm the wrapper saved/commented
   `::askconsole` and no `/bin/ash --login` process retains `/dev/ttyATH0`.
+- Re-run the provisioner after this revision even when Wi-Fi is already correct;
+  omit the SSID to redeploy only the matching bridge. Confirm the installed
+  bridge does not send the retired `V1 D` command.
 - `GET /v1/health` reports the expected UART and no error. `GET /v1/status`
   returns advancing compact status with the real D4/D5/D6/D8 values and zero
   motion.

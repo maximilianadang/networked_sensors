@@ -770,13 +770,6 @@ INDEX_HTML = r"""<!doctype html>
               </label>
               <label id="stepperDistanceField" hidden>Relative travel distance (mm)<input id="stepperDistance" name="distance_mm" type="number" step="0.01" min="0.01" max="137.18" value="1.0" required disabled></label>
               <label><span id="stepperSpeedLabel">Local velocity speed (mm/s)</span><input id="stepperSpeed" name="speed_mm_s" type="number" step="0.1" min="0.1" max="10" value="1.5" required></label>
-              <label>Electrical direction mapping
-                <span class="toggle-control">
-                  <input id="stepperDirectionMapping" type="checkbox" role="switch" aria-label="Invert electrical direction mapping">
-                  <span class="toggle-track" aria-hidden="true"></span>
-                  <span id="stepperDirectionMappingLabel">Normal</span>
-                </span>
-              </label>
               <label id="stepperCommandField" hidden>Command ID (optional)<input id="stepperCommandInput" name="command_id" maxlength="64" autocomplete="off" disabled></label>
             </div>
             <div class="form-actions">
@@ -804,7 +797,8 @@ INDEX_HTML = r"""<!doctype html>
               <dl>
                 <dt>Local enable (D4)</dt><dd id="stepperLocal">--</dd>
                 <dt id="stepperD5Label">Manual direction (D5)</dt><dd id="stepperManualDirection">--</dd>
-                <dt>Electrical direction mapping</dt><dd id="stepperDirectionStatus">--</dd>
+                <dt>Fixed physical direction</dt><dd id="stepperDirectionStatus">--</dd>
+                <dt>Driver output (D9 / ENA-)</dt><dd id="stepperDriverOutput">--</dd>
                 <dt>Positive limit (D6)</dt><dd id="stepperPositiveLimit">--</dd>
                 <dt>Negative limit (D8)</dt><dd id="stepperNegativeLimit">--</dd>
                 <dt>Motion decision</dt><dd id="stepperBlocked">--</dd>
@@ -825,8 +819,6 @@ INDEX_HTML = r"""<!doctype html>
     let runState = {};
     let history = [];
     let pollTimer = null;
-    let directionMappingDirty = false;
-    let directionRequestPending = false;
     let controlModeDirty = false;
     let controlModeRequestPending = false;
     let stepperMessageSticky = false;
@@ -842,11 +834,11 @@ INDEX_HTML = r"""<!doctype html>
       "espFlow", "espTransport", "dxMode", "dxAge", "dxPort1", "dxPort2",
       "sol0", "sol1", "sol2", "sol3", "startRun", "stopRun", "exportRun", "metadataForm",
       "emergencyStop", "emergencyReset", "emergencyState",
-      "stepperForm", "stepperDistanceField", "stepperDistance", "stepperSpeed", "stepperSpeedLabel", "stepperControlMode", "stepperControlModeLabel", "stepperDirectionMapping", "stepperDirectionMappingLabel",
+      "stepperForm", "stepperDistanceField", "stepperDistance", "stepperSpeed", "stepperSpeedLabel", "stepperControlMode", "stepperControlModeLabel",
       "stepperCommandField", "stepperCommandInput", "stepperMove", "stepperHome", "stepperStop", "stepperApplySpeed", "stepperMessage",
       "stepperState",
       "stepperConfiguredSpeed", "stepperEffectiveSpeed", "stepperMeasuredSpeed", "stepperCommand", "stepperOwner", "stepperModeStatus", "stepperLocal",
-      "stepperD5Label", "stepperManualDirection", "stepperDirectionStatus", "stepperPositiveLimit", "stepperNegativeLimit",
+      "stepperD5Label", "stepperManualDirection", "stepperDirectionStatus", "stepperDriverOutput", "stepperPositiveLimit", "stepperNegativeLimit",
       "stepperBlocked", "stepperSequence", "stepperTransport"
     ]) {
       els[id] = document.getElementById(id);
@@ -1001,20 +993,17 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
       text("stepperControlModeLabel", els.stepperControlMode.checked ? "Web Position" : "Local Velocity");
-      text("stepperDirectionStatus", latest.stepper_direction_mapping || "--");
-      if (latest.stepper_direction_mapping) {
-        if (!directionMappingDirty) {
-          els.stepperDirectionMapping.checked = latest.stepper_direction_mapping === "inverted";
-        } else if (
-          els.stepperDirectionMapping.checked ===
-          (latest.stepper_direction_mapping === "inverted")
-        ) {
-          // Keep a deliberate operator selection stable until firmware echoes
-          // it; only then resume following live status automatically.
-          directionMappingDirty = false;
-        }
-      }
-      text("stepperDirectionMappingLabel", els.stepperDirectionMapping.checked ? "Inverted" : "Normal");
+      const directionCalibrationSafe = latest.stepper_direction_calibration_safe === true;
+      text("stepperDirectionStatus", directionCalibrationSafe
+        ? "Normal (Forward → D6; Reverse → D8)"
+        : latest.stepper_direction_mapping === "inverted"
+          ? "UNSAFE LEGACY INVERSION — upload required"
+          : "Unavailable — firmware update required");
+      text("stepperDriverOutput", latest.stepper_driver_enable_capable === true
+        ? latest.stepper_driver_enabled
+          ? "ENERGIZED / D9 HIGH"
+          : "DISABLED / D9 LOW"
+        : "Unavailable — firmware update required");
       const positiveLatch = latest.stepper_positive_limit_latched ? " / LATCHED" : "";
       const negativeLatch = latest.stepper_negative_limit_latched ? " / LATCHED" : "";
       text("stepperPositiveLimit", `${latest.stepper_positive_limit_active ? "ACTIVE / LOW" : "Clear / HIGH"}${positiveLatch}`);
@@ -1028,6 +1017,8 @@ INDEX_HTML = r"""<!doctype html>
           ? "Stopped: run_off"
           : decisionReason === "boot_disarmed"
             ? "Stopped: cycle D4 OFF after reset"
+            : decisionReason === "driver_wakeup"
+              ? "Waiting: 200 ms driver wake-up"
             : ["d4_abort", "direction_auth", "operator_stop"].includes(decisionReason)
               ? `ABORTED: ${decisionReason}`
           : `Allowed: ${decisionReason}`;
@@ -1036,14 +1027,14 @@ INDEX_HTML = r"""<!doctype html>
       text("stepperTransport", latest.stepper_transport_error || (stepperConnected ? "Connected" : "Waiting for status"));
       if (!stepperMessageSticky && ["usb", "network"].includes(latest.stepper_mode)) {
         const transportLabel = latest.stepper_mode === "network" ? "LAN" : "USB";
-        text("stepperMessage", commandCapable
+        text("stepperMessage", !directionCalibrationSafe
+          ? `${transportLabel} unsafe legacy direction mapping; upload fixed-direction firmware before motion`
+          : commandCapable
           ? webPositionMode
             ? "Web Position ready; D4 arms, D5 selects direction, and D6/D8 stop travel"
             : "Local Velocity: D4 runs/stops and D5 selects direction"
-          : latest.stepper_direction_command_capable
-          ? `${transportLabel} calibration ready; upload position-capable firmware for Home and Move`
           : latest.stepper_speed_command_capable
-          ? `${transportLabel} speed tuning ready; upload direction-capable firmware to invert mapping`
+          ? `${transportLabel} speed tuning ready; upload position-capable firmware for Home and Move`
           : `${transportLabel} diagnostics only; upload T4B firmware for speed tuning`);
       }
       updateStepperControls();
@@ -1187,7 +1178,7 @@ INDEX_HTML = r"""<!doctype html>
       const d4Off = latest && latest.stepper_d4_raw === "HIGH";
       const commandCapable = latest && latest.stepper_command_capable === true;
       const speedCommandCapable = latest && latest.stepper_speed_command_capable === true;
-      const directionCommandCapable = latest && latest.stepper_direction_command_capable === true;
+      const directionCalibrationSafe = latest && latest.stepper_direction_calibration_safe === true;
       const modeCommandCapable = latest && latest.stepper_mode_command_capable === true;
       const homeCapable = latest && latest.stepper_home_capable === true;
       const estopCapable = latest && latest.stepper_estop_capable === true;
@@ -1237,12 +1228,12 @@ INDEX_HTML = r"""<!doctype html>
       text("stepperSpeedLabel", webPositionMode
         ? "Web Position move speed (mm/s)"
         : "Local velocity speed (mm/s)");
-      els.stepperMove.disabled = !commandCapable || !connected || !webPositionMode ||
+      els.stepperMove.disabled = !commandCapable || !directionCalibrationSafe || !connected || !webPositionMode ||
         estopLatched || !enabled || moving || !valid || !directionSelected || positiveBlocked || negativeBlocked;
       els.stepperStop.disabled = estopLatched || !commandCapable || !webPositionMode || !moving;
-      els.stepperHome.disabled = !homeCapable || !connected || !webPositionMode ||
+      els.stepperHome.disabled = !homeCapable || !directionCalibrationSafe || !connected || !webPositionMode ||
         estopLatched || !enabled || moving || (authorizedDirection !== "reverse" && authorizedDirection !== "both");
-      els.stepperControlMode.disabled = controlModeRequestPending || !modeCommandCapable ||
+      els.stepperControlMode.disabled = controlModeRequestPending || !directionCalibrationSafe || !modeCommandCapable ||
         estopLatched || !connected || !d4Off || moving;
       if (controlModeRequestPending) {
         els.stepperControlMode.title = "Waiting for the Yún to confirm the control mode";
@@ -1273,19 +1264,6 @@ INDEX_HTML = r"""<!doctype html>
         els.stepperApplySpeed.title = "Turn D4 OFF before applying a speed";
       } else {
         els.stepperApplySpeed.title = `Apply ${speed.toFixed(1)} mm/s and wait for Yún confirmation`;
-      }
-      els.stepperDirectionMapping.disabled = directionRequestPending ||
-        estopLatched || !directionCommandCapable || !connected || !d4Off || moving;
-      if (directionRequestPending) {
-        els.stepperDirectionMapping.title = "Waiting for the Yún to confirm the mapping";
-      } else if (!connected) {
-        els.stepperDirectionMapping.title = "Yún USB status is not connected";
-      } else if (!directionCommandCapable) {
-        els.stepperDirectionMapping.title = "The connected firmware does not support direction mapping";
-      } else if (!d4Off || moving) {
-        els.stepperDirectionMapping.title = "Turn D4 OFF before changing direction mapping";
-      } else {
-        els.stepperDirectionMapping.title = "Toggle to apply immediately";
       }
     }
 
@@ -1416,33 +1394,6 @@ INDEX_HTML = r"""<!doctype html>
         text("stepperMessage", `Mode rejected: ${error.message}`);
       } finally {
         controlModeRequestPending = false;
-        updateStepperControls();
-      }
-    });
-    els.stepperDirectionMapping.addEventListener("change", async () => {
-      const inverted = els.stepperDirectionMapping.checked;
-      const previousInverted = latest?.stepper_direction_mapping === "inverted";
-      directionMappingDirty = true;
-      directionRequestPending = true;
-      stepperMessageSticky = true;
-      text("stepperDirectionMappingLabel", inverted ? "Inverted" : "Normal");
-      text("stepperMessage", `Applying ${inverted ? "Inverted" : "Normal"} mapping…`);
-      updateStepperControls();
-      try {
-        const payload = await postJson("/api/stepper/direction-mapping", {inverted});
-        if (payload.sample) applySample(payload.sample);
-        const confirmedMapping = payload.sample?.stepper_direction_mapping;
-        if (payload.confirmed !== true || confirmedMapping !== (inverted ? "inverted" : "normal")) {
-          throw new Error("the Yún did not return the requested mapping");
-        }
-        text("stepperMessage", `Confirmed by Yún: ${inverted ? "Inverted" : "Normal"} mapping`);
-      } catch (error) {
-        directionMappingDirty = false;
-        els.stepperDirectionMapping.checked = previousInverted;
-        text("stepperDirectionMappingLabel", previousInverted ? "Inverted" : "Normal");
-        text("stepperMessage", `Direction rejected: ${error.message}`);
-      } finally {
-        directionRequestPending = false;
         updateStepperControls();
       }
     });
@@ -1852,15 +1803,6 @@ class DashboardRuntime:
             raise RuntimeError("stepper source does not support manual speed tuning")
         return stepper
 
-    def _stepper_direction_locked(self) -> object:
-        stepper = next(
-            (source for source in self.sources if source.name == "stepper"),
-            None,
-        )
-        if stepper is None or not hasattr(stepper, "set_direction_mapping"):
-            raise RuntimeError("stepper source does not support direction mapping")
-        return stepper
-
     def _stepper_mode_locked(self) -> object:
         stepper = next(
             (source for source in self.sources if source.name == "stepper"),
@@ -2213,48 +2155,6 @@ class DashboardRuntime:
                 # source thread to ingest the firmware acknowledgement.
                 self._condition.wait(timeout=min(remaining, 0.1))
 
-    def set_stepper_direction_mapping(
-        self,
-        values: dict[str, object],
-    ) -> dict[str, object]:
-        with self._condition:
-            stepper = self._stepper_direction_locked()
-            if "inverted" not in values:
-                raise ValueError("inverted is required")
-            requested_inverted = values["inverted"]
-            if not isinstance(requested_inverted, bool):
-                raise ValueError("inverted must be true or false")
-            expected_mapping = "inverted" if requested_inverted else "normal"
-            before_sequence = self._stepper_payload_locked().get(
-                "stepper_status_sequence"
-            )
-            stepper.set_direction_mapping(  # type: ignore[attr-defined]
-                requested_inverted
-            )
-
-            deadline = time.monotonic() + 1.5
-            while True:
-                payload = self._stepper_payload_locked()
-                echoed_mapping = payload.get("stepper_direction_mapping")
-                echoed_sequence = payload.get("stepper_status_sequence")
-                if (
-                    echoed_mapping == expected_mapping
-                    and echoed_sequence != before_sequence
-                ):
-                    return {
-                        "confirmed": True,
-                        "requested_direction_mapping": expected_mapping,
-                        "stepper": payload,
-                        "sample": self.latest,
-                    }
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RuntimeError(
-                        "Yún did not confirm the requested direction mapping "
-                        "within 1.5 seconds"
-                    )
-                self._condition.wait(timeout=min(remaining, 0.1))
-
     def recordings_payload(self) -> dict[str, object]:
         with self._condition:
             recordings = list_recordings(self.record_dir)
@@ -2384,10 +2284,6 @@ def build_handler(runtime: DashboardRuntime, quiet: bool) -> type[BaseHTTPReques
                     )
                 elif path == "/api/stepper/speed":
                     self._send_json(runtime.set_stepper_speed(parse_body(self)))
-                elif path == "/api/stepper/direction-mapping":
-                    self._send_json(
-                        runtime.set_stepper_direction_mapping(parse_body(self))
-                    )
                 else:
                     self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
             except (ValueError, json.JSONDecodeError) as exc:

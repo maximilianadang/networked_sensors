@@ -39,6 +39,8 @@ header numbers on the Yún:
 | Run/enable switch | D4 | ATmega32U4 input with internal pull-up |
 | Direction switch | D5 | ATmega32U4 input with internal pull-up |
 | Positive limit switch | D6 | ATmega32U4 input with internal pull-up |
+| Negative limit switch | D8 | ATmega32U4 input with internal pull-up |
+| Driver disable (`ENA-`) | D9 | ATmega32U4 output; LOW disables DM542T output |
 
 Do not add an I2C device on D2/D3 without moving STEP and DIR. Avoid D0/D1:
 the Yún uses the ATmega32U4 hardware serial connection to communicate with the
@@ -52,6 +54,22 @@ signals rather than motor-power outputs, but the actual driver input
 specification must still be verified. The Yún must not power the motor or motor
 driver load; retain the external driver supply and join its logic ground to Yún
 GND.
+
+### DM542T enable and fixed physical direction
+
+The installed common-anode driver wiring leaves `PUL+`, `DIR+`, and `ENA+` at
+Yún 5 V. `PUL-` and `DIR-` remain on their established controller outputs;
+`ENA-` now connects to D9. The DM542T V4.0 manual specifies that 4.5-24 V across
+ENA disables the drive and 0-0.5 V enables it. Therefore D9 LOW disables the
+motor output/holding current and D9 HIGH enables it. The same manual requires a
+200 ms enable interval before motion. Firmware enforces that interval without a
+blocking delay and holds D9 LOW whenever motion is stopped, limit-blocked, or
+software-E-stopped. This disables motor current, not the external 24 V supply.
+
+Normal physical direction is fixed after endpoint verification: D5
+Forward/positive approaches D6, while D5 Reverse/negative approaches D8.
+Runtime electrical inversion was removed because it could reverse physical
+travel without reversing the endpoint selected by the software interlock.
 
 ### Critical power constraint
 
@@ -80,8 +98,9 @@ safe mechanical limit must still be established on the actual motor, driver,
 load, and screw. Any SW5-SW8 change invalidates this conversion and requires a
 new pulses/mm calculation.
 
-`runSpeed()` provides indefinite constant-velocity motion; it does not stop at
-a requested distance. For bounded moves, the adapted sketch should:
+Timer1 now provides indefinite constant-velocity Local Velocity motion; it does
+not stop at a requested distance. For bounded Web Position moves, the adapted
+sketch uses AccelStepper and must:
 
 1. validate and clamp the requested speed and distance;
 2. convert millimetres to steps;
@@ -94,14 +113,15 @@ a requested distance. For bounded moves, the adapted sketch should:
 Do not use blocking `runToPosition()` in the network event loop. The official
 Bridge example's `delay(50)` is also unsuitable for this motor loop: at the
 default 378 pulses/s, a pulse can be due every 2.65 ms. Network command handling
-must be non-blocking and subordinate to frequent `stepper.run()` calls.
+must remain non-blocking. Timer1 makes Local Velocity pulse timing independent
+of transport/status traffic, while Web Position still depends on frequent
+`stepper.run()` calls and requires separate timing tests.
 
 Distance is open-loop: AccelStepper counts commanded pulses, not actual travel.
 If the motor stalls or loses steps, its believed position becomes wrong. A
 repeatable absolute-position feature therefore needs a homing procedure. The
-current single positive-end limit can protect that end and establish a datum,
-but robust bidirectional travel also needs a known software travel envelope and
-preferably a negative-end limit switch.
+installed D6 and D8 switches independently stop travel into their physical
+endpoints and permit travel away; they do not make the pulse counter closed-loop.
 
 ## Recommended web architecture
 
@@ -112,7 +132,7 @@ Existing laptop dashboard
         -> validated HTTP command
 Yún AR9331 Linux / Bridge endpoint
         -> compact queued command
-Yún ATmega32U4 + AccelStepper
+Yún ATmega32U4 + Timer1 / AccelStepper
         -> STEP/DIR driver and switches
 ```
 
@@ -125,18 +145,20 @@ state.
 
 The classic Bridge library can implement the transport with `BridgeServer` or
 Mailbox, but it is archived and no longer maintained. Keep a Yún deployment on
-an isolated/trusted LAN, avoid exposing it to the Internet, and test Bridge
-latency for missed-step jitter. At substantially higher speeds or when precise
-motion is safety-critical, use timer-driven pulse generation or a dedicated
-motion controller instead of relying on a cooperative Bridge/AccelStepper
-loop.
+an isolated/trusted LAN and avoid exposing it to the Internet. Local Velocity
+now uses timer-driven pulse generation; Web Position remains cooperative. At
+substantially higher bounded-move speeds or when precise motion is
+safety-critical, extend the timer-backed engine or use a dedicated motion
+controller instead of relying on a cooperative AccelStepper loop.
 
 ## Minimum safety acceptance checks
 
 - Confirm the exact Yún revision and supply it with regulated 5 V.
 - Confirm STEP/DIR voltage compatibility and common logic ground.
 - Boot with motion disabled and require an explicit, bounded move command.
-- Exercise D6's normally-closed fail-safe limit before coupling the load.
+- Exercise both normally-open magnetic limits before coupling the load; record
+  that a broken wire looks clear and is therefore not electrically fail-safe.
+- Confirm D9/ENA- is LOW and motor holding torque is absent whenever stopped.
 - Reject non-finite, zero/negative-speed, overspeed, and out-of-envelope moves.
 - Make local STOP independent of Linux/network availability.
 - Home at low speed before accepting absolute-position commands.

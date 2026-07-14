@@ -496,3 +496,31 @@ emitted. It is not closed-loop confirmation from the DM542T, motor, coupling,
 or piston. Forty desktop tests, the 75%-flash/55%-RAM Yún compile, verified USB
 upload, and stopped `aps:0` status pass; the live 3/5 mm/s DRO comparison
 remains pending.
+
+## Step D25 - fixed direction and driver-output control documented
+
+**Direction given:** make the direction/limit defect non-selectable and remove
+motor holding current at a limit.
+
+**Applied:** documented the former runtime Normal/Inverted calibration as
+retired after live evidence showed electrical DIR could reverse physical travel
+while the firmware still selected D6/D8 from logical D5 sign. Normal is now an
+immutable physical property: Forward/positive approaches D6 and
+Reverse/negative approaches D8. `V1 D`, its HTTP endpoint, and its page toggle
+are removed; `ds` is read-only and legacy `ds:-1` prevents Web Position
+commands.
+
+Also recorded the DM542T V4.0 common-anode enable contract: leave ENA+ at Yún
+5 V, connect ENA- to D9, LOW disables motor output current, HIGH enables, and
+STEP waits at least 200 ms after enable. Optional compact `en` drives the stable
+dashboard status. This releases motor winding current, not the driver's 24 V
+supply, and is not a safety-rated emergency stop.
+
+**Evidence boundary:** the follow-on physical work fixed stale opposite-limit
+history and moved Local Velocity pulse scheduling from cooperative
+`runSpeed()` to Timer1 after instrumentation proved webpage traffic reduced
+emitted speed. Thirty-seven desktop tests, the 22,620-byte/78%-flash,
+1,453-byte/56%-RAM Yún compile, verified upload, stopped
+`ds:1`/`en:0`/`aps:0`, and an operator-confirmed working Local Velocity run
+pass. The exact-image two-endpoint disable/wake/retreat matrix and matching
+Linux-bridge redeployment remain before full physical/LAN completion.

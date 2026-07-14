@@ -853,3 +853,52 @@ and 1,422 bytes/55% RAM. After the Yún was reconnected at `/dev/ttyACM0`, uploa
 verification passed. Fresh stopped status reports D4/D5 HIGH, D6/D8 clear,
 zero motion, `csps:378`, and the new `aps:0`. A moving pulse-rate result is not
 yet claimed.
+
+## Step 5J - fixed physical direction and DM542T output release
+
+**Direction given:** make the direction/limit defect impossible to select again
+and remove motor holding current at a limit because the stationary motor was
+overheating. The operator then connected Yún D9 to DM542T `ENA-`; `ENA+`
+remains on the existing 5 V common-anode connection.
+
+**Root cause/de-risk evidence:** the retired T4C design changed AccelStepper's
+electrical DIR inversion at runtime while Local Velocity, Web Position, and
+Home continued choosing D6/D8 from logical D5 sign. Live status proved D8 was
+LOW/active/latched under an inverted mapping even though motion was not blocked.
+The DM542T V4.0 manual specifies that 4.5-24 V across ENA disables its output,
+0-0.5 V enables it, and enable must precede motion by at least 200 ms. With
+ENA+ fixed at 5 V, D9 LOW therefore disables and D9 HIGH enables. This removes
+motor winding current, not the driver's external 24 V supply.
+
+**Executed:** fixed Normal as a firmware safety property: positive/Forward is
+physical travel toward D6 and negative/Reverse is toward D8. Removed `V1 D`
+from firmware and the Linux relay, removed adapter/API/page mutation surfaces,
+retained `ds` only as read-only deployment evidence, and reject Home/Move/mode
+commands from legacy `ds:-1` status. All firmware paths now use one
+physical-direction interlock helper. D9 is initialized LOW, remains LOW for
+every stopped/blocked/E-stopped state, rises only for an authorized motion, and
+gates STEP behind a non-blocking 200 ms wake-up. Optional compact `en` expands
+to stable driver capability/state fields and a read-only Interlocks display.
+
+**Physical continuation:** verified upload and stopped live status passed with
+D4 OFF, both raw limits clear, `ds:1`, `en:0`, and `aps:0`. A later traversal
+exposed that historical D8 and current D6 latches could coexist and falsely
+block the D6 retreat direction. Firmware now treats one exclusively active raw
+endpoint as authoritative and clears stale history from the opposite end; if
+both raw inputs are LOW, both latches remain set and motion stays fail-closed.
+
+The emitted-pulse instrument then proved that cooperative `runSpeed()` was
+coupled to USB/status loop timing: 5 mm/s scheduled 1260 pulses/s but produced
+roughly 1000, and 1.5 mm/s also ran low. Rate-limiting and a separate USB queue
+were rejected as incomplete/regressive. The accepted implementation uses
+Timer1 solely for Local Velocity STEP timing, synchronizes its signed pulse
+position back into AccelStepper whenever it stops, and leaves D4/D5/D6/D8,
+D9, E-STOP, and transport decisions in the main loop. Web Position retains its
+existing AccelStepper acceleration/distance path.
+
+**Current verification:** all 37 stepper tests pass. The official Yún toolchain
+compiles at 22,620 bytes/78% flash and 1,453 bytes/56% RAM. Upload verification
+passed and the operator confirmed the current Local Velocity image works. The
+complete D6/D8 disabled/wake/retreat matrix on this exact image and deployment
+of the matching updated Linux bridge remain before full physical/LAN parity is
+claimed.

@@ -415,3 +415,30 @@ Forty desktop tests, the 21,786-byte/75%-flash, 1,422-byte/55%-RAM target
 compile, verified USB upload, and stopped `aps:0` status pass. The arm remains
 wet until its live 3/5 mm/s pulse measurements are compared with the external
 DRO. The field is not driver acknowledgement or mechanical feedback.
+
+## Step I3f - immutable physical direction and D9 driver output
+
+Live physical testing invalidated I3b3's assumption that runtime electrical
+inversion could leave logical D6/D8 meanings unchanged. The source arm now
+integrates a single physically verified direction contract across firmware,
+USB, network, and page: Forward/positive approaches D6; Reverse/negative
+approaches D8. The mutating `V1 D` grammar is absent at every layer, while
+read-only `ds` remains for deployment detection and legacy `ds:-1` prevents
+Web Position commands.
+
+The arm also adds optional compact `en`. On the new firmware it reports the D9
+output connected to common-anode DM542T `ENA-`; LOW disables motor winding
+current and HIGH enables it. The ATmega disables whenever stopped,
+limit-blocked, or software-E-stopped and waits the manual-required 200 ms after
+enable before STEP without blocking limit/E-STOP polling. Old frames remain
+decodable with driver-enable capability false and state null.
+
+Follow-on hardware work made exclusive raw endpoint state authoritative over a
+stale opposite latch and moved Local Velocity STEP scheduling to Timer1 after
+measured output proved cooperative `runSpeed()` was transport-loop limited.
+The timer synchronizes pulse position back into AccelStepper on stop; Web
+Position retains its existing accelerated distance engine. Thirty-seven tests,
+the 22,620-byte/78%-flash, 1,453-byte/56%-RAM compile, verified upload, stopped
+`ds:1`/`en:0`/`aps:0`, and an operator-confirmed working Local Velocity run
+pass. This arm remains wet until the matching Linux bridge is redeployed and
+the exact image passes both endpoint disable/wake/retreat checks over LAN.

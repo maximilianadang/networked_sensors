@@ -114,6 +114,29 @@ data acquisition and operator workflow:
     closes LOW at the negative mechanical end while D6 remains clear.
   - [x] Confirm D6 at the opposite Forward/positive mechanical end and record
     the external-DRO limit-to-limit span as 137.18 mm.
+- [ ] **Step 5D2 - fixed physical direction and driver-output release.**
+  - [x] Retire runtime Normal/Inverted control after live testing exposed that
+    electrical inversion could make physical travel approach D8 while the
+    logical-direction interlock checked D6.
+  - [x] Remove `V1 D` end to end, preserve `ds:1` as read-only compatibility
+    telemetry, and refuse Web Position commands from legacy inverted status.
+  - [x] Centralize the D5 physical-direction-to-D6/D8 interlock decision and add
+    mirrored endpoint regression coverage.
+  - [x] Control common-anode DM542T `ENA-` from Yún D9: LOW while stopped,
+    blocked, or E-stopped; HIGH with a non-blocking 200 ms wake-up before STEP.
+  - [x] Expose optional compact `en` plus stable driver capability/state fields
+    and a read-only dashboard interlock row.
+  - [x] Pass 37 desktop tests and compile the final Timer1 Local Velocity target
+    at 22,620 bytes/78% flash and 1,453 bytes/56% RAM.
+  - [x] Upload with verification and confirm stopped `ds:1`, `en:0`, `aps:0`,
+    followed by an operator-confirmed working Local Velocity run.
+  - [x] Make an exclusively active raw D6 or D8 authoritative and clear stale
+    history from the opposite endpoint; preserve both latches only if both raw
+    inputs are simultaneously LOW.
+  - [x] Move Local Velocity STEP scheduling to Timer1 so USB/network/status work
+    cannot cap the emitted pulse rate; keep hardware interlocks in the fast loop.
+  - [ ] Perform the complete two-endpoint energized/disabled/wake/retreat matrix
+    on this exact uploaded image.
 - [ ] **Step 5E - dual-mode relative USB motion and optional D8-limit seek.**
   - [x] Preserve the original D4/D5 continuous behavior as explicit Local
     Velocity mode and boot into that stopped, backward-compatible mode.
