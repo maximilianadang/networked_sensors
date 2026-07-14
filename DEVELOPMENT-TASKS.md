@@ -149,11 +149,13 @@ data acquisition and operator workflow:
   - [x] Add `NetworkStepperSource`, `--stepper-url`, `--stepper-timeout`,
     background polling, fresh physical acknowledgements, and source-scoped
     failures.
-  - [x] Verify six network-specific UART/HTTP/adapter/runtime tests and compile
+  - [x] Verify seven network-specific UART/HTTP/adapter/runtime tests and compile
     the Yún target at 72% flash and 54% RAM.
   - [x] Upload the T6 image and verify stopped USB status with D4 OFF, limits
     clear, E-STOP clear, and owner none.
-  - [ ] Install the service with motor power off, verify LAN
+  - [x] Install the service manually on the physical Yún and verify its LAN HTTP
+    health response without enabling it at boot.
+  - [ ] Redeploy the normal-nonblocking-`EAGAIN` correction, verify ATmega LAN
     status/ownership/rejection/E-STOP, then measure moving jitter and stop
     latency before enabling the service at boot.
 - [ ] **Step 6 - real ESP32 adapter.**

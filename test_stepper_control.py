@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import math
 import os
 import pty
@@ -10,6 +11,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from networked_sensors.dashboard import DashboardRuntime, INDEX_HTML, parse_args
 from networked_sensors.supervisor_core import (
@@ -598,6 +600,31 @@ class NetworkStepperSourceTests(unittest.TestCase):
             with self.subTest(command=command):
                 with self.assertRaises(ValueError):
                     validate_command(command)
+
+    def test_bridge_ignores_nonblocking_uart_eagain(self) -> None:
+        bridge = SerialBridgeState("/dev/fake")
+        bridge.fd = 123
+        read_attempts = 0
+
+        def fake_select(*_args):
+            return ([123], [], [])
+
+        def fake_read(*_args):
+            nonlocal read_attempts
+            read_attempts += 1
+            if read_attempts == 1:
+                raise OSError(errno.EAGAIN, "temporarily unavailable")
+            bridge._stop.set()
+            return b""
+
+        with mock.patch(
+            "networked_sensors.yun_stepper_bridge.select.select", fake_select
+        ):
+            with mock.patch("networked_sensors.yun_stepper_bridge.os.read", fake_read):
+                bridge._read_loop()
+
+        self.assertEqual(read_attempts, 2)
+        self.assertIsNone(bridge.last_error)
 
     def test_bridge_propagates_firmware_rejection_and_ack_timeout(self) -> None:
         master_fd, slave_fd = pty.openpty()

@@ -13,6 +13,7 @@ modern Python 3 so it can be exercised by the laptop test suite.
 from __future__ import print_function
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -174,6 +175,14 @@ class SerialBridgeState(object):
                     line, self._buffer = self._buffer.split(b"\n", 1)
                     self._handle_line(line)
             except (OSError, select.error) as exc:
+                error_number = getattr(exc, "errno", None)
+                if error_number is None and getattr(exc, "args", None):
+                    error_number = exc.args[0]
+                # A nonblocking tty may race between select() and read(). This
+                # simply means there is no byte to consume on this iteration;
+                # it is not a transport failure and must not poison health.
+                if error_number in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                    continue
                 if not self._stop.is_set():
                     with self._state_lock:
                         self.last_error = "%s: %s" % (self.device, exc)

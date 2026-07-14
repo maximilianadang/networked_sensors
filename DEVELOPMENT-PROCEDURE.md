@@ -762,10 +762,10 @@ the Python 2/3 Linux service plus OpenWrt init wrapper,
 polling, proxy bypass, network-aware page messaging, and physical USB/network
 acknowledgement parity in dashboard runtime.
 
-**Verification:** six focused network tests pass exact pseudo-terminal relay,
+**Verification:** seven focused network tests pass exact pseudo-terminal relay,
 HTTP status/command, owner decode, accepted speed echo, firmware rejection,
-ack timeout, source factory/CLI, and fresh dashboard E-STOP confirmation. The
-complete 38-test desktop suite passes. The Yún target compiles at 20,794 bytes
+ack timeout, nonblocking UART `EAGAIN`, source factory/CLI, and fresh dashboard
+E-STOP confirmation. The complete 39-test desktop suite passes. The Yún target compiles at 20,794 bytes
 (72%) flash and 1,399 bytes (54%) global RAM. The image was uploaded through
 `/dev/ttyACM0`; a fresh stopped USB heartbeat showed D4/D5 HIGH, D6/D8 clear,
 zero motion, E-STOP clear, and owner none. No Yún-side service installation,
@@ -778,3 +778,10 @@ The Linux relay also latches its command channel unsynchronized after any UART
 write or acknowledgement timeout and rejects subsequent commands until the
 service restarts. This prevents a late, uncorrelated acknowledgement from
 being accepted as proof of a later motion command.
+
+**Physical Linux-service follow-up:** the service and init wrapper were copied
+to the Yún and the health endpoint returned valid JSON. The first status probe
+returned HTTP 503 because no ATmega frame had yet been cached; health showed
+Python 2 `EAGAIN` from the nonblocking tty. That condition is now treated as a
+normal empty read rather than a transport error. Physical status remains
+unverified until the corrected service is redeployed and returns a `t=s` frame.
