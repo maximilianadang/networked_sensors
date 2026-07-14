@@ -77,6 +77,41 @@ The Yún service has no application authentication and belongs only on the
 isolated trusted bench LAN. See `RUNBOOK.md` for installation, motor-off
 verification, ownership, rollback, and browser-address instructions.
 
+### Cold-start Yún and one-command LAN dashboard
+
+Provision a Yún once while it is reachable on its current network. The optional
+second argument stores the Wi-Fi network it should join after its next power
+cycle:
+
+```bash
+networked_sensors/provision_yun.sh CURRENT_YUN_IP GL-MT3000-b3a
+```
+
+The first run creates `~/.ssh/yun_stepper`, may ask once for the Yún root
+password to install its public key, installs the bridge, and enables it at
+boot. When a target SSID is supplied, it also asks once for that Wi-Fi password.
+Passwords are not stored in this repository. Reserve the Yún's address in the
+LAN router when possible.
+
+Ordinary cold starts require no SSH: power the Yún, allow roughly one minute
+for its Linux/Wi-Fi side to boot, and run:
+
+```bash
+networked_sensors/run_lan_dashboard.sh
+```
+
+That wrapper defaults to `http://arduino.local:8080`, the real DXMR90 at
+`192.168.0.1`, and ESP32 off. Override only what differs, for example:
+
+```bash
+YUN_URL=http://192.168.0.137:8080 \
+ESP32_SOURCE=real ESP32_URL=http://testbench.local \
+networked_sensors/run_lan_dashboard.sh
+```
+
+Open `http://127.0.0.1:8000/` on the hosting laptop. SSH is now a maintenance
+path for deployments and diagnostics, not part of the normal startup sequence.
+
 This repo includes a no-dependency Python reader:
 
 ```bash

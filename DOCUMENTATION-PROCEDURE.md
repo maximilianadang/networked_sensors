@@ -446,3 +446,21 @@ found LEDEYun `askconsole` was the actual competing UART owner; the init wrapper
 now manages it reversibly. AsteraMesh health, advancing stopped status, and an
 expected firmware rejection pass. Ownership/E-STOP, jitter/latency,
 enabled-service restart, disconnect, and motion results remain unclaimed.
+
+## Step D22 - Yún cold-start workflow documented
+
+**Direction given:** remove repeated SSH/password work from ordinary Yún LAN
+startup and make the production-network procedure a repository command.
+
+**Applied:** added `provision_yun.sh` as the one-time maintenance-key,
+deployment, boot-enable, health/status, and optional Wi-Fi setup path. Added
+`run_lan_dashboard.sh` as the daily laptop entrypoint and documented its
+`YUN_URL`, DXMR90, ESP32, bind-address, and port overrides in the README and
+runbook. The Wi-Fi and root passwords are not embedded in the repository.
+
+**Evidence and boundary:** a physical Linux reboot returned the AsteraMesh
+interface, boot service, synchronized bridge, advancing stopped status, and
+passwordless maintenance access without operator SSH. The production
+`GL-MT3000-b3a` configuration is stored for the next power cycle. Its DHCP
+address and target-LAN reachability are not claimed until observed from a
+client on that LAN. Motion qualification remains unchanged.

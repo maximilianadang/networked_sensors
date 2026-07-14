@@ -343,11 +343,15 @@ when runnable behavior changes.
     target compiles at 20,794 bytes/72% flash and 1,399 bytes/54% RAM. It was
     uploaded over `/dev/ttyACM0`; a fresh stopped USB heartbeat confirmed D4/D5
     HIGH, D6/D8 clear, zero motion, E-STOP clear, and owner `none`. The Linux
-    service is installed on AsteraMesh at its current DHCP address; health,
+    service was installed on AsteraMesh at its current DHCP address; health,
     advancing stopped status, reversible `askconsole` ownership, and an
-    expected firmware rejection pass over the physical LAN. Ownership/E-STOP
-    parity, jitter/latency measurement, Linux restart, and
-    disconnect-during-motion checks remain before the gate.
+    expected firmware rejection pass over the physical LAN. The bridge is now
+    enabled at boot, a Linux reboot returned synchronized status without an SSH
+    login, and `provision_yun.sh` plus `run_lan_dashboard.sh` cover one-time
+    deployment/Wi-Fi setup and ordinary LAN startup. `GL-MT3000-b3a` is stored
+    for the next power cycle. Ownership/E-STOP parity, jitter/latency
+    measurement, target-LAN association, and disconnect-during-motion checks
+    remain before the gate.
 
 - [ ] **ACTIVE - T7 - harden both laptop real-Yún adapters and transport parity.**
   - Support explicit `--stepper-source usb|network|sim|off` selection plus USB

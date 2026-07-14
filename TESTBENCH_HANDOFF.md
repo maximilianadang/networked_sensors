@@ -134,8 +134,8 @@ legacy investigation, not as the data source for the current laptop UI.
 
 ## Yún stepper transport handoff
 
-The last physically verified Yún image is the USB T5A stepper firmware. A T6
-revision now compiles with a second, non-blocking Serial1 path and exclusive
+The last physically verified Yún image is the T6 stepper firmware. It includes
+a second, non-blocking Serial1 path and exclusive
 USB/network mutation ownership. The matching `yun_stepper_bridge.py` service
 runs on the Yún AR9331 and exposes status/commands on trusted-LAN port 8080;
 the laptop selects it with `--stepper-source network --stepper-url
@@ -144,6 +144,10 @@ http://YUN_IP:8080`.
 Software loopback and compile checks pass; the T6 image and Linux service are
 installed. Physical AsteraMesh health, advancing stopped status, and an
 expected Local-Velocity Stop rejection pass through the full HTTP/UART path.
+The service is enabled at boot, a Linux restart returned synchronized status
+without an SSH login, and `GL-MT3000-b3a` is stored for the next power cycle.
+Use `provision_yun.sh` for one-time deployment/network changes and
+`run_lan_dashboard.sh` for ordinary operation.
 Do not represent the stepper as motion-qualified until the remaining
 ownership/E-STOP checklist and
 the moving jitter/latency/restart/disconnect checks pass. The custom service

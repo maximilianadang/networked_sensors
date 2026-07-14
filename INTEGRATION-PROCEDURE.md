@@ -375,5 +375,13 @@ configuration is restored on service stop. Over AsteraMesh, health is fresh,
 error-free, and synchronized; stopped status advances with real D4/D5/D6/D8
 levels, clear limits/E-STOP, and owner none. An expected Local-Velocity Stop
 rejection completed the LAN HTTP/UART/firmware acknowledgement round trip
-without changing motion or ownership. Boot enable and motion parity remain
-pending.
+without changing motion or ownership.
+
+The cold-start integration now has two repository entrypoints.
+`provision_yun.sh` installs a dedicated Dropbear key, deploys/enables the
+service, checks health/status, and optionally commits a target station network;
+`run_lan_dashboard.sh` starts the ordinary laptop network-source configuration.
+After enabling the service, a physical Linux reboot returned Wi-Fi and
+synchronized stopped status without an SSH login, and passwordless maintenance
+access passed. `GL-MT3000-b3a` is committed for the next power cycle. Target-LAN
+association and all motion parity remain pending.

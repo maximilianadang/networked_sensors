@@ -788,4 +788,17 @@ available. Physical `/v1/health` now reports a fresh status age, synchronized
 commands, and no error. `/v1/status` advances with D4/D5/D6/D8 HIGH, zero
 motion, clear limits/E-STOP, and owner none. A LAN `V1 X` in Local Velocity
 returned the expected HTTP 409 firmware rejection, and health remained
-synchronized afterward. The service remains deliberately disabled at boot.
+synchronized afterward.
+
+**Cold-start follow-up:** added `provision_yun.sh` for dedicated Dropbear key
+installation, bridge deployment, boot enablement, health/status verification,
+and optional next-boot Wi-Fi configuration. Added `run_lan_dashboard.sh` as the
+ordinary operator entrypoint with environment overrides for device addresses.
+The physical Yún accepted the dedicated key from
+`/etc/dropbear/authorized_keys`; the initially assumed OpenSSH-style
+`/root/.ssh/authorized_keys` is not used by this image. A Linux reboot then
+returned the Wi-Fi interface and boot-enabled service without an interactive
+login. Health resynchronized with no error, stopped firmware status resumed,
+and key-only maintenance SSH passed. The target `GL-MT3000-b3a` configuration
+is committed for the next power cycle. Association and bridge reachability on
+that target LAN remain a separate physical check, as do all moving-load gates.

@@ -236,16 +236,15 @@ Before using the laptop supervisor as the primary logger:
   bytes global RAM, then verify USB stopped status before touching Linux.
 - Reserve the Yún DHCP address and confirm the dashboard laptop can reach that
   address on the isolated bench LAN. Do not expose TCP 8080 outside that LAN.
-- Copy `yun_stepper_bridge.py` and the init wrapper to the documented Yún
-  paths. Start manually but do not enable at boot yet; confirm the wrapper
-  saved/commented `::askconsole` and no `/bin/ash --login` process retains
-  `/dev/ttyATH0`.
+- Run `provision_yun.sh CURRENT_YUN_HOST [TARGET_WIFI_SSID]`, or use the
+  documented manual recovery commands. Confirm the wrapper saved/commented
+  `::askconsole` and no `/bin/ash --login` process retains `/dev/ttyATH0`.
 - `GET /v1/health` reports the expected UART and no error. `GET /v1/status`
   returns advancing compact status with the real D4/D5/D6/D8 values and zero
   motion.
-- Start `dashboard.py --stepper-source network --stepper-url
-  http://YUN_IP:8080`. Confirm source mode `network`, connection age, configured
-  speed, limits, control mode, owner, and E-STOP state match USB observations.
+- Start `YUN_URL=http://YUN_IP:8080 run_lan_dashboard.sh`. Confirm source mode
+  `network`, connection age, configured speed, limits, control mode, owner, and
+  E-STOP state match USB observations.
 - With D4 OFF, change speed over LAN and require a fresh ATmega sequence/echo.
   Connect a USB dashboard concurrently and confirm its competing mutating
   command is rejected while network owns control. Confirm Stop and software
@@ -262,6 +261,6 @@ Before using the laptop supervisor as the primary logger:
   Stop/E-STOP latency under 10 Hz status traffic. Compare to USB and stop the
   qualification if the mechanism becomes rough, misses steps, or exceeds the
   approved response bound.
-- After all motor-off and moving checks pass, enable the init service at boot;
-  reboot both processors and repeat stopped-state verification before routine
-  use.
+- The init service is boot-enabled and a Linux-only stopped reboot has passed.
+  Before routine motion use, reboot both processors on the target LAN, repeat
+  stopped-state verification, and complete all remaining moving checks.

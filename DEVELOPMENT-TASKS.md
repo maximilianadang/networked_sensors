@@ -155,11 +155,14 @@ data acquisition and operator workflow:
     clear, E-STOP clear, and owner none.
   - [x] Install the service manually on the physical Yún, handle LEDEYun
     `askconsole` ownership reversibly, and verify LAN HTTP health plus advancing
-    stopped ATmega status without enabling it at boot.
+    stopped ATmega status.
   - [x] Redeploy the normal-nonblocking-`EAGAIN` correction and verify an
     expected firmware rejection traverses HTTP/UART in both directions.
+  - [x] Add one-time key/deployment/Wi-Fi provisioning and a one-command LAN
+    dashboard wrapper; enable the bridge at boot and verify a Linux reboot
+    returns synchronized stopped status without an SSH login.
   - [ ] Verify ownership and E-STOP parity, then measure moving jitter and stop
-    latency before enabling the service at boot.
+    latency before claiming the motion-qualification gate.
 - [ ] **Step 6 - real ESP32 adapter.**
   - [x] Consume strict version-2 ESP32 SSE samples and the solenoid command
     endpoint in a background adapter so network reads do not block the merge

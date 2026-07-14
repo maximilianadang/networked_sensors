@@ -341,8 +341,23 @@ LEDEYun launches `::askconsole` on `/dev/ttyATH0`; that login shell and the
 custom service cannot read the UART together. The init wrapper saves and
 comments that inittab entry on start, terminates only the process attached to
 the UART, and restores the exact saved console configuration on stop. First
-upload and verify the matching `limit_switch_palas.ino` over USB. With motor
-power still off, copy the service and start it manually over SSH, substituting
+upload and verify the matching `limit_switch_palas.ino` over USB.
+
+The preferred one-time install is the provisioner. Run it while the Yún is
+reachable at its current DHCP address. Supplying a target SSID stores that
+network for the next cold start without reloading Wi-Fi during provisioning:
+
+```bash
+networked_sensors/provision_yun.sh CURRENT_YUN_IP GL-MT3000-b3a
+```
+
+It creates a dedicated `~/.ssh/yun_stepper` maintenance key, installs that key
+with at most one Yún root-password prompt, deploys and checks the bridge, and
+enables it at boot. The target Wi-Fi password is entered once and is not stored
+in the repository. After a power cycle, allow roughly one minute for the Yún's
+Linux and Wi-Fi sides to return. Ordinary cold starts do not require SSH.
+
+For manual recovery only, copy the service and start it over SSH, substituting
 the Yún's current DHCP address. Modern OpenSSH clients require the scoped
 legacy RSA and SCP flags shown here:
 
@@ -354,8 +369,14 @@ curl --fail --max-time 2 http://YUN_IP:8080/v1/health
 curl --fail --max-time 2 http://YUN_IP:8080/v1/status
 ```
 
-Do not enable startup yet. Confirm the status JSON shows the real D4/D5/D6/D8
-levels, zero motion, and the expected E-STOP state. Then start the laptop page:
+Confirm the status JSON shows the real D4/D5/D6/D8 levels, zero motion, and the
+expected E-STOP state. Then start the laptop page with the repository wrapper:
+
+```bash
+YUN_URL=http://YUN_IP:8080 networked_sensors/run_lan_dashboard.sh
+```
+
+The equivalent stepper-only diagnostic command is:
 
 ```bash
 python3 networked_sensors/dashboard.py \
@@ -377,8 +398,8 @@ releases after motion is stopped, D4 is physically OFF, and the owner is idle
 for two seconds. The page waits for both the Linux acknowledgement and a fresh
 ATmega status before reporting a physical command as confirmed.
 
-After the motor-off LAN status and command-rejection checks pass, enable the
-service at boot:
+The provisioner enables the service at boot after its motor-off health and
+status checks pass. A manual install can be enabled with:
 
 ```bash
 ssh -o HostKeyAlgorithms=+ssh-rsa root@YUN_IP '/etc/init.d/yun-stepper-bridge enable'
@@ -386,7 +407,16 @@ ssh -o HostKeyAlgorithms=+ssh-rsa root@YUN_IP '/etc/init.d/yun-stepper-bridge en
 
 The service listens without application authentication on port 8080. Keep it
 on the isolated trusted bench LAN, do not forward that port through a router,
-and reserve the Yún address in DHCP.
+and reserve the Yún address in DHCP. `arduino.local` may work through mDNS, but
+a DHCP reservation gives the dashboard a deterministic `YUN_URL`.
+
+The physical cold-start check on 2026-07-14 passed: after a Linux-side reboot,
+the Wi-Fi address returned, the init service launched without SSH, health
+reported `command_synchronized: true` with no error, live stopped ATmega status
+resumed, and the dedicated maintenance key authenticated without a password.
+The target `GL-MT3000-b3a` station configuration is stored for the next power
+cycle; that target-LAN association still needs confirmation from a laptop on
+that LAN.
 
 If `/v1/command` reports an acknowledgement timeout or says the command
 channel is unsynchronized, stop motion with the physical controls, inspect the

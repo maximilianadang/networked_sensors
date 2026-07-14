@@ -155,3 +155,6 @@ translate as:
       `--stepper-url`/timeout selection, USB/network ownership, exact install
       and rollback commands, desktop/compile evidence, and the remaining
       physical upload/service/timing/restart/disconnect gates.
+- [x] **D22 - document Yún cold-start operation.** Add one-time provisioning
+      and daily dashboard commands, record physical boot-service/key evidence,
+      and keep target-LAN association separate from completed AsteraMesh checks.
