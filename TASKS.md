@@ -311,11 +311,12 @@ when runnable behavior changes.
     remain. Priority dispatch reduced the stopped/unreachable-DXMR90 response
     from 1.26 s to 0.041 s without weakening fresh-status acknowledgement.
 
-- [ ] **T6 - add the Yún Bridge motion transport.**
-  - Initialize Bridge once during setup and expose only the T2 motion/status
-    contract through BridgeServer, Mailbox, or a small Linux-side service.
-  - Keep the endpoint on localhost/Bridge where possible and expose it only to
-    the trusted bench network.
+- [ ] **ACTIVE - T6 - add the Yún Linux motion bridge transport.**
+  - Use a small Linux-side service over the Yún internal UART and expose only
+    the T2 motion/status contract; do not call blocking Bridge transfers inside
+    the stepping loop.
+  - Bind the endpoint only on the isolated trusted bench network; it has no
+    application authentication and must never be router-forwarded.
   - Queue a compact command for the ATmega instead of performing motion inside
     the HTTP request handler.
   - Remove the official example's 50 ms loop delay; at the current 150 steps/s,
@@ -332,8 +333,20 @@ when runnable behavior changes.
     step-timing observation.
   - **Gate:** the Yún API is deterministic enough at the approved T1 speed and
     fails stopped when communication is lost.
+  - **Progress:** implemented a Python 2/3 AR9331 service on port 8080 that
+    owns `/dev/ttyATH0`, validates and relays the existing `V1` grammar, caches
+    compact status, and waits for explicit ATmega acceptance/rejection. The
+    ATmega polls Serial1 and drains status/ack output only into available UART
+    capacity; no Linux/HTTP call runs inside the stepping loop. Mutating USB
+    and network commands have explicit firmware ownership with stopped,
+    D4-OFF, two-second idle release; Stop and E-STOP remain universal. The
+    target compiles at 20,794 bytes/72% flash and 1,399 bytes/54% RAM. It was
+    uploaded over `/dev/ttyACM0`; a fresh stopped USB heartbeat confirmed D4/D5
+    HIGH, D6/D8 clear, zero motion, E-STOP clear, and owner `none`. Linux-service
+    installation, LAN smoke, jitter/latency measurement, Linux restart, and
+    disconnect-during-motion checks remain before the gate.
 
-- [ ] **T7 - harden both laptop real-Yún adapters and transport parity.**
+- [ ] **ACTIVE - T7 - harden both laptop real-Yún adapters and transport parity.**
   - Support explicit `--stepper-source usb|network|sim|off` selection plus USB
     port/baud and network host/URL/timeout configuration.
   - Forward validated dashboard commands over the selected transport only.
@@ -346,6 +359,14 @@ when runnable behavior changes.
     competing ownership.
   - Verification: USB adapter against a pseudo-terminal and network adapter
     against a stub server before enabling the motor.
+  - **Progress:** `NetworkStepperSource`, `--stepper-url`, and
+    `--stepper-timeout` are implemented with background 10 Hz status polling,
+    proxy bypass, single-attempt command POSTs, explicit HTTP/UART error
+    reporting, and the same adapter guards as USB. Six focused network tests
+    cover exact UART relay, status/ownership decoding, accepted command,
+    firmware rejection, acknowledgement timeout, CLI/factory selection, and a
+    fresh dashboard E-STOP status. Full competing-owner/restart/disconnect
+    hardware parity remains.
 
 - [ ] **T8 - perform staged hardware bring-up and calibration.**
   - Power the Yún Rev2 with regulated 5 V; retain the motor driver's external

@@ -5,18 +5,28 @@ from __future__ import annotations
 import math
 import os
 import pty
+import select
 import threading
 import time
 import unittest
 from pathlib import Path
 
-from networked_sensors.dashboard import DashboardRuntime, INDEX_HTML
+from networked_sensors.dashboard import DashboardRuntime, INDEX_HTML, parse_args
 from networked_sensors.supervisor_core import (
     DEFAULT_STEPPER_MAX_DISTANCE_MM,
     DEFAULT_STEPPER_MAX_SPEED_MM_S,
+    NetworkStepperSource,
     SimulatedStepperSource,
     SourceMerger,
     UsbStepperSource,
+    make_sources,
+)
+from networked_sensors.yun_stepper_bridge import (
+    CommandRejected,
+    SerialBridgeState,
+    StepperBridgeHandler,
+    ThreadedHTTPServer,
+    validate_command,
 )
 
 
@@ -286,6 +296,7 @@ class UsbStepperSourceTests(unittest.TestCase):
             os.close(master_fd)
             os.close(slave_fd)
 
+
     def test_missing_usb_port_is_disconnected_not_fatal(self) -> None:
         source = UsbStepperSource(port="/dev/this-stepper-port-does-not-exist")
         self.assertIsNone(source.poll(0.0))
@@ -402,6 +413,227 @@ class UsbStepperSourceTests(unittest.TestCase):
             source.close()
             os.close(master_fd)
             os.close(slave_fd)
+
+
+class NetworkStepperSourceTests(unittest.TestCase):
+    def test_cli_and_source_factory_enable_network_mode(self) -> None:
+        args = parse_args(
+            [
+                "--stepper-source",
+                "network",
+                "--stepper-url",
+                "http://192.168.8.137:8080",
+                "--stepper-timeout",
+                "0.4",
+            ]
+        )
+        self.assertEqual(args.stepper_source, "network")
+        self.assertEqual(args.stepper_url, "http://192.168.8.137:8080")
+        self.assertEqual(args.stepper_timeout, 0.4)
+        sources = make_sources(
+            esp32_source="off",
+            dxmr90_source="off",
+            stepper_source="network",
+            stepper_network_url=args.stepper_url,
+            stepper_network_timeout=args.stepper_timeout,
+        )
+        stepper = next(source for source in sources if source.name == "stepper")
+        self.assertIsInstance(stepper, NetworkStepperSource)
+        stepper.close()
+
+    def test_bridge_service_and_network_adapter_share_v1_contract(self) -> None:
+        master_fd, slave_fd = pty.openpty()
+        bridge = SerialBridgeState(
+            device=os.ttyname(slave_fd),
+            ack_timeout=0.5,
+        )
+        bridge.open()
+        server = ThreadedHTTPServer(("127.0.0.1", 0), StepperBridgeHandler)
+        server.bridge = bridge
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        host, port = server.server_address
+        source = NetworkStepperSource(f"http://{host}:{port}", timeout=0.5)
+        initial = UsbStepperSourceTests.POSITION_LOCAL_OFF[:-1] + ',"o":0}'
+        updated = initial.replace('"q":20', '"q":21').replace(
+            '"csps":150', '"csps":325'
+        ).replace('"o":0', '"o":2')
+        received: list[bytes] = []
+        try:
+            os.write(master_fd, (initial + "\n").encode("ascii"))
+            deadline = time.monotonic() + 2.0
+            reading = None
+            elapsed = 0.0
+            while time.monotonic() < deadline and reading is None:
+                reading = source.poll(elapsed)
+                elapsed += 0.1
+                time.sleep(0.02)
+            self.assertIsNotNone(reading)
+            assert reading is not None
+            self.assertEqual(reading.mode, "network")
+            self.assertEqual(reading.values["stepper_control_owner"], "none")
+
+            def acknowledge() -> None:
+                received.append(os.read(master_fd, 64))
+                os.write(
+                    master_fd,
+                    b'{"v":1,"t":"a","ok":1,"e":"none"}\n',
+                )
+                os.write(master_fd, (updated + "\n").encode("ascii"))
+
+            responder = threading.Thread(target=acknowledge)
+            responder.start()
+            source.set_speed(3.25)
+            responder.join(timeout=1.0)
+            self.assertFalse(responder.is_alive())
+            self.assertEqual(received, [b"V1 S325\n"])
+
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                source.poll(elapsed)
+                elapsed += 0.1
+                status = source.status()
+                if status.get("stepper_command_speed_mm_s") == 3.25:
+                    break
+                time.sleep(0.02)
+            status = source.status()
+            self.assertEqual(status["stepper_command_speed_mm_s"], 3.25)
+            self.assertEqual(
+                status["stepper_control_owner"],
+                "manual_d4_d5+network_control",
+            )
+        finally:
+            source.close()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=1.0)
+            bridge.close()
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_dashboard_requires_fresh_network_estop_status(self) -> None:
+        master_fd, slave_fd = pty.openpty()
+        bridge = SerialBridgeState(os.ttyname(slave_fd), ack_timeout=0.5)
+        bridge.open()
+        server = ThreadedHTTPServer(("127.0.0.1", 0), StepperBridgeHandler)
+        server.bridge = bridge
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        host, port = server.server_address
+        initial = UsbStepperSourceTests.POSITION_LOCAL_OFF[:-1] + ',"o":0}'
+        estopped = (
+            UsbStepperSourceTests.ESTOP_LOCAL_ON[:-1] + ',"o":0}'
+        ).replace('"q":23', '"q":24')
+        os.write(master_fd, (initial + "\n").encode("ascii"))
+        runtime = DashboardRuntime(
+            scenario="healthy",
+            rate_hz=10.0,
+            drop_after_s=2.0,
+            stale_after_s=1.0,
+            history_limit=10,
+            record_dir=Path("/tmp/stepper-dashboard-network-test-recordings"),
+            esp32_source="off",
+            dxmr90_source="off",
+            stepper_source="network",
+            stepper_port="/dev/null",
+            stepper_baud=9600,
+            stepper_network_url=f"http://{host}:{port}",
+            stepper_network_timeout=0.5,
+            dxmr90_host="127.0.0.1",
+            dxmr90_port=502,
+            dxmr90_unit_id=1,
+            dxmr90_timeout=0.1,
+            dxmr90_addressing="one-based",
+            dxmr90_word_order="high-low",
+            dxmr90_data_path="direct",
+            dxmr90_rate_hz=10.0,
+        )
+        try:
+            runtime.start()
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if runtime.stepper_status()["stepper"].get(
+                    "stepper_status_sequence"
+                ) == 20:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(
+                runtime.stepper_status()["stepper"]["stepper_status_sequence"],
+                20,
+            )
+
+            def acknowledge() -> None:
+                self.assertEqual(os.read(master_fd, 64), b"V1 E1\n")
+                os.write(
+                    master_fd,
+                    b'{"v":1,"t":"a","ok":1,"e":"none"}\n',
+                )
+                os.write(master_fd, (estopped + "\n").encode("ascii"))
+
+            responder = threading.Thread(target=acknowledge)
+            responder.start()
+            result = runtime.emergency_stop_stepper()
+            responder.join(timeout=1.0)
+            self.assertFalse(responder.is_alive())
+            self.assertTrue(result["confirmed"])
+            self.assertTrue(result["stepper"]["stepper_estop_latched"])
+            self.assertEqual(result["stepper"]["stepper_status_sequence"], 24)
+        finally:
+            runtime.stop()
+            server.shutdown()
+            server.server_close()
+            server_thread.join(timeout=1.0)
+            bridge.close()
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_bridge_rejects_unknown_or_oversized_grammar_before_uart(self) -> None:
+        self.assertEqual(validate_command(" V1 E1\n"), "V1 E1")
+        for command in ("V1 Q", "V1 G1,2", "V2 E1", "V1 S" + "1" * 60):
+            with self.subTest(command=command):
+                with self.assertRaises(ValueError):
+                    validate_command(command)
+
+    def test_bridge_propagates_firmware_rejection_and_ack_timeout(self) -> None:
+        master_fd, slave_fd = pty.openpty()
+        bridge = SerialBridgeState(os.ttyname(slave_fd), ack_timeout=0.2)
+        bridge.open()
+        try:
+            def reject() -> None:
+                self.assertEqual(os.read(master_fd, 64), b"V1 D1\n")
+                os.write(
+                    master_fd,
+                    b'{"v":1,"t":"a","ok":0,"e":"owned_by_usb"}\n',
+                )
+
+            responder = threading.Thread(target=reject)
+            responder.start()
+            with self.assertRaisesRegex(CommandRejected, "owned_by_usb"):
+                bridge.command("V1 D1")
+            responder.join(timeout=1.0)
+            self.assertFalse(responder.is_alive())
+
+            bridge.ack_timeout = 0.05
+            with self.assertRaisesRegex(RuntimeError, "acknowledgement timed out"):
+                bridge.command("V1 E1")
+            self.assertEqual(os.read(master_fd, 64), b"V1 E1\n")
+            self.assertFalse(bridge.health()["command_synchronized"])
+            with self.assertRaisesRegex(RuntimeError, "unsynchronized"):
+                bridge.command("V1 X")
+            readable, _, _ = select.select([master_fd], [], [], 0.05)
+            self.assertFalse(readable)
+        finally:
+            bridge.close()
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_network_decode_reports_explicit_usb_owner(self) -> None:
+        line = UsbStepperSourceTests.POSITION_LOCAL_OFF[:-1] + ',"o":1}'
+        status = NetworkStepperSource.decode_status_line(line)
+        self.assertEqual(
+            status["stepper_control_owner"],
+            "manual_d4_d5+usb_control",
+        )
 
 
 class UsbStepperDashboardTests(unittest.TestCase):
@@ -753,3 +985,4 @@ class UsbStepperDashboardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+    NetworkStepperSource,

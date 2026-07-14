@@ -733,3 +733,48 @@ Yún command channel before acquiring that lock and waits normally for the fresh
 status acknowledgement afterward. With DXMR90 still unreachable and its timeout
 set to 0.1 s, the stopped latch response measured 0.041 s. Moving-stop and
 moving-latency qualification remain; no loaded stop-time claim is made yet.
+
+## Step 5G - Yún Linux UART/HTTP bridge
+
+**Direction given:** the Yún is already associated with the bench WLAN, so make
+the stepper available to a dashboard running on another LAN laptop instead of
+requiring the Yún USB cable on that host.
+
+**Design decision:** use the T6-permitted small Linux-side service rather than
+the archived blocking Bridge API in the time-sensitive ATmega loop. The ATmega
+polls Serial1 in bounded chunks and drains status/ack lines only into UART bytes
+reported writable. `yun_stepper_bridge.py` runs on the AR9331, owns
+`/dev/ttyATH0`, validates exact V1 grammar, caches status, and exposes health,
+status, and command endpoints on trusted-LAN port 8080. The service performs no
+motion logic. The archived official Bridge daemon must stop because it owns the
+same UART.
+
+**Ownership/failure decision:** an accepted mutating command claims either USB
+or network in firmware. A competing owner is rejected. Stop and `V1 E1` remain
+accepted from either path. An idle owner releases only while motion is stopped
+and physical D4 has been OFF for two seconds. The laptop network adapter does
+not retry non-idempotent commands; Linux waits for an explicit ATmega ack, and
+the dashboard then waits for a fresh status sequence before reporting success.
+
+**Executed:** added the raw-UART firmware transport and ownership field `o`,
+the Python 2/3 Linux service plus OpenWrt init wrapper,
+`NetworkStepperSource`, `--stepper-url`, `--stepper-timeout`, background 10 Hz
+polling, proxy bypass, network-aware page messaging, and physical USB/network
+acknowledgement parity in dashboard runtime.
+
+**Verification:** six focused network tests pass exact pseudo-terminal relay,
+HTTP status/command, owner decode, accepted speed echo, firmware rejection,
+ack timeout, source factory/CLI, and fresh dashboard E-STOP confirmation. The
+complete 38-test desktop suite passes. The Yún target compiles at 20,794 bytes
+(72%) flash and 1,399 bytes (54%) global RAM. The image was uploaded through
+`/dev/ttyACM0`; a fresh stopped USB heartbeat showed D4/D5 HIGH, D6/D8 clear,
+zero motion, E-STOP clear, and owner none. No Yún-side service installation,
+physical LAN response, jitter measurement, moving stop, Linux restart, or
+disconnect test is claimed yet. This host was on `AsteraMesh`, not the Yún's
+configured `GL-MT3000-b3a`, so it did not guess or install against an
+unidentified LAN address.
+
+The Linux relay also latches its command channel unsynchronized after any UART
+write or acknowledgement timeout and rejects subsequent commands until the
+service restarts. This prevents a late, uncorrelated acknowledgement from
+being accepted as proof of a later motion command.

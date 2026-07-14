@@ -67,7 +67,8 @@ translate as:
 - Existing stepper surfaces:
   - `limit_switch_palas.ino` drives a STEP/DIR controller from D2-D6 and D8,
     uses D6/D8 as positive/negative directional limits, reports raw limit levels
-    over Serial, and currently has no network command transport.
+    over USB Serial, and now has a bounded non-blocking Serial1 command/status
+    path for the Yún Linux service.
   - The laptop supervisor has a simulation stepper source, shared dashboard
     controls, move/stop/status API, merged status fields, and `stepper_raw.csv`.
     It also has a live USB dual-mode adapter. The firmware and laptop path
@@ -78,12 +79,13 @@ translate as:
     new top-level software E-STOP is uploaded; stopped-state live latch/reset
     verification passes, while deliberate moving-stop checks remain. It is
     explicitly not a replacement for a hardwired safety-rated E-stop. The
-    network adapter remains planned.
+    network adapter/service and firmware ownership compile/loopback pass, while
+    physical installation and LAN/motion timing checks remain.
   - `documentation/README.md` assesses an original Arduino Yún replacement and
     indexes the downloaded Yún, Bridge, and AccelStepper sources.
 - Existing supervisor:
   - local dashboard at `localhost`;
-  - simulated sources plus real ESP32, real DXMR90, and USB Yún adapters;
+  - simulated sources plus real ESP32, real DXMR90, and USB/network Yún adapters;
   - disk-backed recording and merged CSV export.
 
 ## Execution
@@ -148,3 +150,8 @@ translate as:
       and status fields, endpoints, tests/compile result, pending upload/bench
       checks, and the fact that it does not remove power or provide a
       safety-rated emergency-stop function.
+- [x] **D21 - document the Yún LAN bridge software landing.** Record the
+      non-blocking Serial1/AR9331 service architecture, trusted-LAN endpoints,
+      `--stepper-url`/timeout selection, USB/network ownership, exact install
+      and rollback commands, desktop/compile evidence, and the remaining
+      physical upload/service/timing/restart/disconnect gates.

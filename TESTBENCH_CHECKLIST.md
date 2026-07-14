@@ -228,3 +228,39 @@ Before using the laptop supervisor as the primary logger:
 - Record measured stop latency at the approved maximum speed. A network, USB,
   process, or logic-power failure is a failed software-stop path, not proof of
   a safe physical stop.
+
+## 14. Yún Linux/LAN bridge (T6-T7)
+
+- Keep DM542T motor power off. Compile and upload the exact repository T6
+  firmware; confirm the build is approximately 20,794 bytes flash and 1,399
+  bytes global RAM, then verify USB stopped status before touching Linux.
+- Reserve the Yún DHCP address and confirm the dashboard laptop can reach that
+  address on the isolated bench LAN. Do not expose TCP 8080 outside that LAN.
+- Copy `yun_stepper_bridge.py` and the init wrapper to the documented Yún
+  paths. Start manually but do not enable at boot yet; confirm the archived
+  official Bridge daemon stopped because both services use `/dev/ttyATH0`.
+- `GET /v1/health` reports the expected UART and no error. `GET /v1/status`
+  returns advancing compact status with the real D4/D5/D6/D8 values and zero
+  motion.
+- Start `dashboard.py --stepper-source network --stepper-url
+  http://YUN_IP:8080`. Confirm source mode `network`, connection age, configured
+  speed, limits, control mode, owner, and E-STOP state match USB observations.
+- With D4 OFF, change speed over LAN and require a fresh ATmega sequence/echo.
+  Connect a USB dashboard concurrently and confirm its competing mutating
+  command is rejected while network owns control. Confirm Stop and software
+  E-STOP remain accepted from the non-owner transport.
+- Stop motion, put D4 OFF, wait at least two seconds, and confirm ownership
+  releases. Then prove USB can claim and the network side is rejected until
+  the same release conditions occur.
+- Latch E-STOP over LAN with motor power off, refresh/restart the laptop page,
+  and confirm the ATmega latch persists. Reset only with D4 OFF.
+- Restart only the Yún Linux processor/service. Confirm no STEP pulse or new
+  command occurs, status reconnects visibly, and any ambiguous command times
+  out rather than being blindly retried.
+- With a safely staged short motion-away test, measure STEP jitter and network
+  Stop/E-STOP latency under 10 Hz status traffic. Compare to USB and stop the
+  qualification if the mechanism becomes rough, misses steps, or exceeds the
+  approved response bound.
+- After all motor-off and moving checks pass, enable the init service at boot;
+  reboot both processors and repeat stopped-state verification before routine
+  use.

@@ -1,0 +1,30 @@
+#!/bin/sh /etc/rc.common
+
+# OpenWrt/Linino init script for yun_stepper_bridge.py.  Install as
+# /etc/init.d/yun-stepper-bridge only after the motor-safe manual LAN smoke.
+
+START=95
+STOP=10
+
+PIDFILE=/var/run/yun-stepper-bridge.pid
+PROGRAM=/root/yun_stepper_bridge.py
+LOGFILE=/tmp/yun-stepper-bridge.log
+
+start() {
+    # The archived official Bridge daemon and this service cannot both own
+    # /dev/ttyATH0.  The ATmega sketch uses its own bounded line protocol.
+    /etc/init.d/bridge stop >/dev/null 2>&1
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        return 0
+    fi
+    /usr/bin/python "$PROGRAM" --device /dev/ttyATH0 --baud 115200 \
+        --host 0.0.0.0 --port 8080 >>"$LOGFILE" 2>&1 &
+    echo $! >"$PIDFILE"
+}
+
+stop() {
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null
+        rm -f "$PIDFILE"
+    fi
+}

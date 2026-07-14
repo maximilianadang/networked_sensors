@@ -234,9 +234,10 @@ change during dispatch or motion rejects/aborts instead of reversing. STEP
 pulses terminate the requested relative quantity, but only D6/D8 are used as
 travel-end safety inputs.
 
-No `--stepper-source network` adapter exists yet. Selecting it fails closed
-during startup rather than contacting the Yún. Use `--stepper-source off` when
-no stepper status should be emitted.
+`--stepper-source network` is implemented for the Yún Linux UART bridge service.
+It must not be selected until the matching T6 firmware and
+`yun_stepper_bridge.py` are installed and verified on the Yún. Use
+`--stepper-source off` when no stepper status should be emitted.
 
 ### USB-backed Local Velocity and Web Position
 
@@ -327,10 +328,74 @@ the stepper becomes disconnected/stale while ESP32, DXMR90, the webpage, and
 recording continue. Find the port with `arduino-cli board list` when that CLI is
 available, or inspect `/dev/ttyACM*` without assuming the number is permanent.
 
-`--stepper-source network` is deliberately present in the configuration axis
-but fails closed until the T6-T7 Bridge adapter exists. USB and network will use
-the same command/status semantics and exclusive command ownership once motion
-commands land.
+### Yún LAN bridge service
+
+The network path uses a small Python service on the Yún Linux processor rather
+than calling the archived `Bridge.transfer()` API from the time-sensitive
+ATmega loop. The ATmega polls Serial1 without blocking, drains status/ack JSON
+only into available UART capacity, and retains all D4/D5/D6/D8 and software
+E-STOP decisions. Linux validates and relays the exact same `V1` command lines;
+it never generates STEP/DIR itself.
+
+The custom service and the archived official Bridge daemon both use
+`/dev/ttyATH0`, so they cannot run together. First upload and verify the matching
+`limit_switch_palas.ino` over USB. With motor power still off, copy the service
+and start it manually over SSH, substituting the Yún's current DHCP address:
+
+```bash
+scp networked_sensors/yun_stepper_bridge.py root@YUN_IP:/root/
+scp networked_sensors/yun-stepper-bridge.init root@YUN_IP:/etc/init.d/yun-stepper-bridge
+ssh root@YUN_IP 'chmod 700 /root/yun_stepper_bridge.py /etc/init.d/yun-stepper-bridge && /etc/init.d/yun-stepper-bridge start'
+curl --fail --max-time 2 http://YUN_IP:8080/v1/health
+curl --fail --max-time 2 http://YUN_IP:8080/v1/status
+```
+
+Do not enable startup yet. Confirm the status JSON shows the real D4/D5/D6/D8
+levels, zero motion, and the expected E-STOP state. Then start the laptop page:
+
+```bash
+python3 networked_sensors/dashboard.py \
+  --esp32-source off --dxmr90-source off \
+  --stepper-source network \
+  --stepper-url http://YUN_IP:8080 \
+  --stepper-timeout 0.75 \
+  --host 0.0.0.0 --port 8000
+```
+
+Use `http://127.0.0.1:8000/` on the hosting laptop or
+`http://HOST_LAPTOP_LAN_IP:8000/` from another LAN client. Never browse to
+`0.0.0.0`; that is a bind address only.
+
+USB and network accept the same status/command semantics. The first accepted
+mutating command claims the firmware owner. A competing transport is rejected;
+Stop and software E-STOP remain accepted from either transport. Ownership
+releases after motion is stopped, D4 is physically OFF, and the owner is idle
+for two seconds. The page waits for both the Linux acknowledgement and a fresh
+ATmega status before reporting a physical command as confirmed.
+
+After the motor-off LAN status and command-rejection checks pass, enable the
+service at boot:
+
+```bash
+ssh root@YUN_IP '/etc/init.d/yun-stepper-bridge enable'
+```
+
+The service listens without application authentication on port 8080. Keep it
+on the isolated trusted bench LAN, do not forward that port through a router,
+and reserve the Yún address in DHCP.
+
+If `/v1/command` reports an acknowledgement timeout or says the command
+channel is unsynchronized, stop motion with the physical controls, inspect the
+Yún log at `/tmp/yun-stepper-bridge.log`, and restart the service before issuing
+another software command. The service deliberately refuses later commands
+because an uncorrelated late UART acknowledgement must not be mistaken for a
+new command's acknowledgement.
+
+Roll back to USB-only operation with:
+
+```bash
+ssh root@YUN_IP '/etc/init.d/yun-stepper-bridge stop; /etc/init.d/yun-stepper-bridge disable; /etc/init.d/bridge start'
+```
 
 ## 3. Current mixed real-hardware run
 
@@ -345,6 +410,17 @@ python3 networked_sensors/dashboard.py \
   --stepper-source usb --stepper-port /dev/ttyACM0 --stepper-baud 9600 \
   --host 127.0.0.1 --port 8000
 ```
+
+For the LAN-installed Yún bridge, replace the USB flags with:
+
+```bash
+  --stepper-source network --stepper-url http://YUN_IP:8080 \
+  --stepper-timeout 0.75
+```
+
+The network adapter software and loopback contract pass, but this variant is
+not a hardware claim until the T6 firmware/service are installed and the
+motor-off status/ownership/E-STOP checklist passes on the physical Yún.
 
 The 0.1-second DXMR90 timeout keeps an absent LAN device from making ordinary
 dashboard requests sluggish. Software E-STOP dispatch independently bypasses
@@ -368,8 +444,10 @@ Network assumptions:
 | simulated supervisor | `python3 networked_sensors/supervisor.py --samples 12` | JSONL contains source modes, connected flags, age fields |
 | stale scenario | `python3 networked_sensors/supervisor.py --scenario dxmr90_stale --samples 45 --drop-after-s 1 --stale-after-s 1` | `dxmr90_connected` flips false after age threshold |
 | missing scenario | `python3 networked_sensors/supervisor.py --scenario dxmr90_missing --samples 3` | DXMR90 fields are present as `null` |
-| stepper contract | `python3 -m unittest -v networked_sensors.test_stepper_control` | 26 tests cover D5-selected travel, mode, D8 seek, Stop, latched software E-STOP/reset, limits, USB bytes/acks, fresh runtime acknowledgements, legacy status, and merged schema |
+| stepper contract | `python3 -m unittest -v networked_sensors.test_stepper_control` | 32 tests cover D5-selected travel, mode, D8 seek, Stop, latched software E-STOP/reset, limits, USB/network bytes/acks, ownership, rejection/timeout, fresh runtime acknowledgements, legacy status, and merged schema |
 | Yún T5A compile/upload | temporary official CLI/core/library, `arduino:avr:yun` | 65% flash/28% RAM; 18,652 bytes uploaded and read back, fresh D4-off stopped latch/reset confirmed; moving-stop checks pending |
+| Yún T6 network compile/upload | same Yún toolchain | 20,794 bytes/72% flash and 1,399 bytes/54% RAM; upload passes and stopped USB status reports owner none, D4 OFF, clear limits, and zero motion; Linux service install pending |
+| Yún network loopback | `python3 -m unittest -v networked_sensors.test_stepper_control.NetworkStepperSourceTests` | 6 tests pass exact UART/HTTP relay, ownership status, rejection, timeout, CLI/factory, and fresh network E-STOP confirmation |
 | dashboard/API | `python3 networked_sensors/dashboard.py --host 127.0.0.1 --port 8000` | browser dashboard, JSON endpoints, SSE stream, metadata, run state, and simulated solenoid controls respond |
 | simulated stepper API | dashboard plus GET status and POST move/stop/E-STOP/reset endpoints | bounded moves and a latched mode-independent software stop remain on the shared stream |
 | recorder/export | `python3 networked_sensors/dashboard.py --record-dir /tmp/flow-dashboard-recordings` | start/stop writes merged/source CSVs including `stepper_raw.csv`, metadata JSON, summary JSON, and export CSV; export endpoints serve artifacts |

@@ -131,3 +131,19 @@ Practical options for the laptop side:
 **Decision implemented:** use the laptop dashboard for current testing and
 production-style LAN viewing. Flash the archived sketch only for deliberate
 legacy investigation, not as the data source for the current laptop UI.
+
+## Yún stepper transport handoff
+
+The last physically verified Yún image is the USB T5A stepper firmware. A T6
+revision now compiles with a second, non-blocking Serial1 path and exclusive
+USB/network mutation ownership. The matching `yun_stepper_bridge.py` service
+runs on the Yún AR9331 and exposes status/commands on trusted-LAN port 8080;
+the laptop selects it with `--stepper-source network --stepper-url
+http://YUN_IP:8080`.
+
+Software loopback and compile checks pass; the T6 image is uploaded and its
+stopped USB heartbeat passes, but the Linux service is not installed. Do not represent the stepper
+as LAN-ready until the motor-off install/status/ownership/E-STOP checklist and
+the moving jitter/latency/restart/disconnect checks pass. The custom service
+replaces the archived official Bridge daemon as `/dev/ttyATH0` owner and has no
+application authentication, so it belongs only on the isolated bench LAN.

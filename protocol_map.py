@@ -75,7 +75,9 @@ flowchart TD
         DRIVER["DM542T<br/>STEP / DIR"]
         LIMITSER["9600-baud compact JSON status<br/>+ V1 S/D/M/H/G/X/E1/E0 commands"]
         USBADAPTER["UsbStepperSource<br/>mode + D8 seek + move/Stop + software E-STOP"]
-        YUNLINUX["AR9331 / OpenWrt<br/>WPA2 client + DHCP"]
+        UART["Serial1 / /dev/ttyATH0<br/>non-blocking V1 relay"]
+        YUNLINUX["yun_stepper_bridge.py<br/>AR9331 HTTP :8080"]
+        NETADAPTER["NetworkStepperSource<br/>background 10 Hz + guarded commands"]
         GLNET["GL-MT3000-b3a<br/>2.4 GHz bench WLAN"]
         YUNSRC --> AVRCLI
         AVRCLI --> YUNFW
@@ -84,8 +86,11 @@ flowchart TD
         YUNFW --> LIMITSER
         LIMITSER <--> USBADAPTER
         USBADAPTER --> MERGE
-        YUNFW -. "future Bridge transport" .-> YUNLINUX
+        YUNFW <--> UART
+        UART <--> YUNLINUX
         YUNLINUX --> GLNET
+        GLNET <--> NETADAPTER
+        NETADAPTER --> MERGE
     end
 
     subgraph STEP12["Supervisor simulation"]
@@ -117,7 +122,7 @@ flowchart TD
         DASHAPI["/api/state latest history"]
         DASHSSE["/api/events<br/>SSE samples"]
         DASHCTRL["/api/run metadata solenoid stepper<br/>recordings export"]
-        SRCSEL["--esp32-source / --esp32-url / --esp32-timeout<br/>--dxmr90-source<br/>--stepper-source sim|usb|network|off<br/>--stepper-port / --stepper-baud"]
+        SRCSEL["--esp32-source / --esp32-url / --esp32-timeout<br/>--dxmr90-source<br/>--stepper-source sim|usb|network|off<br/>--stepper-port / --stepper-baud<br/>--stepper-url / --stepper-timeout"]
         BROWSER["browser dashboard<br/>flow plots + stepper controls"]
         SRCSEL --> DASHCLI
         DASHCLI --> DASHHTML
@@ -174,12 +179,13 @@ flowchart TD
 | Verb | File | Status | Consumes | Produces | Invocation contract |
 | --- | --- | --- | --- | --- | --- |
 | `supervisor` | `networked_sensors/supervisor.py` | exists | simulated ESP32 + DXMR90 + stepper sources, scenario axis | merged JSONL on stdout | `python3 networked_sensors/supervisor.py [--scenario healthy|esp32_stale|dxmr90_stale|dxmr90_missing|stepper_stale|stepper_missing|all_stale] [--samples N] [--rate-hz HZ] [--drop-after-s S] [--stale-after-s S] [--realtime]` |
-| `dashboard` | `networked_sensors/dashboard.py` | simulated and real ESP32/DXMR90 plus simulated/USB Yún control exists | independently selected source arms, scenario axis, metadata, run state, record directory, solenoid and stepper commands/status | localhost dashboard, JSON API, SSE sample stream, disk-backed run artifacts | `python3 networked_sensors/dashboard.py [--host 127.0.0.1] [--port 8000] [--esp32-source sim|real|off] [--esp32-url URL] [--esp32-timeout S] [--dxmr90-source sim|real|off] [--stepper-source sim|usb|network|off] [--stepper-port /dev/ttyACM0] [--stepper-baud 9600] [--dxmr90-host HOST] [--dxmr90-port 502] [--dxmr90-unit-id 1] [--dxmr90-timeout S] [--dxmr90-addressing one-based|zero-based] [--dxmr90-word-order high-low|low-high] [--dxmr90-data-path direct|republished] [--dxmr90-rate-hz HZ] [--record-dir PATH]`; Yún `network` currently fails closed as not implemented |
+| `dashboard` | `networked_sensors/dashboard.py` | simulated and real ESP32/DXMR90 plus simulated/USB/network Yún control exists; Yún LAN hardware installation remains | independently selected source arms, scenario axis, metadata, run state, record directory, solenoid and stepper commands/status | localhost/LAN dashboard, JSON API, SSE sample stream, disk-backed run artifacts | `python3 networked_sensors/dashboard.py [--host 127.0.0.1] [--port 8000] [--esp32-source sim|real|off] [--esp32-url URL] [--esp32-timeout S] [--dxmr90-source sim|real|off] [--stepper-source sim|usb|network|off] [--stepper-port /dev/ttyACM0] [--stepper-baud 9600] [--stepper-url http://YUN_IP:8080] [--stepper-timeout S] [--dxmr90-host HOST] [--dxmr90-port 502] [--dxmr90-unit-id 1] [--dxmr90-timeout S] [--dxmr90-addressing one-based|zero-based] [--dxmr90-word-order high-low|low-high] [--dxmr90-data-path direct|republished] [--dxmr90-rate-hz HZ] [--record-dir PATH]` |
 | `protocol_map` | `networked_sensors/protocol_map.py` | Step 1 exists | protocol topology constants | `PROTOCOL.md` | `--check` verifies drift; `--write` regenerates |
 | `read_dxmr90_modbus` | `networked_sensors/read_dxmr90_modbus.py` | exists | DXMR90 Modbus TCP registers | table/json/csv rows | `--host` selects device; `--format json` supports programmatic use |
 | `Flow_management_unit_sch1` | `networked_sensors/Flow_management_unit_sch1.ino` | four-output headless v2 firmware exists and target compile passes; physical flash/wiring pending | ADS1115 analog channels + four active-low relays on GPIO 5/6/9/10 | complete version-2 SSE readings, immediate four-state solenoid events, toggle indices 0–3, and JSON service descriptor; no UI/recording | flash to `esp32:esp32:adafruit_feather_esp32s3_nopsram`; run laptop `dashboard.py` as the webpage |
 | archived ESP32 dashboard | `networked_sensors/legacy/Flow_management_unit_sch1/Flow_management_unit_sch1.ino` | preserved reference firmware | ADS1115 analog channels + browser commands | former ESP32 HTML, partial unversioned SSE, and RAM CSV | not compatible with strict `RealEsp32Source`; flash only for deliberate legacy investigation |
-| `limit_switch_palas` | `networked_sensors/limit_switch_palas.ino` | T5A compiled, uploaded with readback verification, and stopped latch/reset live smoke passed; moving stops pending | D4, D5, D6/D8, D4-off `V1 S`/`V1 D`/`V1 M`, armed `V1 H`/relative `V1 G`, Web Position `V1 X`, and mode-independent latched `V1 E1` with D4-off `V1 E0` | Local Velocity plus relative Web Position, D8 seek, fixed acceleration, directional limits, immediate abort, and software E-STOP capability/status; no absolute-position safety gate and no safety-rated energy isolation | compile/upload as `arduino:avr:yun`; because the repository file is not in an Arduino-named sketch directory, stage it in a matching temporary sketch directory first |
+| `limit_switch_palas` | `networked_sensors/limit_switch_palas.ino` | T6 raw-UART firmware compiles at 72% flash/54% RAM, is uploaded, and emits stopped USB status with owner none; Linux service/LAN smoke pending | D4, D5, D6/D8, USB or Linux-relayed `V1 S`/`V1 D`/`V1 M`, armed `V1 H`/relative `V1 G`, Web Position `V1 X`, and mode-independent latched `V1 E1` with D4-off `V1 E0` | Local Velocity plus relative Web Position, D8 seek, fixed acceleration, directional limits, immediate abort, software E-STOP, non-blocking Serial1 status/acks, and exclusive USB/network mutation ownership; no absolute-position safety gate and no safety-rated energy isolation | compile/upload as `arduino:avr:yun`; because the repository file is not in an Arduino-named sketch directory, stage it in a matching temporary sketch directory first |
+| `yun_stepper_bridge` | `networked_sensors/yun_stepper_bridge.py` | Python 2/3 service and UART/HTTP loopback tests pass; Yún installation pending | compact ATmega status plus exact validated `V1` command lines on `/dev/ttyATH0` | trusted-LAN `GET /v1/status`, `GET /v1/health`, and `POST /v1/command` on port 8080 | install on Yún Linux after uploading the matching firmware; stop the archived official Bridge daemon because both use `/dev/ttyATH0` |
 | `YunSerialTerminal` | retired official Bridge library example | temporary maintenance path, verified | Yún USB CDC plus AR9331 UART console; DM542T power must be off | interactive OpenWrt console for non-secret network inspection/configuration | compile/upload as `arduino:avr:yun`, monitor at 115200 baud, send `~~`; restore `limit_switch_palas` immediately after maintenance |
 
 ## 3. Source contracts
@@ -190,7 +196,7 @@ flowchart TD
 | DXMR90 simulated | `SimulatedDxmr90Source` | exists | 1 Hz | core DXMR90 metric names from `read_dxmr90_modbus.py` with `dxmr90_` prefix | `dxmr90_mode`, `dxmr90_connected`, `dxmr90_age_ms` |
 | Yún stepper simulated | `SimulatedStepperSource` | exists | 10 Hz | local enable, state, relative pulse-count model, command ID, D6/D8 limits, and latched software E-STOP/reset | `stepper_mode`, `stepper_connected`, `stepper_age_ms` |
 | Yún stepper USB | `UsbStepperSource` | T5A adapter/firmware uploaded and stopped latch/reset live smoke passed; moving E-STOP checks pending | state changes, 10 Hz moving status, 1 Hz idle heartbeat; mode/speed/mapping, D8 seek/move/Stop, and software E-STOP/reset | dual control modes, D4/D5 authority, D6/D8 directional stops, fixed acceleration, command/state/reason/capabilities, and explicit E-STOP latch; absolute position suppressed | same stepper health fields plus `stepper_transport_error`; software stop is not safety-rated |
-| Yún stepper network | planned Bridge adapter | not implemented; selection fails closed | target 10 Hz | same command/status semantics as USB with exclusive ownership | same stepper health fields |
+| Yún stepper network | `NetworkStepperSource` + Yún Linux UART bridge | background 10 Hz HTTP/status and guarded command adapter implemented; loopback success/rejection/timeout/E-STOP pass; physical install pending | 10 Hz | same command/status semantics as USB, fresh command confirmation, and firmware-reported exclusive USB/network ownership | same stepper health fields plus HTTP/UART errors |
 | ESP32 real | `RealEsp32Source` | strict v2 adapter implemented; four-output loopback HTTP/SSE contract and target firmware compile pass, physical smoke pending | 10 Hz firmware stream | required `v=2`, `sample_ms`, finite three-value `p[]`/`f[]`/`p_v[]`/`f_v[]`, four boolean `sol[]`, derived combined values, and toggle POST indices 0–3; older/incomplete readings are rejected | same ESP32 health fields plus reconnect/error detail |
 | DXMR90 real | `RealDxmr90Source` | implemented and live-hardware verified | direct process data at 10 Hz default; configurable; republished fallback is about 1 Hz | values decoded from SICK windows `1002-1017` and `2002-2017`, including pressure in bar/psi, flow, and temperature | same DXMR90 health fields |
 
@@ -234,10 +240,10 @@ under `--record-dir`.
 | `/api/stepper/status` | GET | stable stepper health, mode, D4/D5, D6/D8, owner, configured/effective speed, and command state | USB position/target/remaining and software-envelope fields are null; legacy homed flag is not a Move guard |
 | `/api/stepper/control-mode` | POST | strict boolean `web_position` | mode changes only while D4 is OFF and motion is stopped; boot/default is Local Velocity |
 | `/api/stepper/home` | POST | no body fields | optional D8-limit seek; Web Position only, D4 armed, D5 Reverse, fixed 1.5 mm/s; not a Move prerequisite |
-| `/api/stepper/move` | POST | positive relative travel `distance_mm` up to 137.18 mm, positive `speed_mm_s`, optional `command_id` | simulation and USB; supervisor snapshots D5 and resolves a signed internal delta; adapter/firmware re-check D5; fixed 5 mm/s² acceleration, D4 arm, and directional D6/D8 stops; no absolute-position envelope |
-| `/api/stepper/stop` | POST | immediate abort and current status | simulation and USB Web Position modes; D4 OFF independently aborts physical motion |
-| `/api/stepper/speed` | POST | `speed_mm_s` from 0.1 through 10.0 | USB Local Velocity only; requires D4 OFF; changes the switch-controlled continuous speed without starting motion |
-| `/api/stepper/direction-mapping` | POST | strict boolean `inverted` | USB T4C only; requires supporting firmware and D4 OFF; changes electrical DIR polarity without moving or replacing D5 |
+| `/api/stepper/move` | POST | positive relative travel `distance_mm` up to 137.18 mm, positive `speed_mm_s`, optional `command_id` | simulation, USB, and network; supervisor snapshots D5 and resolves a signed internal delta; adapter/firmware re-check D5; fixed 5 mm/s² acceleration, D4 arm, and directional D6/D8 stops; no absolute-position envelope |
+| `/api/stepper/stop` | POST | immediate abort and current status | simulation plus USB/network Web Position modes; D4 OFF independently aborts physical motion |
+| `/api/stepper/speed` | POST | `speed_mm_s` from 0.1 through 10.0 | USB/network Local Velocity; requires D4 OFF; changes the switch-controlled continuous speed without starting motion |
+| `/api/stepper/direction-mapping` | POST | strict boolean `inverted` | USB/network only; requires supporting firmware and D4 OFF; changes electrical DIR polarity without moving or replacing D5 |
 | `/api/recordings` | GET | known completed recordings and active recording status | scans `--record-dir` summaries |
 | `/api/export/latest` | GET | latest completed `export.csv` | browser download path |
 | `/api/export?run_id=...&file=...` | GET | selected artifact | allowed files include merged/export CSV, ESP32/DXMR90/stepper source CSVs, and metadata/summary JSON |
@@ -252,6 +258,13 @@ ESP32-only live dashboard command shape:
 
 ```bash
 python3 networked_sensors/dashboard.py --esp32-source real --esp32-url http://ESP32_HOST --dxmr90-source off --stepper-source off --host 127.0.0.1 --port 8000
+```
+
+Yún-network live dashboard command shape after the matching firmware and Linux
+service are installed:
+
+```bash
+python3 networked_sensors/dashboard.py --esp32-source off --dxmr90-source off --stepper-source network --stepper-url http://YUN_IP:8080 --stepper-timeout 0.75 --host 0.0.0.0 --port 8000
 ```
 
 The real source defaults to direct SICK process data at 10 Hz. The
@@ -291,7 +304,7 @@ Required Step-1 fields:
 | Artifact | Producer | Status | Contents | Notes |
 | --- | --- | --- | --- | --- |
 | merged JSONL stdout | `supervisor.py` | exists | one JSON object per merged sample | Step-1/2 smoke artifact |
-| localhost dashboard/API | `dashboard.py` | exists | live HTML, JSON endpoints, SSE stream | shared simulation and USB operator surface |
+| localhost/LAN dashboard/API | `dashboard.py` | exists | live HTML, JSON endpoints, SSE stream | shared simulation, USB, and Yún-network operator surface |
 | in-memory dashboard state | `dashboard.py` | exists | recent history, current metadata, recording flag, simulated solenoids | live UI state |
 | recording directory | `dashboard.py --record-dir` + `recorder.py` | exists | one subdirectory per run | defaults to `networked_sensors/recordings` |
 | merged CSV | `recorder.py` | exists | `merged_samples.csv` with run elapsed, merged values, source mode/health/age fields | primary analysis table |
@@ -310,7 +323,7 @@ Required Step-1 fields:
 | source simulation smoke | `python3 networked_sensors/supervisor.py --samples 12` | healthy simulated ESP32 + DXMR90 merge, modes, connected flags, age fields | No |
 | stale simulation smoke | `python3 networked_sensors/supervisor.py --scenario dxmr90_stale --samples 45 --drop-after-s 1 --stale-after-s 1` | held values age out and `dxmr90_connected` flips false | No |
 | missing simulation smoke | `python3 networked_sensors/supervisor.py --scenario dxmr90_missing --samples 3` | expected DXMR90 keys are present with null values and disconnected status | No |
-| stepper unit tests | `python3 -m unittest -v networked_sensors.test_stepper_control` | D5-selected travel, validation, stops, limits, dashboard runtime, latched software E-STOP/reset, and stable merged shape | No; 26 tests passed |
+| stepper unit tests | `python3 -m unittest -v networked_sensors.test_stepper_control` | D5-selected travel, validation, stops, limits, dashboard runtime, latched software E-STOP/reset, USB/network transport behavior, and stable merged shape | No; 32 tests passed |
 | USB status/control transport | the same unit-test command, including a pseudo-terminal | compact firmware JSON expands into the stable schema; exact speed/motion/E-STOP bytes and D4-off reset guard pass; missing USB is disconnected rather than fatal | No |
 | Yún T4B compile/upload | temporary official Arduino CLI 1.5.1, AVR core 1.8.8, AccelStepper 1.64.0; compile and verified upload for `arduino:avr:yun` | compact status plus manual-speed command use 48% flash and 18% RAM; live D4-off 3.0 mm/s setpoint echo passes with zero effective motion | Yún over USB for upload/live echo; passed |
 | Yún T4C compile/upload | same official temporary toolchain, compile and verified upload for `arduino:avr:yun` | direction mapping/status plus speed use 49% flash and 18% RAM; live Normal mapping/capability pass with D4 OFF and zero motion | Yún over USB for upload/live status; passed |
@@ -319,6 +332,7 @@ Required Step-1 fields:
 | Yún T5 transport tests | `python3 -m unittest -v networked_sensors.test_stepper_control` | mode/D8-seek/move/Stop wire bytes, unreferenced move acceptance, positive magnitude plus D5 Reverse resolving to a negative delta, status decoding, runtime acknowledgement, D5/limit guards, and simulation pass | No; 22 tests passed |
 | Yún T5A compile/upload | same official temporary toolchain, `arduino:avr:yun`, `/dev/ttyACM0` | 65% flash/28% RAM; 18,652 bytes written/read back; D4-off state-9 latch/reset passed; priority dispatch with unreachable DXMR90 reduced stopped acknowledgement from 1.26 s to 0.041 s | Yún over USB; passed; moving stops/latency pending |
 | Yún T5A desktop contract | `python3 -m unittest -v networked_sensors.test_stepper_control` | simulation and dashboard latch/reset, fresh USB acknowledgement, status state 9, exact `V1 E1`/`V1 E0`, D4-on reset rejection, and backward-compatible old-frame decoding | No; 26 tests passed |
+| Yún network bridge contract | `python3 -m unittest -v networked_sensors.test_stepper_control.NetworkStepperSourceTests` | exact UART command relay, background network status, explicit owner decode, firmware rejection, acknowledgement timeout, source factory/CLI, and fresh dashboard E-STOP confirmation | localhost + pseudo-terminal only; 6 tests pass, physical Yún pending |
 | stepper dashboard/API smoke | dashboard plus GET status and POST move/stop | one existing page controls simulation and recorder writes `stepper_raw.csv` alongside flow sources | No |
 | protocol drift | `python3 networked_sensors/protocol_map.py --check` | generated protocol graph/tables match repo topology | No |
 | dashboard/API smoke | `python3 networked_sensors/dashboard.py --host 127.0.0.1 --port 8000` plus localhost GET/POST/SSE probes | local UI and API render live samples, stale/missing source state, metadata, run state, and simulated solenoid controls | No |
@@ -328,7 +342,7 @@ Required Step-1 fields:
 | ESP32 headless compile | temporary Arduino CLI/core/libraries, `esp32:esp32:adafruit_feather_esp32s3_nopsram` | four-output primary firmware compiles at 1,095,265 bytes/52% flash and 80,940 bytes/24% global RAM without HTML or `/test/*` | No; passed |
 | ESP32 physical smoke | dashboard with `--esp32-source real --esp32-url URL` | sustained stream, plausible readings, safe real solenoid toggle, and recorded rows | ESP32 network |
 | SICK/DXMR90 adapter smoke | dashboard `--dxmr90-source real --dxmr90-data-path direct --dxmr90-rate-hz 10` plus API/history probe | both direct SICK process windows decode, fresh source rows sustain 10 Hz, and selected metrics reach the browser | SICK/DXMR90 network |
-| Yún compile | `arduino-cli compile --fqbn arduino:avr:yun ...` | the standalone sketch and AccelStepper compile for ATmega32U4; observed 33% flash and 10% RAM | No |
+| Yún T6 compile/upload | `arduino-cli compile/upload --fqbn arduino:avr:yun ...` | dual USB/Serial1 transport, ownership, motion, limits, and E-STOP use 20,794 bytes/72% flash and 1,399 bytes/54% RAM; stopped USB heartbeat reports no owner/motion and clear limits | Yún USB; passed, Linux service/LAN pending |
 | Yún USB upload | `arduino-cli upload --fqbn arduino:avr:yun --port /dev/ttyACM0 ...` | Caterina USB upload and verification succeed | Yún over USB; motor supply off |
 | Yún limit-input smoke | `arduino-cli monitor --port /dev/ttyACM0 --config baudrate=9600` | D6/D8 transition repeatably when each piston magnet reaches its switch | Yún + both switches; motor supply off |
 | Yún Wi-Fi smoke | temporary `YunSerialTerminal`, then `iwinfo`, `ip`, and gateway ping | OpenWrt associates to `GL-MT3000-b3a` with WPA2/CCMP, receives DHCP, and reaches the router | Yún over USB + bench WLAN; motor supply off |

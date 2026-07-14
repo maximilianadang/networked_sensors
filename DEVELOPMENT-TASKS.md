@@ -139,6 +139,23 @@ data acquisition and operator workflow:
     1.26 s to 0.041 s with DXMR90 still disconnected.
   - [ ] Deliberately prove stopping from both control modes, D4-on reset
     rejection, disconnect persistence, and moving latency before claiming the gate.
+- [ ] **Step 5G - Yún Linux/network bridge.**
+  - [x] Add non-blocking ATmega Serial1 command input and bounded status/ack
+    output without placing HTTP or Bridge transfers in the stepping loop.
+  - [x] Add the Python 2/3 `yun_stepper_bridge.py` AR9331 service, validated V1
+    relay, `/v1/status`, `/v1/health`, and `/v1/command`.
+  - [x] Add explicit firmware USB/network mutation ownership while retaining
+    transport-independent Stop and software E-STOP.
+  - [x] Add `NetworkStepperSource`, `--stepper-url`, `--stepper-timeout`,
+    background polling, fresh physical acknowledgements, and source-scoped
+    failures.
+  - [x] Verify six network-specific UART/HTTP/adapter/runtime tests and compile
+    the Yún target at 72% flash and 54% RAM.
+  - [x] Upload the T6 image and verify stopped USB status with D4 OFF, limits
+    clear, E-STOP clear, and owner none.
+  - [ ] Install the service with motor power off, verify LAN
+    status/ownership/rejection/E-STOP, then measure moving jitter and stop
+    latency before enabling the service at boot.
 - [ ] **Step 6 - real ESP32 adapter.**
   - [x] Consume strict version-2 ESP32 SSE samples and the solenoid command
     endpoint in a background adapter so network reads do not block the merge

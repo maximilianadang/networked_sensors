@@ -28,6 +28,8 @@ try:
         DEFAULT_ESP32_TIMEOUT_S,
         DEFAULT_STEPPER_USB_BAUD,
         DEFAULT_STEPPER_USB_PORT,
+        DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
+        DEFAULT_STEPPER_NETWORK_URL,
         DEFAULT_STALE_AFTER_S,
         SIMULATION_SCENARIOS,
         DXMR90_DATA_PATHS,
@@ -53,6 +55,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         DEFAULT_ESP32_TIMEOUT_S,
         DEFAULT_STEPPER_USB_BAUD,
         DEFAULT_STEPPER_USB_PORT,
+        DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
+        DEFAULT_STEPPER_NETWORK_URL,
         DEFAULT_STALE_AFTER_S,
         SIMULATION_SCENARIOS,
         DXMR90_DATA_PATHS,
@@ -1023,16 +1027,17 @@ INDEX_HTML = r"""<!doctype html>
       text("stepperBlocked", decisionText);
       text("stepperSequence", latest.stepper_status_sequence ?? "--");
       text("stepperTransport", latest.stepper_transport_error || (stepperConnected ? "Connected" : "Waiting for status"));
-      if (!stepperMessageSticky && latest.stepper_mode === "usb") {
+      if (!stepperMessageSticky && ["usb", "network"].includes(latest.stepper_mode)) {
+        const transportLabel = latest.stepper_mode === "network" ? "LAN" : "USB";
         text("stepperMessage", commandCapable
           ? webPositionMode
             ? "Web Position ready; D4 arms, D5 selects direction, and D6/D8 stop travel"
             : "Local Velocity: D4 runs/stops and D5 selects direction"
           : latest.stepper_direction_command_capable
-          ? "USB calibration ready; upload position-capable firmware for Home and Move"
+          ? `${transportLabel} calibration ready; upload position-capable firmware for Home and Move`
           : latest.stepper_speed_command_capable
-          ? "USB speed tuning ready; upload direction-capable firmware to invert mapping"
-          : "USB diagnostics only; upload T4B firmware for speed tuning");
+          ? `${transportLabel} speed tuning ready; upload direction-capable firmware to invert mapping`
+          : `${transportLabel} diagnostics only; upload T4B firmware for speed tuning`);
       }
       updateStepperControls();
 
@@ -1562,6 +1567,8 @@ class DashboardRuntime:
         dxmr90_word_order: str,
         dxmr90_data_path: str,
         dxmr90_rate_hz: float,
+        stepper_network_url: str = DEFAULT_STEPPER_NETWORK_URL,
+        stepper_network_timeout: float = DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
     ) -> None:
         if rate_hz <= 0:
             raise ValueError("rate_hz must be positive")
@@ -1581,6 +1588,8 @@ class DashboardRuntime:
         self.stepper_source = stepper_source
         self.stepper_port = stepper_port
         self.stepper_baud = stepper_baud
+        self.stepper_network_url = stepper_network_url
+        self.stepper_network_timeout = stepper_network_timeout
         self.dxmr90_host = dxmr90_host
         self.dxmr90_port = dxmr90_port
         self.dxmr90_unit_id = dxmr90_unit_id
@@ -1597,6 +1606,8 @@ class DashboardRuntime:
             stepper_source=stepper_source,
             stepper_port=stepper_port,
             stepper_baud=stepper_baud,
+            stepper_network_url=stepper_network_url,
+            stepper_network_timeout=stepper_network_timeout,
             scenario=scenario,
             drop_after_s=drop_after_s,
             esp32_auto_sequence=False,
@@ -1944,7 +1955,7 @@ class DashboardRuntime:
             expected_id = getattr(stepper, "pending_command_id", None)
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) == "usb":
+            if getattr(stepper, "mode", None) in ("usb", "network"):
                 deadline = time.monotonic() + 1.5
                 while True:
                     payload = self._stepper_payload_locked()
@@ -1978,7 +1989,7 @@ class DashboardRuntime:
             stepper.stop()  # type: ignore[attr-defined]
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) == "usb":
+            if getattr(stepper, "mode", None) in ("usb", "network"):
                 deadline = time.monotonic() + 1.5
                 while True:
                     payload = self._stepper_payload_locked()
@@ -2018,9 +2029,7 @@ class DashboardRuntime:
 
         with self._condition:
             elapsed_s = time.monotonic() - self.monotonic0
-            if getattr(stepper, "mode", None) != "usb":
-                self._poll_locked(elapsed_s)
-            else:
+            if getattr(stepper, "mode", None) in ("usb", "network"):
                 deadline = time.monotonic() + 1.5
                 while True:
                     payload = self._stepper_payload_locked()
@@ -2036,6 +2045,8 @@ class DashboardRuntime:
                             "Yún did not confirm software E-STOP within 1.5 seconds"
                         )
                     self._condition.wait(timeout=min(remaining, 0.1))
+            else:
+                self._poll_locked(elapsed_s)
             return {
                 "confirmed": True,
                 "stepper": self._stepper_payload_locked(),
@@ -2053,7 +2064,7 @@ class DashboardRuntime:
             stepper.reset_emergency_stop()  # type: ignore[attr-defined]
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) == "usb":
+            if getattr(stepper, "mode", None) in ("usb", "network"):
                 deadline = time.monotonic() + 1.5
                 while True:
                     payload = self._stepper_payload_locked()
@@ -2093,7 +2104,7 @@ class DashboardRuntime:
             stepper.set_control_mode(requested)  # type: ignore[attr-defined]
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) == "usb":
+            if getattr(stepper, "mode", None) in ("usb", "network"):
                 deadline = time.monotonic() + 1.5
                 while True:
                     payload = self._stepper_payload_locked()
@@ -2124,7 +2135,7 @@ class DashboardRuntime:
             stepper.home()  # type: ignore[attr-defined]
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) == "usb":
+            if getattr(stepper, "mode", None) in ("usb", "network"):
                 deadline = time.monotonic() + 1.5
                 while True:
                     payload = self._stepper_payload_locked()
@@ -2498,7 +2509,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--stepper-source",
         choices=STEPPER_SOURCE_MODES,
         default="sim",
-        help="Yún stepper source mode (network adapter is not implemented yet)",
+        help="Yún stepper source mode",
     )
     parser.add_argument(
         "--stepper-port",
@@ -2510,6 +2521,17 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         type=int,
         default=DEFAULT_STEPPER_USB_BAUD,
         help="USB Serial baud used when --stepper-source usb",
+    )
+    parser.add_argument(
+        "--stepper-url",
+        default=DEFAULT_STEPPER_NETWORK_URL,
+        help="Yún Linux bridge base URL when --stepper-source network",
+    )
+    parser.add_argument(
+        "--stepper-timeout",
+        type=float,
+        default=DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
+        help="Yún network status/command timeout in seconds",
     )
     parser.add_argument(
         "--dxmr90-host",
@@ -2610,6 +2632,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.dxmr90_timeout <= 0:
         print("--dxmr90-timeout must be positive", file=sys.stderr)
         return 2
+    if args.stepper_timeout <= 0:
+        print("--stepper-timeout must be positive", file=sys.stderr)
+        return 2
     if args.dxmr90_rate_hz <= 0:
         print("--dxmr90-rate-hz must be positive", file=sys.stderr)
         return 2
@@ -2629,6 +2654,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             stepper_source=args.stepper_source,
             stepper_port=args.stepper_port,
             stepper_baud=args.stepper_baud,
+            stepper_network_url=args.stepper_url,
+            stepper_network_timeout=args.stepper_timeout,
             dxmr90_host=args.dxmr90_host,
             dxmr90_port=args.dxmr90_port,
             dxmr90_unit_id=args.dxmr90_unit_id,

@@ -9,13 +9,15 @@ the reasoning; source files remain the interface of record.
 - This directory currently contains a headless ESP32-S3 test-bench sketch, an
   archived copy of the former ESP32-hosted dashboard firmware, a
   no-dependency DXMR90 Modbus TCP reader, a Python supervisor skeleton, a local
-  dashboard/API, a disk-backed recorder/exporter, and handoff notes from the
+  dashboard/API, a Yún Linux UART/HTTP bridge, a disk-backed recorder/exporter,
+  and handoff notes from the
   former embedded dashboard.
 - The current architecture is a laptop-side Python supervisor with a local web
   dashboard. The skeleton runs healthy/stale/missing simulation scenarios for
   ESP32, DXMR90, and stepper sources before hardware is connected;
   `dashboard.py` serves their shared localhost UI/API with disk-backed
-  recording/export, simulation stepper controls, and a physical-Yún USB path.
+  recording/export, simulation stepper controls, a physical-Yún USB path, and
+  a software-complete network Yún path pending physical installation.
   Its real ESP32 adapter requires the primary firmware's version-2 `/events`
   samples (pressure, flow, clamped sensor volts, and four solenoid states) and
   forwards the solenoid-toggle endpoint. Older/incomplete samples are
@@ -31,6 +33,13 @@ the reasoning; source files remain the interface of record.
   and must never be represented as a hardwired safety-rated E-stop. The T5A
   image is uploaded and stopped-state latch/reset verification passes; moving
   stop and latency checks remain.
+  A Yún Linux network path is now software-landed: the ATmega uses bounded,
+  non-blocking Serial1 queues; `yun_stepper_bridge.py` relays the existing V1
+  contract through trusted-LAN HTTP; and `NetworkStepperSource` polls/commands
+  it with explicit USB/network firmware ownership. Six focused network tests
+  and a 72%-flash/54%-RAM Yún compile pass. The image is now uploaded and a
+  stopped USB heartbeat verifies owner `none`; Linux-service installation and
+  motor-off LAN checks remain.
 - Do not expand the ESP32 into the central data aggregator. Keep it as hardware
   I/O: analog pressure/flow reads, solenoid control, and a small telemetry/control
   API. The laptop supervisor owns merged logging, plotting, metadata, and CSV
@@ -62,12 +71,14 @@ networked_sensors/
   Flow_management_unit_sch1.ino   # primary headless ESP32-S3 sensor/solenoid API, strict telemetry v1
   legacy/Flow_management_unit_sch1/Flow_management_unit_sch1.ino # archived ESP32-hosted dashboard firmware
   limit_switch_palas.ino          # dual-mode engine, limits, USB motion/status, latched software E-STOP
+  yun_stepper_bridge.py           # Yún Linux /dev/ttyATH0 to trusted-LAN HTTP relay
+  yun-stepper-bridge.init         # staged OpenWrt service wrapper (install only after smoke)
   documentation/                  # offline Arduino Yún/Bridge/AccelStepper references and adaptation notes
   TASKS.md                       # Yún Rev2 stepper web-control execution order and acceptance gates
   read_dxmr90_modbus.py           # stdlib Modbus TCP reader for Banner DXMR90-4k republished registers
   supervisor_core.py              # source schema, simulations, real ESP32/DXMR90 and USB Yún adapters, merge logic
   supervisor.py                   # no-hardware JSONL smoke CLI with healthy/stale/missing scenarios
-  dashboard.py                    # localhost dashboard with real/sim/off ESP32/DXMR90 and sim/USB/off stepper sources
+  dashboard.py                    # laptop dashboard with real/sim/off ESP32/DXMR90 and sim/USB/network/off stepper sources
   recorder.py                     # Step-4 run directories, merged/source CSVs, metadata, summary, export CSV
   test_stepper_control.py         # simulated motion plus USB parser/pseudo-terminal contract tests
   protocol_map.py                 # generated PROTOCOL.md graph/table checker
@@ -85,7 +96,7 @@ DXMR90 Modbus TCP          -> RealDxmr90Source      /
 Simulated DXMR90 readings  -> SimulatedDxmr90Source/
 Simulated Yún stepper      -> SimulatedStepperSource/
 Yún native USB status      -> UsbStepperSource      /
-Yún Wi-Fi/Bridge API       -> NetworkStepperSource /  (planned)
+Yún Wi-Fi/UART bridge API  -> NetworkStepperSource /  (software landed; physical install pending)
 ```
 
 The supervisor should expose one merged sample model with laptop timestamps,

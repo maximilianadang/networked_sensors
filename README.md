@@ -43,7 +43,7 @@ ScriptBasic output block.
 
 The same laptop dashboard can consume the primary headless ESP32's strict
 version-2 SSE service (including four solenoids, with the fourth on GPIO 10)
-and Yún USB status/control alongside the real DXMR90:
+and Yún USB or network status/control alongside the real DXMR90:
 
 ```bash
 python3 networked_sensors/dashboard.py \
@@ -59,6 +59,23 @@ Use the ESP32's printed IP in `--esp32-url` if `testbench.local` does not
 resolve, and replace `/dev/ttyACM0` with its stable `/dev/serial/by-id/...`
 path when available. The archived self-hosted ESP32 sketch emits an older,
 partial stream and is intentionally rejected by the current laptop adapter.
+
+After installing the matching T6 firmware and `yun_stepper_bridge.py` service
+on the Yún, use its reserved DHCP address instead of a USB device:
+
+```bash
+python3 networked_sensors/dashboard.py \
+  --esp32-source real --esp32-url http://testbench.local \
+  --dxmr90-source real --dxmr90-host 192.168.0.1 \
+  --dxmr90-data-path direct --dxmr90-rate-hz 10 \
+  --stepper-source network --stepper-url http://YUN_IP:8080 \
+  --stepper-timeout 0.75 \
+  --host 0.0.0.0 --port 8000
+```
+
+The Yún service has no application authentication and belongs only on the
+isolated trusted bench LAN. See `RUNBOOK.md` for installation, motor-off
+verification, ownership, rollback, and browser-address instructions.
 
 This repo includes a no-dependency Python reader:
 

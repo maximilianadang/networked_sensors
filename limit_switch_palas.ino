@@ -98,6 +98,23 @@ bool positiveLimitLatched = false;
 bool negativeLimitLatched = false;
 bool emergencyStopLatched = false;
 
+// --- Mutating-transport ownership ---
+// USB and the Yún Linux network bridge share one command engine, but may not
+// configure/start motion concurrently. A mutating command claims its transport.
+// The claim releases only after motion is stopped, D4 is physically OFF, and
+// the owner has been idle for two seconds. Stop and software E-STOP commands
+// are intentionally accepted from either transport and never steal ownership.
+enum CommandTransport : byte {
+  TRANSPORT_NONE = 0,
+  TRANSPORT_USB = 1,
+  TRANSPORT_NETWORK = 2,
+};
+const unsigned long OWNER_IDLE_RELEASE_MS = 2000UL;
+CommandTransport controlOwner = TRANSPORT_NONE;
+unsigned long ownerLastActivityMs = 0UL;
+bool lastCommandAccepted = true;
+const char *lastCommandError = "none";
+
 // --- USB command/status contract ---
 // Commands are newline-terminated ASCII:
 //   V1 S10..1000                 configure speed while D4 is OFF
@@ -125,6 +142,19 @@ bool statusDirty = true;
 const byte USB_COMMAND_BUFFER_SIZE = 48;
 char usbCommandBuffer[USB_COMMAND_BUFFER_SIZE];
 byte usbCommandLength = 0;
+
+// Linux-side transport. The AR9331 service owns /dev/ttyATH0 and the ATmega
+// uses Serial1 at 115200 baud. Both RX and TX are bounded per loop. Outgoing
+// JSON is drained only into currently available UART capacity so a missing or
+// restarting Linux service cannot block STEP generation.
+const byte NETWORK_COMMAND_BUFFER_SIZE = USB_COMMAND_BUFFER_SIZE;
+char networkCommandBuffer[NETWORK_COMMAND_BUFFER_SIZE];
+byte networkCommandLength = 0;
+char networkTxActive[256];
+unsigned int networkTxActiveLength = 0;
+unsigned int networkTxActiveOffset = 0;
+char networkTxPendingAck[80];
+bool networkAckPending = false;
 
 void setElectricalDirectionMapping() {
   stepper.setPinsInverted(directionSign == -1, false, false);
@@ -176,9 +206,38 @@ bool stoppedWithD4Off() {
 }
 
 void rejectCommand(const __FlashStringHelper *message) {
+  lastCommandAccepted = false;
+  lastCommandError = "rejected";
   Serial.print(F("Command rejected: "));
   Serial.println(message);
   statusDirty = true;
+}
+
+void releaseExpiredOwner() {
+  if (controlOwner != TRANSPORT_NONE && stoppedWithD4Off() &&
+      millis() - ownerLastActivityMs >= OWNER_IDLE_RELEASE_MS) {
+    controlOwner = TRANSPORT_NONE;
+    statusDirty = true;
+  }
+}
+
+bool claimTransport(CommandTransport transport) {
+  releaseExpiredOwner();
+  if (controlOwner != TRANSPORT_NONE && controlOwner != transport) {
+    lastCommandAccepted = false;
+    lastCommandError = controlOwner == TRANSPORT_USB
+        ? "owned_by_usb"
+        : "owned_by_network";
+    Serial.println(controlOwner == TRANSPORT_USB
+        ? F("Command rejected: control is owned by USB.")
+        : F("Command rejected: control is owned by network."));
+    statusDirty = true;
+    return false;
+  }
+  controlOwner = transport;
+  ownerLastActivityMs = millis();
+  statusDirty = true;
+  return true;
 }
 
 void startHomeCommand() {
@@ -300,14 +359,15 @@ void startMoveCommand(long deltaSteps, long speedSps, long commandId) {
   Serial.println(F("Bounded Web Position move accepted."));
 }
 
-void processUsbCommand() {
-  usbCommandBuffer[usbCommandLength] = '\0';
+void processCommandBody(char *commandBuffer, CommandTransport transport) {
+  lastCommandAccepted = true;
+  lastCommandError = "none";
 
   // E1 is intentionally accepted before all mode and D4 checks. It is a
   // latched software stop for both Local Velocity and Web Position motion.
   // This serial/firmware path is not a substitute for a hardwired,
   // safety-rated emergency-stop circuit that removes hazardous energy.
-  if (strcmp(usbCommandBuffer, "V1 E1") == 0) {
+  if (strcmp(commandBuffer, "V1 E1") == 0) {
     emergencyStopLatched = true;
     stopStepperImmediately();
     stepper.setSpeed(0.0);
@@ -318,7 +378,18 @@ void processUsbCommand() {
     return;
   }
 
-  if (strcmp(usbCommandBuffer, "V1 E0") == 0) {
+  bool claimsOwnership =
+      strcmp(commandBuffer, "V1 E0") == 0 ||
+      strncmp(commandBuffer, "V1 S", 4) == 0 ||
+      strcmp(commandBuffer, "V1 D0") == 0 ||
+      strcmp(commandBuffer, "V1 D1") == 0 ||
+      strcmp(commandBuffer, "V1 M0") == 0 ||
+      strcmp(commandBuffer, "V1 M1") == 0 ||
+      strcmp(commandBuffer, "V1 H") == 0 ||
+      strncmp(commandBuffer, "V1 G", 4) == 0;
+  if (claimsOwnership && !claimTransport(transport)) return;
+
+  if (strcmp(commandBuffer, "V1 E0") == 0) {
     // Requiring D4 OFF prevents reset from immediately restarting Local
     // Velocity motion when the physical run switch was left ON.
     if (!stoppedWithD4Off()) {
@@ -335,9 +406,9 @@ void processUsbCommand() {
     return;
   }
 
-  if (strncmp(usbCommandBuffer, "V1 S", 4) == 0) {
+  if (strncmp(commandBuffer, "V1 S", 4) == 0) {
     long requestedSpeedSps = 0;
-    if (!parseLongExact(usbCommandBuffer + 4, &requestedSpeedSps)) {
+    if (!parseLongExact(commandBuffer + 4, &requestedSpeedSps)) {
       rejectCommand(F("speed must be an integer."));
       return;
     }
@@ -356,26 +427,26 @@ void processUsbCommand() {
     return;
   }
 
-  if (strcmp(usbCommandBuffer, "V1 D0") == 0 ||
-      strcmp(usbCommandBuffer, "V1 D1") == 0) {
+  if (strcmp(commandBuffer, "V1 D0") == 0 ||
+      strcmp(commandBuffer, "V1 D1") == 0) {
     if (!stoppedWithD4Off()) {
       rejectCommand(F("turn D4 OFF and stop motion before changing mapping."));
       return;
     }
-    directionSign = usbCommandBuffer[4] == '1' ? -1 : 1;
+    directionSign = commandBuffer[4] == '1' ? -1 : 1;
     setElectricalDirectionMapping();
     statusDirty = true;
     Serial.println(F("Electrical direction mapping accepted."));
     return;
   }
 
-  if (strcmp(usbCommandBuffer, "V1 M0") == 0 ||
-      strcmp(usbCommandBuffer, "V1 M1") == 0) {
+  if (strcmp(commandBuffer, "V1 M0") == 0 ||
+      strcmp(commandBuffer, "V1 M1") == 0) {
     if (!stoppedWithD4Off()) {
       rejectCommand(F("turn D4 OFF and stop motion before changing mode."));
       return;
     }
-    controlMode = usbCommandBuffer[4] == '1' ? WEB_POSITION : LOCAL_VELOCITY;
+    controlMode = commandBuffer[4] == '1' ? WEB_POSITION : LOCAL_VELOCITY;
     stopStepperImmediately();
     motionState = controlMode == WEB_POSITION
         ? STATE_WEB_READY
@@ -388,12 +459,12 @@ void processUsbCommand() {
     return;
   }
 
-  if (strcmp(usbCommandBuffer, "V1 H") == 0) {
+  if (strcmp(commandBuffer, "V1 H") == 0) {
     startHomeCommand();
     return;
   }
 
-  if (strcmp(usbCommandBuffer, "V1 X") == 0) {
+  if (strcmp(commandBuffer, "V1 X") == 0) {
     if (controlMode != WEB_POSITION) {
       rejectCommand(F("web Stop is available only in Web Position mode."));
       return;
@@ -403,8 +474,8 @@ void processUsbCommand() {
     return;
   }
 
-  if (strncmp(usbCommandBuffer, "V1 G", 4) == 0) {
-    char *deltaText = usbCommandBuffer + 4;
+  if (strncmp(commandBuffer, "V1 G", 4) == 0) {
+    char *deltaText = commandBuffer + 4;
     char *firstComma = strchr(deltaText, ',');
     if (firstComma == NULL) {
       rejectCommand(F("move grammar is V1 Gsteps,speed,id."));
@@ -435,6 +506,25 @@ void processUsbCommand() {
   rejectCommand(F("unknown version-1 command."));
 }
 
+void processCommand(char *commandBuffer, CommandTransport transport) {
+  CommandTransport ownerBefore = controlOwner;
+  unsigned long ownerActivityBefore = ownerLastActivityMs;
+  processCommandBody(commandBuffer, transport);
+  // A syntactically or physically rejected command must not acquire an idle
+  // controller. Existing ownership is retained across a rejected command from
+  // that same owner, but a new claim is committed only by acceptance.
+  if (!lastCommandAccepted && ownerBefore == TRANSPORT_NONE &&
+      controlOwner == transport) {
+    controlOwner = TRANSPORT_NONE;
+    ownerLastActivityMs = ownerActivityBefore;
+  }
+}
+
+void processUsbCommand() {
+  usbCommandBuffer[usbCommandLength] = '\0';
+  processCommand(usbCommandBuffer, TRANSPORT_USB);
+}
+
 void pollUsbCommands() {
   // Bound serial work per loop so a noisy host cannot monopolize stepping.
   for (byte readCount = 0;
@@ -456,7 +546,92 @@ void pollUsbCommands() {
   }
 }
 
-void reportMachineStatus(
+bool queueNetworkStatus(const char *line) {
+  // Status is periodic. If a previous line or higher-priority acknowledgement
+  // is still draining, drop this snapshot rather than queueing RAM or blocking.
+  if (networkTxActiveOffset < networkTxActiveLength || networkAckPending) {
+    return false;
+  }
+  strncpy(networkTxActive, line, sizeof(networkTxActive) - 2);
+  networkTxActive[sizeof(networkTxActive) - 2] = '\0';
+  strncat(networkTxActive, "\n", sizeof(networkTxActive) -
+      strlen(networkTxActive) - 1);
+  networkTxActiveLength = strlen(networkTxActive);
+  networkTxActiveOffset = 0;
+  return true;
+}
+
+void queueNetworkAcknowledgement() {
+  snprintf(
+      networkTxPendingAck,
+      sizeof(networkTxPendingAck),
+      "{\"v\":1,\"t\":\"a\",\"ok\":%d,\"e\":\"%s\"}\n",
+      lastCommandAccepted ? 1 : 0,
+      lastCommandError);
+  networkAckPending = true;
+}
+
+void beginNextNetworkTransmission() {
+  if (networkTxActiveOffset < networkTxActiveLength) return;
+  networkTxActiveLength = 0;
+  networkTxActiveOffset = 0;
+  const char *next = NULL;
+  if (networkAckPending) {
+    next = networkTxPendingAck;
+    networkAckPending = false;
+  }
+  if (next == NULL) return;
+  strncpy(networkTxActive, next, sizeof(networkTxActive) - 1);
+  networkTxActive[sizeof(networkTxActive) - 1] = '\0';
+  networkTxActiveLength = strlen(networkTxActive);
+}
+
+void flushNetworkOutput() {
+  beginNextNetworkTransmission();
+  if (networkTxActiveOffset >= networkTxActiveLength) return;
+  int available = Serial1.availableForWrite();
+  if (available <= 0) return;
+  unsigned int remaining = networkTxActiveLength - networkTxActiveOffset;
+  unsigned int chunk = remaining < (unsigned int)available
+      ? remaining
+      : (unsigned int)available;
+  size_t written = Serial1.write(
+      (const uint8_t *)networkTxActive + networkTxActiveOffset,
+      chunk);
+  networkTxActiveOffset += written;
+}
+
+void processNetworkCommand() {
+  networkCommandBuffer[networkCommandLength] = '\0';
+  processCommand(networkCommandBuffer, TRANSPORT_NETWORK);
+  queueNetworkAcknowledgement();
+}
+
+void pollNetworkCommands() {
+  // Match USB's bounded-per-loop work. The Linux service already validates the
+  // outer HTTP request, but the ATmega parser remains the authority.
+  for (byte readCount = 0;
+       readCount < 20 && Serial1.available() > 0;
+       ++readCount) {
+    char incoming = (char)Serial1.read();
+    if (incoming == '\r') continue;
+    if (incoming == '\n') {
+      if (networkCommandLength > 0) processNetworkCommand();
+      networkCommandLength = 0;
+      continue;
+    }
+    if (networkCommandLength < NETWORK_COMMAND_BUFFER_SIZE - 1) {
+      networkCommandBuffer[networkCommandLength++] = incoming;
+    } else {
+      networkCommandLength = 0;
+      lastCommandAccepted = false;
+      lastCommandError = "line_too_long";
+      queueNetworkAcknowledgement();
+    }
+  }
+}
+
+bool reportMachineStatus(
     int runRaw,
     int directionRaw,
     int positiveRaw,
@@ -465,8 +640,6 @@ void reportMachineStatus(
     const char *reason,
     long effectiveLogicalSpeedSps,
     bool moving) {
-  if (!Serial) return;
-
   // Preserve the established meaning of sps as electrical signed rate. The
   // laptop multiplies by ds to recover logical positive/negative travel.
   long electricalSpeedSps = effectiveLogicalSpeedSps * directionSign;
@@ -478,7 +651,7 @@ void reportMachineStatus(
       "\"d6\":%d,\"d8\":%d,\"lp\":%d,\"ln\":%d,\"b\":%d,"
       "\"r\":\"%s\",\"sps\":%ld,\"csps\":%ld,\"ds\":%d,"
       "\"m\":%d,\"h\":%d,\"a\":%d,\"e\":%d,\"mv\":%d,\"st\":%d,\"p\":%ld,"
-      "\"g\":%ld,\"c\":%u}",
+      "\"g\":%ld,\"c\":%u,\"o\":%d}",
       ++statusSequence,
       runRaw,
       directionRaw,
@@ -499,12 +672,15 @@ void reportMachineStatus(
       (int)motionState,
       stepper.currentPosition(),
       reportedTargetSteps,
-      activeCommandId);
-  Serial.println(line);
+      activeCommandId,
+      (int)controlOwner);
+  if (Serial) Serial.println(line);
+  return queueNetworkStatus(line);
 }
 
 void setup() {
   Serial.begin(9600);
+  Serial1.begin(115200);
 
   pinMode(PIN_RUN, INPUT_PULLUP);
   pinMode(PIN_DIR, INPUT_PULLUP);
@@ -519,12 +695,14 @@ void setup() {
 
   Serial.println(F("Stepper ready in stopped Local Velocity mode."));
   Serial.println(F("D4/D5 run Local Velocity; Web Position uses D4 arm and D5 direction."));
-  Serial.println(F("USB controls: V1 S, D, M, H, G, X, E1, E0; compact JSON status at 9600 baud."));
+  Serial.println(F("USB and Yún-Linux controls share V1 S, D, M, H, G, X, E1, E0."));
   reportLimitLevels(digitalRead(PIN_LIMIT_POS), digitalRead(PIN_LIMIT_NEG));
 }
 
 void loop() {
   pollUsbCommands();
+  pollNetworkCommands();
+  flushNetworkOutput();
 
   int runRaw = digitalRead(PIN_RUN);
   int directionRaw = digitalRead(PIN_DIR);
@@ -532,6 +710,7 @@ void loop() {
   int negativeRaw = digitalRead(PIN_LIMIT_NEG);
   bool d4On = runRaw == LOW;
   if (!d4On) d4OffObservedSinceBoot = true;
+  releaseExpiredOwner();
   bool d4MotionArmed = d4On && d4OffObservedSinceBoot;
   bool d5Reverse = directionRaw == LOW;
   bool positiveLimitActive = positiveRaw == POS_LIMIT_ACTIVE_LEVEL;
@@ -682,10 +861,13 @@ void loop() {
         statusReason,
         effectiveLogicalSpeedSps,
         moving);
-    if (Serial) {
-      lastStatusSignature = statusSignature;
-      lastStatusAtMs = nowMs;
-      statusDirty = false;
-    }
+    lastStatusSignature = statusSignature;
+    lastStatusAtMs = nowMs;
+    // A status snapshot may be dropped if an acknowledgement or older status
+    // is still draining. Do not fast-loop the report: repeated 9600-baud USB
+    // debug writes could otherwise delay STEP generation. The next bounded
+    // heartbeat refreshes the Linux cache within STATUS_HEARTBEAT_MS.
+    statusDirty = false;
   }
+  flushNetworkOutput();
 }

@@ -425,3 +425,21 @@ D4-on rejection, disconnect persistence, and moving latency remain pending. A
 combined-source finding is also recorded: priority dispatch prevents an
 unreachable DXMR90 poll from delaying the Yún write, reducing stopped response
 from 1.26 s to 0.041 s under the observed test configuration.
+
+## Step D21 - Yún LAN bridge documented
+
+**Direction given:** implement the missing Yún LAN control path now that the
+dashboard is being run from another laptop on the bench network.
+
+**Applied:** updated the architecture and runnable protocol from a planned
+Bridge adapter to a concrete non-blocking ATmega Serial1 path, AR9331
+`yun_stepper_bridge.py` service, OpenWrt init wrapper, and
+`NetworkStepperSource`. Added the `--stepper-url`/`--stepper-timeout` launch
+contract, exact Linux install/rollback commands, trusted-LAN/no-auth boundary,
+USB/network ownership rules, fresh acknowledgement semantics, and a dedicated
+motor-off/moving checklist.
+
+**Boundary recorded:** six network tests, 38 combined desktop tests, and a
+20,794-byte/72%-flash, 1,399-byte/54%-RAM Yún compile/upload pass. A stopped USB
+heartbeat reports owner none and zero motion. No Linux service install, LAN
+hardware status, jitter/latency, restart, disconnect, or motion result is claimed.

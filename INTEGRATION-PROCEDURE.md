@@ -347,3 +347,24 @@ combined DXMR90/Yún run, E-STOP dispatch was moved ahead of the shared poll loc
 so a failing Modbus source cannot delay the Yún write. Stopped live response
 with DXMR90 unreachable improved from 1.26 s to 0.041 s. The software transport
 is explicitly outside the safety-rated energy-isolation boundary.
+
+## Step I3c - Yún network source software landing
+
+The network source now shares the USB adapter's validation and command methods
+while replacing the file descriptor with a background, no-proxy HTTP status
+poller and single-attempt command POST. The Yún Linux service serializes
+commands onto `/dev/ttyATH0`, and the ATmega returns explicit acceptance or
+rejection before the shared dashboard waits for a fresh physical status. The
+compact owner field distinguishes none, USB, and network; firmware—not either
+laptop adapter—arbitrates competing mutation.
+
+Six network-specific tests cover the full emulated chain from HTTP through a
+pseudo-terminal and back, plus rejection, timeout, CLI/factory selection,
+owner decoding, and fresh dashboard E-STOP status. The firmware compiles at
+72% flash/54% RAM, is uploaded, and emits a stopped owner-none USB heartbeat.
+This arm remains wet until the Linux service is installed on the physical Yún
+and LAN, competing-owner,
+restart/disconnect, limit, motion, and timing parity checks pass.
+
+After an acknowledgement timeout, the relay refuses further commands until it
+is restarted; this is an intentional fail-closed command-correlation boundary.

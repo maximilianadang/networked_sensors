@@ -72,6 +72,8 @@ STEPPER_SOURCE_MODES = ("sim", "usb", "network", "off")
 DXMR90_DATA_PATHS = ("direct", "republished")
 DEFAULT_STEPPER_USB_PORT = "/dev/ttyACM0"
 DEFAULT_STEPPER_USB_BAUD = 9600
+DEFAULT_STEPPER_NETWORK_URL = "http://arduino.local:8080"
+DEFAULT_STEPPER_NETWORK_TIMEOUT_S = 0.75
 DEFAULT_STEPPER_STEPS_PER_MM = 100.0
 DEFAULT_STEPPER_TRAVEL_MM = 137.18
 DEFAULT_STEPPER_HOME_SPEED_MM_S = 1.5
@@ -784,6 +786,19 @@ class UsbStepperSource:
             cls._wire_level(payload, "e") == 1 if estop_capable else False
         )
 
+        owner_value = payload.get("o")
+        owner_capable = owner_value is not None
+        if owner_capable:
+            if (
+                isinstance(owner_value, bool)
+                or not isinstance(owner_value, int)
+                or owner_value not in (0, 1, 2)
+            ):
+                raise ValueError("USB stepper field o must be 0, 1, or 2")
+            transport_owner = {0: "none", 1: "usb", 2: "network"}[owner_value]
+        else:
+            transport_owner = None
+
         position_keys = ("m", "h", "a", "mv", "st", "p", "g", "c")
         position_command_capable = all(key in payload for key in position_keys)
         if any(key in payload for key in position_keys) and not position_command_capable:
@@ -834,7 +849,9 @@ class UsbStepperSource:
             target_mm = None
             remaining_mm = None
             command_id = (
-                f"usb-{int(command_number):05d}" if int(command_number) else None
+                f"{cls.mode}-{int(command_number):05d}"
+                if int(command_number)
+                else None
             )
         else:
             control_mode = "local_velocity"
@@ -892,7 +909,15 @@ class UsbStepperSource:
             "stepper_estop_capable": estop_capable,
             "stepper_estop_latched": estop_latched,
             "stepper_control_owner": (
-                "web_position_usb"
+                (
+                    f"web_position_{transport_owner}"
+                    if control_mode == "web_position" and transport_owner != "none"
+                    else f"manual_d4_d5+{transport_owner}_control"
+                    if transport_owner != "none"
+                    else "none"
+                )
+                if owner_capable
+                else "web_position_usb"
                 if position_command_capable and control_mode == "web_position"
                 else "manual_d4_d5+usb_control"
                 if position_command_capable
@@ -1041,9 +1066,12 @@ class UsbStepperSource:
         return number
 
     def _require_connected(self) -> dict[str, float | int | bool | str | None]:
-        if self._fd is None or self._last_values is None:
-            raise RuntimeError("USB stepper is not connected")
+        if not self._transport_connected() or self._last_values is None:
+            raise RuntimeError(f"{self.mode} stepper is not connected")
         return self._last_values
+
+    def _transport_connected(self) -> bool:
+        return self._fd is not None
 
     def _write_command(self, command: bytes, description: str) -> None:
         # Serialize complete command lines. E-STOP bypasses the dashboard's
@@ -1069,7 +1097,9 @@ class UsbStepperSource:
         if values.get("stepper_estop_latched"):
             raise RuntimeError("reset the software E-STOP before changing speed")
         if not values.get("stepper_speed_command_capable"):
-            raise RuntimeError("Yún firmware does not support USB speed tuning")
+            raise RuntimeError(
+                f"Yún firmware does not support {self.mode} speed tuning"
+            )
         if values.get("stepper_d4_raw") != "HIGH":
             raise RuntimeError("turn D4 OFF before changing manual speed")
         self._write_command(f"V1 S{speed_sps}\n".encode("ascii"), "speed")
@@ -1200,7 +1230,7 @@ class UsbStepperSource:
             raise RuntimeError("negative limit blocks negative motion")
 
         if command_id is None:
-            resolved_name = f"usb-{self._next_command_id:05d}"
+            resolved_name = f"{self.mode}-{self._next_command_id:05d}"
         else:
             resolved_name = str(command_id).strip()
             if not resolved_name or len(resolved_name) > 64:
@@ -1269,6 +1299,201 @@ class UsbStepperSource:
         self.last_error = None
         self._last_values = latest
         return SourceReading(self.name, self.mode, elapsed_s, latest)
+
+
+class NetworkStepperSource(UsbStepperSource):
+    """Poll and command the Yún Linux UART bridge over its trusted-LAN API.
+
+    The Linux service only relays the existing bounded ``V1`` command lines and
+    compact status JSON.  Motion, D4/D5 authority, limits, and the E-STOP latch
+    remain entirely in the ATmega firmware.
+    """
+
+    mode = "network"
+
+    def __init__(
+        self,
+        base_url: str = DEFAULT_STEPPER_NETWORK_URL,
+        timeout: float = DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
+    ) -> None:
+        normalized_url = base_url.rstrip("/")
+        parsed = urlparse(normalized_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError(
+                "stepper network URL must be an absolute http:// or https:// URL"
+            )
+        if timeout <= 0:
+            raise ValueError("stepper network timeout must be positive")
+
+        self.base_url = normalized_url
+        self.timeout = timeout
+        self.last_error: str | None = None
+        self._last_values: dict[str, float | int | bool | str | None] | None = None
+        self._next_command_id = 1
+        self._command_names: dict[int, str] = {}
+        self.pending_command_id: str | None = None
+        self._command_lock = threading.Lock()
+        self._opener = build_opener(ProxyHandler({}))
+        self._state_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._generation = 0
+        self._emitted_generation = 0
+
+    def _transport_connected(self) -> bool:
+        with self._state_lock:
+            return self._last_values is not None and self.last_error is None
+
+    def _ensure_started(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="yun-stepper-network-source",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _set_error(self, message: str | None) -> None:
+        with self._state_lock:
+            self.last_error = message
+
+    def _fetch_status(self) -> None:
+        url = f"{self.base_url}/v1/status"
+        request = Request(
+            url,
+            headers={"Accept": "application/json", "Cache-Control": "no-store"},
+            method="GET",
+        )
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                body = response.read(4096).decode("utf-8", errors="replace").strip()
+            values = self.decode_status_line(body)
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            OSError,
+            HTTPException,
+            ValueError,
+        ) as exc:
+            self._set_error(f"{url}: {exc}")
+            return
+
+        decoded_command_id = values.get("stepper_command_id")
+        if isinstance(decoded_command_id, str) and decoded_command_id.startswith(
+            "network-"
+        ):
+            try:
+                wire_id = int(decoded_command_id[8:])
+            except ValueError:
+                wire_id = 0
+            resolved_name = self._command_names.get(wire_id)
+            if resolved_name is not None:
+                values["stepper_command_id"] = resolved_name
+                if resolved_name == self.pending_command_id:
+                    self.pending_command_id = None
+        with self._state_lock:
+            self._last_values = values
+            self.last_error = None
+            self._generation += 1
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            self._fetch_status()
+            if self._stop_event.wait(self.period_s):
+                break
+
+    def status(self) -> Mapping[str, float | int | bool | str | None]:
+        with self._state_lock:
+            if self._last_values is not None:
+                values = dict(self._last_values)
+            else:
+                values = {field: None for field in self.expected_fields}
+                values["stepper_command_capable"] = False
+                values["stepper_speed_command_capable"] = False
+                values["stepper_direction_command_capable"] = False
+                values["stepper_mode_command_capable"] = False
+                values["stepper_home_capable"] = False
+                values["stepper_estop_capable"] = False
+                values["stepper_estop_latched"] = False
+                values["stepper_control_owner"] = "none"
+            values["stepper_transport_error"] = self.last_error
+        return values
+
+    def _write_command(self, command: bytes, description: str) -> None:
+        command_text = command.decode("ascii").strip()
+        url = f"{self.base_url}/v1/command"
+        request = Request(
+            url,
+            data=command_text.encode("ascii"),
+            headers={
+                "Accept": "application/json",
+                "Cache-Control": "no-store",
+                "Content-Type": "text/plain; charset=us-ascii",
+            },
+            method="POST",
+        )
+        with self._command_lock:
+            try:
+                with self._opener.open(request, timeout=self.timeout) as response:
+                    body = response.read(1024).decode(
+                        "utf-8", errors="replace"
+                    ).strip()
+                acknowledgement = json.loads(body)
+            except HTTPError as exc:
+                error_body = exc.read(1024).decode("utf-8", errors="replace").strip()
+                try:
+                    payload = json.loads(error_body)
+                    detail = payload.get("error") if isinstance(payload, dict) else None
+                except json.JSONDecodeError:
+                    detail = None
+                message = str(detail or exc)
+                self._set_error(f"{url}: {message}")
+                raise RuntimeError(
+                    f"network stepper {description} command rejected: {message}"
+                ) from exc
+            except (
+                URLError,
+                TimeoutError,
+                OSError,
+                HTTPException,
+                UnicodeError,
+                json.JSONDecodeError,
+            ) as exc:
+                self._set_error(f"{url}: {exc}")
+                raise RuntimeError(
+                    f"network stepper {description} command failed: {exc}"
+                ) from exc
+
+            if (
+                not isinstance(acknowledgement, dict)
+                or acknowledgement.get("v") != 1
+                or acknowledgement.get("type") != "ack"
+                or acknowledgement.get("accepted") is not True
+            ):
+                raise RuntimeError(
+                    f"network stepper {description} returned an invalid acknowledgement"
+                )
+            self._set_error(None)
+
+    def poll(self, elapsed_s: float) -> SourceReading | None:
+        self._ensure_started()
+        with self._state_lock:
+            if (
+                self._last_values is None
+                or self._generation == self._emitted_generation
+            ):
+                return None
+            values = dict(self._last_values)
+            self._emitted_generation = self._generation
+        return SourceReading(self.name, self.mode, elapsed_s, values)
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.timeout + self.period_s))
 
 
 class RealEsp32Source:
@@ -1723,6 +1948,8 @@ def make_sources(
     stepper_source: str = "sim",
     stepper_port: str = DEFAULT_STEPPER_USB_PORT,
     stepper_baud: int = DEFAULT_STEPPER_USB_BAUD,
+    stepper_network_url: str = DEFAULT_STEPPER_NETWORK_URL,
+    stepper_network_timeout: float = DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
     scenario: str = "healthy",
     drop_after_s: float = DEFAULT_DROP_AFTER_S,
     esp32_auto_sequence: bool = True,
@@ -1746,9 +1973,6 @@ def make_sources(
     if stepper_source not in STEPPER_SOURCE_MODES:
         allowed = ", ".join(STEPPER_SOURCE_MODES)
         raise ValueError(f"unknown stepper source {stepper_source!r}; expected {allowed}")
-    if stepper_source == "network":
-        raise NotImplementedError("network Yún stepper source is planned for T6-T7")
-
     sim_sources = make_simulated_sources(
         scenario=scenario,
         drop_after_s=drop_after_s,
@@ -1790,6 +2014,11 @@ def make_sources(
         stepper: SourceAdapter = sim_by_name["stepper"]
     elif stepper_source == "usb":
         stepper = UsbStepperSource(port=stepper_port, baud=stepper_baud)
+    elif stepper_source == "network":
+        stepper = NetworkStepperSource(
+            base_url=stepper_network_url,
+            timeout=stepper_network_timeout,
+        )
     else:
         stepper = DisabledSource(
             "stepper",
