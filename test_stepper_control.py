@@ -588,6 +588,11 @@ class NetworkStepperSourceTests(unittest.TestCase):
             os.close(slave_fd)
 
     def test_bridge_rejects_unknown_or_oversized_grammar_before_uart(self) -> None:
+        # The archived Yun image uses Python 2.7, which rejects non-ASCII source
+        # without an encoding declaration. Keep this small deployment script
+        # ASCII-only so copying it verbatim cannot recreate that startup fault.
+        bridge_source = Path(__file__).with_name("yun_stepper_bridge.py").read_bytes()
+        bridge_source.decode("ascii")
         self.assertEqual(validate_command(" V1 E1\n"), "V1 E1")
         for command in ("V1 Q", "V1 G1,2", "V2 E1", "V1 S" + "1" * 60):
             with self.subTest(command=command):

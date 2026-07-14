@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Trusted-LAN HTTP bridge for the Arduino Yún stepper firmware.
+"""Trusted-LAN HTTP bridge for the Arduino Yun stepper firmware.
 
-This service runs on the Yún's AR9331 Linux processor.  It owns the internal
+This service runs on the Yun's AR9331 Linux processor.  It owns the internal
 UART (normally ``/dev/ttyATH0``), caches compact status lines emitted by the
 ATmega32U4, and relays only the existing bounded ``V1`` command grammar.  It
 does not generate STEP/DIR signals or make motion-safety decisions.
 
-The file is deliberately compatible with the Yún image's Python 2.7 as well as
+The file is deliberately compatible with the Yun image's Python 2.7 as well as
 modern Python 3 so it can be exercised by the laptop test suite.
 """
 
@@ -24,7 +24,7 @@ import threading
 import time
 import tty
 
-try:  # Python 2 on the archived Yún Linux image.
+try:  # Python 2 on the archived Yun Linux image.
     from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
     from SocketServer import ThreadingMixIn
 except ImportError:  # Python 3 laptop tests.
@@ -82,7 +82,7 @@ def validate_command(command):
 
 
 class SerialBridgeState(object):
-    """Own the Yún UART, latest status, and serialized command acknowledgements."""
+    """Own the Yun UART, latest status, and serialized command acknowledgements."""
 
     def __init__(self, device=DEFAULT_DEVICE, baud=DEFAULT_BAUD, ack_timeout=1.0):
         if baud != 115200:
