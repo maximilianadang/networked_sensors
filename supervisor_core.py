@@ -8,6 +8,7 @@ import math
 import os
 import termios
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPException
@@ -47,7 +48,8 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 
 ESP32_PERIOD_S = 0.1
-ESP32_PAYLOAD_VERSION = 2
+ESP32_PAYLOAD_VERSION = 3
+ESP32_LEGACY_PAYLOAD_VERSION = 2
 ESP32_SOLENOID_COUNT = 4
 DEFAULT_ESP32_BASE_URL = "http://testbench.local"
 DEFAULT_ESP32_TIMEOUT_S = 2.0
@@ -180,6 +182,8 @@ class SimulatedEsp32Source(PeriodicSource):
     expected_fields = (
         "esp32_payload_version",
         "esp32_sample_ms",
+        "esp32_pressure_adc_ready",
+        "esp32_flow_adc_ready",
         "esp32_p1_bar",
         "esp32_p2_bar",
         "esp32_p3_bar",
@@ -256,6 +260,8 @@ class SimulatedEsp32Source(PeriodicSource):
         values: dict[str, float | int | bool | str | None] = {
             "esp32_payload_version": ESP32_PAYLOAD_VERSION,
             "esp32_sample_ms": round(elapsed_s * 1000.0),
+            "esp32_pressure_adc_ready": True,
+            "esp32_flow_adc_ready": True,
             "esp32_p1_bar": round(pressures[0], 3),
             "esp32_p2_bar": round(pressures[1], 3),
             "esp32_p3_bar": round(pressures[2], 3),
@@ -1547,9 +1553,10 @@ class NetworkStepperSource(UsbStepperSource):
 class RealEsp32Source:
     """Background SSE client for the ESP32 sensor and solenoid API.
 
-    The headless firmware sends complete version-2 readings and immediate
-    solenoid state-change events. The background reader keeps the HTTP stream
-    from blocking the supervisor's fixed-rate merge loop; ``poll`` only
+    The headless firmware sends version-3 readings with explicit per-ADC health
+    and immediate solenoid state-change events. Healthy version-2 readings stay
+    accepted for deployment compatibility. The background reader keeps the HTTP
+    stream from blocking the supervisor's fixed-rate merge loop; ``poll`` only
     projects a newly received event into the common source schema.
     """
 
@@ -1606,6 +1613,36 @@ class RealEsp32Source:
         return decoded[0], decoded[1], decoded[2]
 
     @classmethod
+    def _adc_triplet(
+        cls,
+        payload: object,
+        key: str,
+        ready: bool,
+    ) -> tuple[float | None, float | None, float | None]:
+        if not isinstance(payload, dict):
+            raise ValueError("ESP32 reading must be a JSON object")
+        values = payload.get(key)
+        if not isinstance(values, list) or len(values) != 3:
+            raise ValueError(f"ESP32 reading {key!r} must contain exactly 3 values")
+        if ready:
+            return cls._numeric_triplet(payload, key)
+        if any(value is not None for value in values):
+            raise ValueError(
+                f"ESP32 reading {key!r} must contain exactly 3 null values "
+                "when its ADC is unavailable"
+            )
+        return None, None, None
+
+    @staticmethod
+    def _boolean_field(payload: object, key: str) -> bool:
+        if not isinstance(payload, dict):
+            raise ValueError("ESP32 reading must be a JSON object")
+        value = payload.get(key)
+        if not isinstance(value, bool):
+            raise ValueError(f"ESP32 reading {key!r} must be boolean")
+        return value
+
+    @classmethod
     def decode_reading_data(
         cls,
         data: str,
@@ -1618,28 +1655,44 @@ class RealEsp32Source:
             raise ValueError("ESP32 reading must be a JSON object")
         if "v" not in payload:
             raise ValueError(
-                f"ESP32 reading is missing required payload version "
-                f"{ESP32_PAYLOAD_VERSION}"
+                "ESP32 reading is missing required payload version 2 or 3"
             )
         version = payload["v"]
         if isinstance(version, bool) or not isinstance(version, int):
             raise ValueError("ESP32 reading version must be an integer")
-        if version != ESP32_PAYLOAD_VERSION:
+        if version not in (ESP32_LEGACY_PAYLOAD_VERSION, ESP32_PAYLOAD_VERSION):
             raise ValueError(f"unsupported ESP32 reading version {version}")
 
-        pressures = cls._numeric_triplet(payload, "p")
-        flows = cls._numeric_triplet(payload, "f")
+        if version == ESP32_LEGACY_PAYLOAD_VERSION:
+            pressure_adc_ready = True
+            flow_adc_ready = True
+        else:
+            pressure_adc_ready = cls._boolean_field(payload, "p_adc_ok")
+            flow_adc_ready = cls._boolean_field(payload, "f_adc_ok")
+
+        pressures = cls._adc_triplet(payload, "p", pressure_adc_ready)
+        flows = cls._adc_triplet(payload, "f", flow_adc_ready)
         values: dict[str, float | int | bool | str | None] = {
             "esp32_payload_version": version,
             "esp32_sample_ms": None,
+            "esp32_pressure_adc_ready": pressure_adc_ready,
+            "esp32_flow_adc_ready": flow_adc_ready,
             "esp32_p1_bar": pressures[0],
             "esp32_p2_bar": pressures[1],
             "esp32_p3_bar": pressures[2],
             "esp32_f1_gmin": flows[0],
             "esp32_f2_gmin": flows[1],
             "esp32_f3_gmin": flows[2],
-            "esp32_p_combined_bar": min(pressures),
-            "esp32_f_combined_gmin": sum(flows),
+            "esp32_p_combined_bar": (
+                min(value for value in pressures if value is not None)
+                if pressure_adc_ready
+                else None
+            ),
+            "esp32_f_combined_gmin": (
+                sum(value for value in flows if value is not None)
+                if flow_adc_ready
+                else None
+            ),
         }
         sample_ms = payload.get("sample_ms")
         if (
@@ -1648,8 +1701,8 @@ class RealEsp32Source:
             or sample_ms < 0
         ):
             raise ValueError("ESP32 reading sample_ms must be a non-negative integer")
-        pressure_volts = cls._numeric_triplet(payload, "p_v")
-        flow_volts = cls._numeric_triplet(payload, "f_v")
+        pressure_volts = cls._adc_triplet(payload, "p_v", pressure_adc_ready)
+        flow_volts = cls._adc_triplet(payload, "f_v", flow_adc_ready)
         solenoids = cls._boolean_solenoid_states(payload, "sol")
         values["esp32_sample_ms"] = sample_ms
         for index, voltage in enumerate(pressure_volts, start=1):
@@ -1823,7 +1876,7 @@ class RealEsp32Source:
 
 
 class RealDxmr90Source:
-    """DXMR90/Banner Modbus adapter for live or republished SICK values."""
+    """Background DXMR90/Banner adapter for live or republished SICK values."""
 
     name = "dxmr90"
     mode = "real"
@@ -1855,13 +1908,25 @@ class RealDxmr90Source:
         self.rate_hz = rate_hz
         self.period_s = 1.0 / rate_hz
         self.last_error: str | None = None
-        self._next_due_s = 0.0
+        self._state_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._values: dict[str, float | int | bool | str | None] | None = None
+        self._generation = 0
+        self._emitted_generation = 0
 
-    def poll(self, elapsed_s: float) -> SourceReading | None:
-        if elapsed_s + 1e-9 < self._next_due_s:
-            return None
-        while self._next_due_s <= elapsed_s + 1e-9:
-            self._next_due_s += self.period_s
+    def _ensure_started(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="dxmr90-modbus-source",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _fetch(self) -> None:
         try:
             with ModbusTcpClient(
                 self.host,
@@ -1877,10 +1942,10 @@ class RealDxmr90Source:
                     rows = read_metrics(client, DXMR90_CORE_METRICS, self.word_order)
                     direct_values = None
         except (OSError, ModbusError, ValueError) as exc:
-            self.last_error = str(exc)
-            return None
+            with self._state_lock:
+                self.last_error = str(exc)
+            return
 
-        self.last_error = None
         values: dict[str, float | int | bool | str | None]
         if direct_values is not None:
             values = {f"dxmr90_{name}": value for name, value in direct_values.items()}
@@ -1889,12 +1954,39 @@ class RealDxmr90Source:
             values = {}
             for row in rows:
                 values[f"dxmr90_{row['name']}"] = row["value"]  # type: ignore[assignment]
-        return SourceReading(
-            source=self.name,
-            mode=self.mode,
-            elapsed_s=elapsed_s,
-            values=values,
-        )
+        with self._state_lock:
+            self._values = values
+            self.last_error = None
+            self._generation += 1
+
+    def _run(self) -> None:
+        next_poll = time.monotonic()
+        while not self._stop_event.is_set():
+            delay_s = next_poll - time.monotonic()
+            if delay_s > 0 and self._stop_event.wait(delay_s):
+                break
+            self._fetch()
+            next_poll += self.period_s
+            now = time.monotonic()
+            while next_poll <= now:
+                next_poll += self.period_s
+
+    def poll(self, elapsed_s: float) -> SourceReading | None:
+        self._ensure_started()
+        with self._state_lock:
+            if (
+                self._values is None
+                or self._generation == self._emitted_generation
+            ):
+                return None
+            values = dict(self._values)
+            self._emitted_generation = self._generation
+        return SourceReading(self.name, self.mode, elapsed_s, values)
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.timeout + self.period_s))
 
 
 class SourceMerger:

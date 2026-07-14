@@ -12,9 +12,9 @@ test-bench translation of `dpc-flight/FLIGHT_CHECKLIST.md`.
 
 ## 2. ESP32 network
 
-- ESP32 joins the intended 2.4 GHz network.
+- ESP32 joins the field router's `GL-MT3000-b3a` 2.4 GHz network.
 - `http://testbench.local` resolves, or the serial monitor IP is reachable.
-- `curl http://testbench.local/` returns the headless version-2 JSON service
+- `curl http://testbench.local/` returns the headless version-3 JSON service
   descriptor; no ESP32-hosted webpage is expected from the primary firmware.
 - `/events` streams readings for at least one minute without disconnecting.
 - Laptop dashboard started with
@@ -24,10 +24,15 @@ test-bench translation of `dpc-flight/FLIGHT_CHECKLIST.md`.
   `--esp32-url`; the laptop has a route to that address.
 - A deliberately safe laptop-dashboard solenoid toggle changes the expected
   relay and its state returns in complete readings and the immediate `sol` event.
-- Real ESP32 readings show version 1, advancing `sample_ms`, pressure/flow,
-  clamped pressure/flow sensor voltages, and all four solenoid states. An
+- Real ESP32 readings show version 3, advancing `sample_ms`, explicit
+  `p_adc_ok`/`f_adc_ok`, pressure/flow, clamped sensor voltages, and all four
+  solenoid states. An
   ESP32 version error means older firmware was flashed and must be replaced by
   the primary headless sketch.
+- With both ADS1115 boards disconnected and relay power made safe, the ESP32
+  still joins Wi-Fi and streams 10 Hz readings with both ADC flags false, null
+  measurement families, and four truthful OFF relay states. Do not actuate a
+  relay as part of this connectivity check.
 
 ## 3. ADS1115 and analog sensors
 
@@ -63,6 +68,8 @@ test-bench translation of `dpc-flight/FLIGHT_CHECKLIST.md`.
   values.
 - The live dashboard uses `--dxmr90-data-path direct --dxmr90-rate-hz 10` and
   its recent history advances at 0.1-second intervals.
+- With the ESP32 live and DXMR90 Ethernet temporarily disconnected, the ESP32
+  age/sample display still advances at 10 Hz while only DXMR90 becomes stale.
 - If values look nonsensical, try alternate `--word-order` or `--addressing` as
   documented in `README.md`.
 

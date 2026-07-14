@@ -18,11 +18,11 @@ the reasoning; source files remain the interface of record.
   `dashboard.py` serves their shared localhost UI/API with disk-backed
   recording/export, simulation stepper controls, a physical-Yún USB path, and
   a software-complete network Yún path pending physical installation.
-  Its real ESP32 adapter requires the primary firmware's version-2 `/events`
-  samples (pressure, flow, clamped sensor volts, and four solenoid states) and
-  forwards the solenoid-toggle endpoint. Older/incomplete samples are
-  rejected; the loopback contract and ESP32-S3 compile pass, while a physical
-  flash/stream/toggle smoke remains.
+  Its real ESP32 adapter accepts healthy version-2 `/events` samples and the
+  primary firmware's version-3 stream with explicit per-ADC availability,
+  nullable unavailable sensor families, and four solenoid states. It forwards
+  the solenoid-toggle endpoint and rejects older, partial, or inconsistent
+  samples.
   The live board now has explicit Local Velocity/Web Position modes, optional
   D8-limit seek, positive travel magnitude with D5-selected direction, and Stop; compile,
   verified upload, and stopped live USB status pass, with staged physical motion

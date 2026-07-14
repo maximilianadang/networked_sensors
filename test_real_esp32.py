@@ -29,7 +29,10 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertNotIn("const char HTML[]", primary)
         self.assertNotIn('"text/html"', primary)
         self.assertNotIn('server.on("/test/', primary)
-        self.assertIn('\\"api_version\\":2', primary)
+        self.assertIn('\\"api_version\\":3', primary)
+        self.assertIn('\\"p_adc_ok\\":%s', primary)
+        self.assertIn('\\"f_adc_ok\\":%s', primary)
+        self.assertNotIn("FATAL: sensor hardware unavailable", primary)
         self.assertIn('\\"p_v\\":[', primary)
         self.assertIn('\\"f_v\\":[', primary)
         self.assertIn("{5, 6, 9, 10}", primary)
@@ -38,6 +41,10 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertIn('"text/html"', legacy)
         self.assertIn('id="sol3"', INDEX_HTML)
         self.assertIn("const solenoidCount = 4", INDEX_HTML)
+        self.assertIn('id="espPressureAdc"', INDEX_HTML)
+        self.assertIn('id="espFlowAdc"', INDEX_HTML)
+        self.assertIn('mode === "off"', INDEX_HTML)
+        self.assertIn("realAndLive", INDEX_HTML)
 
 
 class _Esp32ContractServer(ThreadingHTTPServer):
@@ -48,6 +55,12 @@ class _Esp32ContractServer(ThreadingHTTPServer):
         self.solenoids = [False, True, False, True]
         self.toggle_requests: list[int] = []
         self.release_stream = threading.Event()
+        self.reading_payload = (
+            b'{"v":3,"sample_ms":100,"p_adc_ok":true,"f_adc_ok":true,'
+            b'"p":[1.25,2.5,3.75],"f":[10.0,20.5,30.25],'
+            b'"p_v":[1.0,1.5,2.0],"f_v":[1.1,1.2,1.3],'
+            b'"sol":[false,true,false,true]}'
+        )
 
 
 class _Esp32ContractHandler(BaseHTTPRequestHandler):
@@ -70,11 +83,7 @@ class _Esp32ContractHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: " + solenoids + b"\n\n")
         self.wfile.write(b"id: 100\n")
         self.wfile.write(b"event: reading\n")
-        self.wfile.write(
-            b'data: {"v":2,"sample_ms":100,"p":[1.25,2.5,3.75],'
-            b'"f":[10.0,20.5,30.25],"p_v":[1.0,1.5,2.0],'
-            b'"f_v":[1.1,1.2,1.3],"sol":[false,true,false,true]}\n\n'
-        )
+        self.wfile.write(b"data: " + self.server.reading_payload + b"\n\n")
         self.wfile.flush()
         self.server.release_stream.wait(2.0)
 
@@ -128,7 +137,7 @@ class RealEsp32SourceTests(unittest.TestCase):
         self.fail(f"timed out waiting for ESP32 reading: {self.source.last_error}")
 
     def test_requires_and_decodes_versioned_headless_firmware_contract(self) -> None:
-        with self.assertRaisesRegex(ValueError, "required payload version 2"):
+        with self.assertRaisesRegex(ValueError, "required payload version 2 or 3"):
             RealEsp32Source.decode_reading_data(
                 '{"p":[1.25,2.5,3.75],"f":[10,20.5,30.25]}'
             )
@@ -136,12 +145,15 @@ class RealEsp32SourceTests(unittest.TestCase):
             RealEsp32Source.decode_reading_data("[]")
 
         values = RealEsp32Source.decode_reading_data(
-            '{"v":2,"sample_ms":42,"p":[1,2,3],"f":[4,5,6],'
+            '{"v":3,"sample_ms":42,"p_adc_ok":true,"f_adc_ok":true,'
+            '"p":[1,2,3],"f":[4,5,6],'
             '"p_v":[0.9,1.3,1.7],"f_v":[1.1,1.2,1.3],'
             '"sol":[true,false,true,false]}'
         )
-        self.assertEqual(values["esp32_payload_version"], 2)
+        self.assertEqual(values["esp32_payload_version"], 3)
         self.assertEqual(values["esp32_sample_ms"], 42)
+        self.assertTrue(values["esp32_pressure_adc_ready"])
+        self.assertTrue(values["esp32_flow_adc_ready"])
         self.assertEqual(values["esp32_p_combined_bar"], 1.0)
         self.assertEqual(values["esp32_f_combined_gmin"], 15.0)
         self.assertEqual(values["esp32_p2_volt"], 1.3)
@@ -149,19 +161,50 @@ class RealEsp32SourceTests(unittest.TestCase):
         self.assertEqual(values["esp32_sol3"], True)
         self.assertEqual(values["esp32_sol4"], False)
 
+        legacy_values = RealEsp32Source.decode_reading_data(
+            '{"v":2,"sample_ms":42,"p":[1,2,3],"f":[4,5,6],'
+            '"p_v":[0.9,1.3,1.7],"f_v":[1.1,1.2,1.3],'
+            '"sol":[true,false,true,false]}'
+        )
+        self.assertTrue(legacy_values["esp32_pressure_adc_ready"])
+        self.assertTrue(legacy_values["esp32_flow_adc_ready"])
+
+        missing_pressure = RealEsp32Source.decode_reading_data(
+            '{"v":3,"sample_ms":43,"p_adc_ok":false,"f_adc_ok":true,'
+            '"p":[null,null,null],"f":[4,5,6],'
+            '"p_v":[null,null,null],"f_v":[1.1,1.2,1.3],'
+            '"sol":[false,false,false,false]}'
+        )
+        self.assertFalse(missing_pressure["esp32_pressure_adc_ready"])
+        self.assertTrue(missing_pressure["esp32_flow_adc_ready"])
+        self.assertIsNone(missing_pressure["esp32_p1_bar"])
+        self.assertIsNone(missing_pressure["esp32_p_combined_bar"])
+        self.assertEqual(missing_pressure["esp32_f_combined_gmin"], 15.0)
+
+        with self.assertRaisesRegex(ValueError, "3 null values"):
+            RealEsp32Source.decode_reading_data(
+                '{"v":3,"sample_ms":43,"p_adc_ok":false,"f_adc_ok":true,'
+                '"p":[0,0,0],"f":[4,5,6],'
+                '"p_v":[null,null,null],"f_v":[1.1,1.2,1.3],'
+                '"sol":[false,false,false,false]}'
+            )
+
         with self.assertRaisesRegex(ValueError, "exactly 4 booleans"):
             RealEsp32Source.decode_reading_data(
-                '{"v":2,"sample_ms":42,"p":[1,2,3],"f":[4,5,6],'
+                '{"v":3,"sample_ms":42,"p_adc_ok":true,"f_adc_ok":true,'
+                '"p":[1,2,3],"f":[4,5,6],'
                 '"p_v":[0.9,1.3,1.7],"f_v":[1.1,1.2,1.3],'
                 '"sol":[true,false,true]}'
             )
         with self.assertRaisesRegex(ValueError, "exactly 3"):
             RealEsp32Source.decode_reading_data(
-                '{"v":2,"p":[1,2],"f":[1,2,3]}'
+                '{"v":3,"p_adc_ok":true,"f_adc_ok":true,'
+                '"p":[1,2],"f":[1,2,3]}'
             )
         with self.assertRaisesRegex(ValueError, "finite"):
             RealEsp32Source.decode_reading_data(
-                '{"v":2,"p":[1,2,NaN],"f":[1,2,3]}'
+                '{"v":3,"p_adc_ok":true,"f_adc_ok":true,'
+                '"p":[1,2,NaN],"f":[1,2,3]}'
             )
         with self.assertRaisesRegex(ValueError, "unsupported"):
             RealEsp32Source.decode_reading_data(
@@ -169,7 +212,8 @@ class RealEsp32SourceTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "sample_ms"):
             RealEsp32Source.decode_reading_data(
-                '{"v":2,"p":[1,2,3],"f":[1,2,3]}'
+                '{"v":3,"p_adc_ok":true,"f_adc_ok":true,'
+                '"p":[1,2,3],"f":[1,2,3]}'
             )
 
     def test_sse_stream_projects_readings_and_solenoids_into_schema(self) -> None:
@@ -180,8 +224,10 @@ class RealEsp32SourceTests(unittest.TestCase):
         self.assertEqual(reading.values["esp32_sol1"], False)
         self.assertEqual(reading.values["esp32_sol2"], True)
         self.assertEqual(reading.values["esp32_sol4"], True)
-        self.assertEqual(reading.values["esp32_payload_version"], 2)
+        self.assertEqual(reading.values["esp32_payload_version"], 3)
         self.assertEqual(reading.values["esp32_sample_ms"], 100)
+        self.assertTrue(reading.values["esp32_pressure_adc_ready"])
+        self.assertTrue(reading.values["esp32_flow_adc_ready"])
         self.assertEqual(reading.values["esp32_p1_volt"], 1.0)
         self.assertEqual(reading.values["esp32_f3_volt"], 1.3)
 
@@ -200,6 +246,33 @@ class RealEsp32SourceTests(unittest.TestCase):
         assert sample is not None
         self.assertEqual(sample["esp32_p1_volt"], 1.0)
         self.assertIsNone(sample["esp32_transport_error"])
+
+    def test_missing_adcs_keep_transport_and_solenoid_state_live(self) -> None:
+        self.server.reading_payload = (
+            b'{"v":3,"sample_ms":101,"p_adc_ok":false,"f_adc_ok":false,'
+            b'"p":[null,null,null],"f":[null,null,null],'
+            b'"p_v":[null,null,null],"f_v":[null,null,null],'
+            b'"sol":[false,true,false,true]}'
+        )
+        merger = SourceMerger([self.source], stale_after_s=0.5)
+        deadline = time.monotonic() + 2.0
+        sample = None
+        elapsed_s = 0.0
+        while time.monotonic() < deadline:
+            candidate = merger.poll(elapsed_s, datetime.now(timezone.utc))
+            if candidate["esp32_connected"]:
+                sample = candidate
+                break
+            elapsed_s += 0.01
+            time.sleep(0.01)
+        self.assertIsNotNone(sample)
+        assert sample is not None
+        self.assertTrue(sample["esp32_connected"])
+        self.assertFalse(sample["esp32_pressure_adc_ready"])
+        self.assertFalse(sample["esp32_flow_adc_ready"])
+        self.assertIsNone(sample["esp32_p_combined_bar"])
+        self.assertIsNone(sample["esp32_f_combined_gmin"])
+        self.assertEqual(sample["esp32_sol2"], True)
 
     def test_solenoid_toggle_uses_existing_post_endpoint(self) -> None:
         self._wait_for_reading()

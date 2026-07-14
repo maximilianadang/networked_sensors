@@ -104,11 +104,19 @@ Two sections separated by \# \===.
 # **Status: Web UI Offloaded to the Laptop**
 
 The recommendation below has now been implemented. The primary
-`Flow_management_unit_sch1.ino` is headless and emits complete version-2 sensor
-and four-solenoid telemetry for laptop `dashboard.py`. The former self-hosted
+`Flow_management_unit_sch1.ino` is headless and emits version-3 sensor-health,
+nullable sensor, and four-solenoid telemetry for laptop `dashboard.py`. Missing
+ADS1115 hardware no longer prevents Wi-Fi or the solenoid control surface; the
+affected measurement family is explicitly unavailable instead. The former self-hosted
 sketch is preserved under `legacy/Flow_management_unit_sch1/` as historical reference;
 it is not a compatibility target for the strict laptop adapter. The following
 text describes the inherited design and the reason for the transition.
+
+The current laptop runtime also isolates each real network source. ESP32 SSE,
+DXMR90 Modbus, and Yún status acquisition run in source-owned workers; an absent
+or slow device changes only its own error/stale state and cannot throttle fresh
+measurements from the others. A blocked-Modbus regression test covers the
+specific DXMR90-to-ESP32 coupling found during the field-readiness audit.
 
 The archived dashboard (HTML, CSS, JavaScript, and the Chart.js reference) was embedded in the sketch and served by the ESP32 itself. This was convenient — one device, nothing to install — but it had real drawbacks worth flagging for whoever works with the legacy sketch:
 

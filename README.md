@@ -41,9 +41,11 @@ python3 networked_sensors/dashboard.py \
 Use `--dxmr90-data-path republished` when specifically diagnosing the
 ScriptBasic output block.
 
-The same laptop dashboard can consume the primary headless ESP32's strict
-version-2 SSE service (including four solenoids, with the fourth on GPIO 10)
-and Yún USB or network status/control alongside the real DXMR90:
+The same laptop dashboard can consume the primary headless ESP32's version-3
+SSE service (including four solenoids, with the fourth on GPIO 10) and Yún USB
+or network status/control alongside the real DXMR90. Version 3 keeps the
+controller stream live when either ADS1115 is absent and marks that sensor
+family unavailable; healthy version-2 firmware remains accepted:
 
 ```bash
 python3 networked_sensors/dashboard.py \
@@ -105,6 +107,8 @@ That wrapper defaults to the network Yún at `http://arduino.local:8080`, the
 real DXMR90 at `192.168.0.1`, and the real ESP32 at
 `http://testbench.local`. Each source remains independent; an unavailable
 device reports disconnected without preventing the other sources from running.
+ESP32 SSE, DXMR90 Modbus, and Yún network reads use source-owned workers, so a
+connection timeout cannot stall the dashboard's 10 Hz merge/recording loop.
 Override only what differs, for example:
 
 ```bash

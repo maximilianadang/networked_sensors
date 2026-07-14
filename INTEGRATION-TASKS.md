@@ -23,8 +23,8 @@ Progress is chronicled in `INTEGRATION-PROCEDURE.md`.
 
 | Arm | Current state | Target landing | Verification |
 | --- | --- | --- | --- |
-| ESP32 analog/control | `RealEsp32Source` consumes strict v2 SSE readings/four-state solenoid events and forwards toggle POSTs for indices 0–3; loopback contract passes | physical stream/toggle/recording smoke | 6 loopback layout/parser/adapter/CLI/runtime tests and target compile pass; physical SSE/HTTP smoke and merged CSV pending |
-| DXMR90 Modbus | `RealDxmr90Source` reads both live SICK process windows at 10 Hz | direct process data by default; republished ScriptBasic block retained as fallback | heartbeat, schema, and sustained 10 Hz hardware smoke |
+| ESP32 analog/control | `RealEsp32Source` consumes healthy v2 or sensor-health-aware v3 SSE readings/four-state solenoid events and forwards toggle POSTs for indices 0–3; missing ADC families stay explicit without taking control offline | physical stream/toggle/recording smoke | 7 loopback layout/parser/adapter/CLI/runtime tests, target compile, and hash-verified flash pass; field-LAN SSE/HTTP smoke and merged CSV pending |
+| DXMR90 Modbus | Background `RealDxmr90Source` reads both live SICK process windows at 10 Hz without blocking the shared merge loop | direct process data by default; republished ScriptBasic block retained as fallback | heartbeat/schema/10 Hz hardware smoke plus blocked-read source-independence regression |
 | ESP32 simulator | Exists as `SimulatedEsp32Source` | scenario controls and dashboard solenoid toggles landed | no-hardware 10 Hz stream plus simulated control smoke |
 | DXMR90 simulator | Exists as `SimulatedDxmr90Source` | scenario controls landed | no-hardware 1 Hz stream |
 | Yún stepper simulator | `SimulatedStepperSource` and shared dashboard controls exist, including the latched software E-STOP | positive operator travel is resolved to the simulator's signed internal delta | move/stop/E-STOP, validation, limit, stale/missing, and shared-recorder smoke |
@@ -45,8 +45,9 @@ Progress is chronicled in `INTEGRATION-PROCEDURE.md`.
       dashboard workflow to write merged/source CSVs, metadata, summary, and
       browser export artifacts.
 - [x] **I3 - DXMR90 real adapter.** Reuse the existing Modbus client, decode
-      both direct SICK process windows at 10 Hz, and retain `read_metrics` for
-      the republished diagnostic path.
+      both direct SICK process windows at 10 Hz, retain `read_metrics` for the
+      republished diagnostic path, and isolate Modbus timeouts in a background
+      worker so other source arms keep their cadence.
 - [x] **I3a - simulated Yún stepper adapter.** Add a third source, strict
       move/stop/status API, dashboard controls, stale/missing scenarios, and
       shared recording without contacting the physical Yún.
@@ -106,23 +107,23 @@ Progress is chronicled in `INTEGRATION-PROCEDURE.md`.
       this arm is dry.
 - [ ] **I4 - ESP32 real adapter.** Existing SSE/HTTP is implemented with
       `--esp32-url`, background reconnect, health/error state, solenoid control,
-      strict version-2 complete-sample validation, and loopback contract
-      coverage. Physical stream/toggle/recording smoke remains before this
-      source arm is dry.
+      healthy-v2 compatibility, strict version-3 ADC-health/null validation, and
+      loopback contract coverage. Physical stream/toggle/recording smoke remains
+      before this source arm is dry.
 - [ ] **I5 - headless firmware split.** The former ESP32-hosted page is archived
-      under `legacy/`; the primary firmware emits complete version-2 samples,
-      controls four active-low relays including GPIO 10, and keeps only
-      sensor/solenoid APIs. Desktop tests and target compile pass;
-      physical flash and live contract verification remain.
+      under `legacy/`; the primary firmware emits version-3 samples even when
+      either ADC is missing, controls four active-low relays including GPIO 10,
+      and keeps only sensor/solenoid APIs. Desktop tests, target compile, and
+      verified physical flash pass; field-LAN live verification remains.
 - [ ] **I6 - full source parity.** Run the same dashboard/recording/export
       workflow in sim, ESP32-only, DXMR90-only, and full hardware modes.
 
 ## Known integration risks
 
-- The primary ESP32 event contract is atomic and versioned: each reading must
-  include pressure, flow, clamped sensor voltage, and solenoid arrays. The real
-  adapter rejects the archived firmware's unversioned partial readings so a
-  mixed deployment fails visibly instead of silently losing fields.
+- The primary ESP32 event contract is atomic and versioned: v3 carries separate
+  pressure/flow ADC health, nullable unavailable sensor families, and a complete
+  solenoid array. The real adapter rejects unversioned, partial, or internally
+  inconsistent readings so a mixed deployment fails visibly.
 - The DXMR90 default IP may collide with routers at `192.168.0.1`.
 - Source rates can differ; merged logs expose age/staleness and record fresh
   direct DXMR90 rows at the configured hardware poll rate.

@@ -45,8 +45,8 @@ translate as:
 
 - Primary headless ESP32 API:
   - `/` serves a small JSON service descriptor, not a webpage.
-  - `/events` sends complete version-2 `reading` events plus immediate `sol`
-    state-change events.
+  - `/events` sends version-3 `reading` events with explicit per-ADC health and
+    nullable unavailable sensor families, plus immediate `sol` state events.
   - `/solenoid/toggle?n=<0..3>` toggles four active-low relays; index 3 is
     Solenoid 4 on GPIO 10.
   - UI, metadata, recording, and CSV export belong to laptop `dashboard.py`.
@@ -55,9 +55,11 @@ translate as:
     the former `/`, `/events`, and `/test/*` surfaces for reference only.
 - Existing laptop-side ESP32 adapter:
   - `RealEsp32Source` consumes `/events` in a reconnecting background thread.
-  - `reading` must be version 2 and supplies pressure/flow, clamped sensor volts,
-    and all four solenoid states atomically; older/partial readings fail
-    visibly. Separate `sol` events update relay state immediately.
+  - Healthy version-2 `reading` events remain accepted during deployment.
+    Version 3 supplies explicit pressure/flow ADC health, nullable unavailable
+    sensor families, clamped sensor volts when available, and all four solenoid
+    states atomically. Invalid partial readings fail visibly; separate `sol`
+    events update relay state immediately.
   - `--esp32-source real --esp32-url URL --esp32-timeout S` selects it, and the
     shared solenoid buttons forward to `/solenoid/toggle?n=<0..3>`.
 - Existing DXMR90 reader:
@@ -143,7 +145,7 @@ translate as:
       as a sensor/solenoid service, archive the old webpage firmware, and state
       that the laptop dashboard has no legacy-telemetry compatibility duty.
 - [x] **D16 - document Solenoid 4.** Record GPIO 10, active-low/OFF-at-boot
-      behavior, four-state version-2 telemetry, the fourth laptop control, and
+      behavior, versioned four-state telemetry, the fourth laptop control, and
       the remaining physical relay/solenoid wiring and safe-toggle checks.
 - [x] **D20 - document the software E-STOP boundary.** Record the latched
       `V1 E1`/D4-off `V1 E0` contract, top-level dashboard controls, capability
@@ -173,3 +175,11 @@ translate as:
       authoritative raw-endpoint latch clearing, Timer1 Local Velocity timing,
       compile/upload/tests, the working physical run, and the remaining exact-
       image two-endpoint hardware matrix.
+- [x] **D26 - document independent ESP32 startup.** Correct the inherited-code
+      comparison, define v3 ADC health/null semantics and healthy-v2 support,
+      distinguish Off/Stale/Live/ADC-unavailable UI states, and record compile,
+      verified flash, test evidence, and the remaining field-LAN smoke.
+- [x] **D27 - document source-worker isolation.** Record that real DXMR90
+      connection/read timeouts run outside the shared merge loop, preserve
+      source-scoped stale/error behavior, and cannot reduce live ESP32,
+      stepper, dashboard, or recorder cadence.

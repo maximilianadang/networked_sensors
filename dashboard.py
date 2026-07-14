@@ -738,6 +738,8 @@ INDEX_HTML = r"""<!doctype html>
               <dl>
                 <dt>Mode</dt><dd id="espMode">--</dd>
                 <dt>Age</dt><dd id="espAge">--</dd>
+                <dt>Pressure ADC</dt><dd id="espPressureAdc">--</dd>
+                <dt>Flow ADC</dt><dd id="espFlowAdc">--</dd>
                 <dt>Pressure</dt><dd id="espPressure">--</dd>
                 <dt>Flow</dt><dd id="espFlow">--</dd>
                 <dt>Transport</dt><dd id="espTransport">--</dd>
@@ -830,7 +832,7 @@ INDEX_HTML = r"""<!doctype html>
       "dxDot", "dxStatus", "stepperDot", "stepperStatus", "runDot", "runStatus", "clockText", "sampleText",
       "recordingText", "mPressure", "mEspFlow", "mDxFlow", "mDxP1", "mDxP2", "mHeartbeat",
       "metadataStatus", "historyStatus", "espRowDot", "espRowStatus",
-      "dxRowDot", "dxRowStatus", "espMode", "espAge", "espPressure",
+      "dxRowDot", "dxRowStatus", "espMode", "espAge", "espPressureAdc", "espFlowAdc", "espPressure",
       "espFlow", "espTransport", "dxMode", "dxAge", "dxPort1", "dxPort2",
       "sol0", "sol1", "sol2", "sol3", "startRun", "stopRun", "exportRun", "metadataForm",
       "emergencyStop", "emergencyReset", "emergencyState",
@@ -866,8 +868,23 @@ INDEX_HTML = r"""<!doctype html>
       el.classList.add(state);
     }
 
-    function connectedDot(value) {
-      return value === true ? "ok" : value === false ? "bad" : "warn";
+    function sourcePresentation(label, mode, connected) {
+      if (mode === "off") return {label: `${label} off`, row: "Off", state: "warn"};
+      if (connected === true) return {label: `${label} live`, row: "Live", state: "ok"};
+      return {label: `${label} stale`, row: "Stale", state: "bad"};
+    }
+
+    function updateSolenoidControls() {
+      const simulated = runState.esp32_source === "sim";
+      const realAndLive = runState.esp32_source === "real" &&
+        latest && latest.esp32_connected === true;
+      const enabled = simulated || realAndLive;
+      for (let i = 0; i < solenoidCount; i += 1) {
+        els[`sol${i}`].disabled = !enabled;
+        els[`sol${i}`].title = enabled
+          ? `Toggle Solenoid ${i + 1}`
+          : "ESP32 control stream is not live";
+      }
     }
 
     function setStreamStatus(label, state) {
@@ -904,15 +921,12 @@ INDEX_HTML = r"""<!doctype html>
       const active = runState.active_recording || null;
       const latestRecording = runState.latest_recording || null;
       const currentRecording = active || latestRecording;
-      const esp32Controls = ["sim", "real"].includes(runState.esp32_source);
       text("runStatus", recording ? "Recording" : "Idle");
       dot(els.runDot, recording ? "ok" : "warn");
       els.startRun.disabled = recording;
       els.stopRun.disabled = !recording;
       els.exportRun.disabled = recording || !latestRecording;
-      for (let i = 0; i < solenoidCount; i += 1) {
-        els[`sol${i}`].disabled = !esp32Controls;
-      }
+      updateSolenoidControls();
       if (currentRecording && currentRecording.run_id) {
         const rows = currentRecording.merged_rows || 0;
         text("recordingText", `${currentRecording.run_id} (${rows} rows)`);
@@ -936,23 +950,40 @@ INDEX_HTML = r"""<!doctype html>
       const espConnected = latest.esp32_connected;
       const dxConnected = latest.dxmr90_connected;
       const stepperConnected = latest.stepper_connected;
-      dot(els.espDot, connectedDot(espConnected));
-      dot(els.dxDot, connectedDot(dxConnected));
-      dot(els.stepperDot, connectedDot(stepperConnected));
-      dot(els.espRowDot, connectedDot(espConnected));
-      dot(els.dxRowDot, connectedDot(dxConnected));
-      text("espStatus", espConnected ? "ESP32 live" : "ESP32 stale");
-      text("dxStatus", dxConnected ? "DXMR90 live" : "DXMR90 stale");
-      text("stepperStatus", stepperConnected ? "Stepper live" : "Stepper stale");
-      text("espRowStatus", espConnected ? "Live" : "Stale");
-      text("dxRowStatus", dxConnected ? "Live" : "Stale");
-      text("espMode", latest.esp32_mode || "--");
-      text("dxMode", latest.dxmr90_mode || "--");
+      const espMode = latest.esp32_mode || "--";
+      const dxMode = latest.dxmr90_mode || "--";
+      const stepperMode = latest.stepper_mode || "--";
+      const pressureAdcReady = latest.esp32_pressure_adc_ready === true;
+      const flowAdcReady = latest.esp32_flow_adc_ready === true;
+      const esp = sourcePresentation("ESP32", espMode, espConnected);
+      const dx = sourcePresentation("DXMR90", dxMode, dxConnected);
+      const stepper = sourcePresentation("Stepper", stepperMode, stepperConnected);
+      if (espConnected && (!pressureAdcReady || !flowAdcReady)) {
+        esp.label = "ESP32 live / ADC unavailable";
+        esp.row = "Live / ADC partial";
+        esp.state = "warn";
+      }
+      dot(els.espDot, esp.state);
+      dot(els.dxDot, dx.state);
+      dot(els.stepperDot, stepper.state);
+      dot(els.espRowDot, esp.state);
+      dot(els.dxRowDot, dx.state);
+      text("espStatus", esp.label);
+      text("dxStatus", dx.label);
+      text("stepperStatus", stepper.label);
+      text("espRowStatus", esp.row);
+      text("dxRowStatus", dx.row);
+      text("espMode", espMode);
+      text("dxMode", dxMode);
       text("espAge", ageText("esp32_age_ms"));
       text("dxAge", ageText("dxmr90_age_ms"));
+      text("espPressureAdc", pressureAdcReady ? "Ready" : "Unavailable");
+      text("espFlowAdc", flowAdcReady ? "Ready" : "Unavailable");
       text("espPressure", `${numberValue("esp32_p_combined_bar", 3)} bar`);
       text("espFlow", `${numberValue("esp32_f_combined_gmin", 2)} g/min`);
-      text("espTransport", latest.esp32_transport_error || (espConnected ? "Connected" : "Waiting for stream"));
+      text("espTransport", espMode === "off"
+        ? "Disabled"
+        : latest.esp32_transport_error || (espConnected ? "Connected" : "Waiting for stream"));
       text("dxPort1", `${numberValue("dxmr90_port1_mass_flow_g_min", 2)} g/min`);
       text("dxPort2", `${numberValue("dxmr90_port2_mass_flow_g_min", 2)} g/min`);
       text("historyStatus", `${history.length} samples`);
@@ -1043,6 +1074,7 @@ INDEX_HTML = r"""<!doctype html>
         const on = latest[`esp32_sol${i + 1}`] === true;
         els[`sol${i}`].classList.toggle("on", on);
       }
+      updateSolenoidControls();
 
       drawAllCharts();
     }
@@ -1332,8 +1364,12 @@ INDEX_HTML = r"""<!doctype html>
 
     for (let i = 0; i < solenoidCount; i += 1) {
       els[`sol${i}`].addEventListener("click", async () => {
-        const payload = await postJson(`/api/solenoid/toggle?n=${i}`);
-        if (payload.sample) applySample(payload.sample);
+        try {
+          const payload = await postJson(`/api/solenoid/toggle?n=${i}`);
+          if (payload.sample) applySample(payload.sample);
+        } catch (error) {
+          text("espTransport", `Command failed: ${error.message}`);
+        }
       });
     }
 

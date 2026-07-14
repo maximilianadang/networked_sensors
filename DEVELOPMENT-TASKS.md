@@ -55,6 +55,10 @@ data acquisition and operator workflow:
   - [x] Reuse `read_dxmr90_modbus.py` functions instead of shelling out.
   - [x] Read the two live SICK IO-Link process windows directly at 10 Hz;
     retain the ScriptBasic republished block as a diagnostic fallback.
+  - [x] Run Modbus acquisition in a source-owned worker so connection timeouts
+    cannot stall ESP32, stepper, dashboard, or recorder cadence.
+  - [x] Verification: a blocked-Modbus regression test proves ESP32 samples keep
+    advancing and the DXMR90 source recovers after the read is released.
   - [x] Verification: hardware heartbeat/register smoke and sustained 10 Hz
     direct-source smoke on the DXMR90 network.
 - [x] **Step 5A - unified simulated Yún stepper source.**
@@ -196,27 +200,29 @@ data acquisition and operator workflow:
   - [ ] Verify ownership and E-STOP parity, then measure moving jitter and stop
     latency before claiming the motion-qualification gate.
 - [ ] **Step 6 - real ESP32 adapter.**
-  - [x] Consume strict version-2 ESP32 SSE samples and the solenoid command
-    endpoint in a background adapter so network reads do not block the merge
-    cadence.
+  - [x] Consume healthy version-2 and sensor-health-aware version-3 ESP32 SSE
+    samples plus the solenoid command endpoint in a background adapter so
+    network reads do not block the merge cadence.
   - [x] Add `--esp32-url`/`--esp32-timeout`, source health/error reporting,
     real-source dashboard controls, and loopback HTTP/SSE contract tests.
-  - [x] Require complete per-sample pressure, flow, clamped sensor voltage, and
-    four solenoid states; reject older or incomplete readings.
-  - [x] Verification: 6 firmware-layout/adapter/parser/CLI/dashboard-runtime
-    tests against a local server reproducing the v2 contract; 28 combined tests.
+  - [x] Require explicit per-ADC health in v3, null values for unavailable sensor
+    families, and four solenoid states; reject partial or contradictory readings.
+  - [x] Verification: 7 firmware-layout/adapter/parser/CLI/dashboard-runtime
+    tests cover healthy v2/v3 and missing-ADC live-controller behavior.
   - [ ] Verification: physical live stream smoke and safe solenoid toggle test.
 - [ ] **Step 7 - headless ESP32 firmware.**
   - [x] Archive the former self-hosted-dashboard sketch under `legacy/`.
-  - [x] Make the primary sketch an I/O-only service with complete version-2
-    samples and the solenoid endpoint; laptop `dashboard.py` is the sole UI,
-    logger, metadata owner, and CSV exporter for the current workflow.
-  - [x] Compile for `esp32:esp32:adafruit_feather_esp32s3_nopsram`: 52% flash,
-    24% global RAM.
+  - [x] Make the primary sketch an I/O-only service with version-3 nullable
+    sensor families, explicit ADC health, and the solenoid endpoint; laptop
+    `dashboard.py` is the sole UI, logger, metadata owner, and CSV exporter.
+  - [x] Compile for `esp32:esp32:adafruit_feather_esp32s3_nopsram`: 1,095,853
+    bytes/52% flash and 80,956 bytes/24% global RAM.
   - [x] Extend the active-low output template to Solenoid 4 on GPIO 10; keep all
     four outputs OFF at boot and expose the fourth laptop control/state field.
-  - [ ] Flash the physical ESP32 and verify sustained v2 telemetry plus one
-    deliberately safe solenoid toggle through the laptop dashboard.
+  - [x] Flash the physical ESP32 with hash verification; no relay command was
+    issued during deployment.
+  - [ ] Verify sustained v3 telemetry from the field-LAN laptop, then perform
+    one deliberately safe solenoid toggle through the laptop dashboard.
 - [ ] **Step 8 - full bench handoff.**
   - Run simulator, ESP32-only, DXMR90-only, and full hardware verification tiers.
   - Update `RUNBOOK.md`, `PROTOCOL.md`, and `TESTBENCH_CHECKLIST.md` with the

@@ -95,11 +95,24 @@ python3 networked_sensors/dashboard.py \
 If mDNS is unavailable, replace `http://testbench.local` with the IP printed by
 the ESP32 serial monitor. The laptop must have a route to that address. The
 adapter reads `/events` in the background, reconnects after errors, and shows
-the current transport error in the Sources panel. It strictly requires
-version-2 readings containing `sample_ms`, three pressure values, three flow
-values, three clamped pressure-sensor voltages, three clamped flow-sensor
-voltages, and four solenoid states. The adapter rejects older or incomplete
-readings. A separate `sol` event provides immediate state updates.
+the current transport error in the Sources panel. The current version-3 stream
+contains `sample_ms`, explicit pressure/flow ADC health, three pressure and flow
+slots, three voltage slots per ADC, and four solenoid states. A missing ADC must
+publish `null` for all six values in its family while the ESP transport and
+solenoid state remain live. Healthy complete version-2 readings remain accepted;
+older, partial, or internally inconsistent readings are rejected. A separate
+`sol` event provides immediate state updates.
+
+Missing ADS1115 hardware does not prevent Wi-Fi, `/events`, or solenoid control.
+The firmware checks each ADC independently at 1 Hz and retries unavailable ADCs
+every 5 seconds. The page reports Pressure ADC and Flow ADC separately. This is
+different from a stale ESP transport: `ESP32 live / ADC unavailable` means the
+controller is reachable and only the displayed sensor family is unavailable.
+
+Real ESP32 SSE, DXMR90 Modbus, and Yún network acquisition run in separate
+source-owned workers. A disconnected device updates only its own transport
+error and eventually its own stale state; its socket timeout does not block the
+dashboard's 10 Hz merge, browser stream, or recorder cadence.
 
 The generated protocol map should also be checked after changes to runnable
 topology:
@@ -523,9 +536,10 @@ Network assumptions:
 | simulated stepper API | dashboard plus GET status and POST move/stop/E-STOP/reset endpoints | bounded moves and a latched mode-independent software stop remain on the shared stream |
 | recorder/export | `python3 networked_sensors/dashboard.py --record-dir /tmp/flow-dashboard-recordings` | start/stop writes merged/source CSVs including `stepper_raw.csv`, metadata JSON, summary JSON, and export CSV; export endpoints serve artifacts |
 | SICK-only direct 10 Hz | `python3 networked_sensors/dashboard.py --esp32-source off --dxmr90-source real --dxmr90-host HOST --dxmr90-data-path direct --dxmr90-rate-hz 10` | dashboard runs without ESP32 and receives fresh direct process-data samples at 10 Hz |
+| source-independence contract | `python3 -m unittest -v networked_sensors.test_source_independence` | a deliberately blocked DXMR90 Modbus read does not delay advancing ESP32 merged samples; DXMR90 values appear after the read recovers |
 | DXMR90 CLI one-shot | current reader command | heartbeat and values print without Modbus errors |
-| ESP32 adapter contract | `python3 -m unittest -v networked_sensors.test_real_esp32` | strict v2 parsing/rejection, complete four-solenoid SSE projection, GPIO 10 layout, solenoid POST, and dashboard real-source selection pass against a loopback firmware-contract server |
-| ESP32 headless compile | temporary official Arduino CLI with `esp32:esp32@3.3.10`, Adafruit ADS1X15/BusIO, ESP Async WebServer, and Async TCP | four-solenoid primary sketch compiles for `esp32:esp32:adafruit_feather_esp32s3_nopsram`; observed 1,095,265 bytes/52% flash and 80,940 bytes/24% global RAM |
+| ESP32 adapter contract | `python3 -m unittest -v networked_sensors.test_real_esp32` | 7 tests pass healthy-v2 compatibility, strict v3 health/null validation, missing-ADC live transport, complete four-solenoid projection, GPIO 10 layout, solenoid POST, and dashboard real-source selection against a loopback firmware-contract server |
+| ESP32 headless compile/upload | temporary official Arduino CLI with `esp32:esp32@3.3.10`, Adafruit ADS1X15/BusIO, ESP Async WebServer, and Async TCP | sensor-health-aware four-solenoid sketch compiles for `esp32:esp32:adafruit_feather_esp32s3_nopsram` at 1,095,853 bytes/52% flash and 80,956 bytes/24% global RAM; physical `/dev/ttyACM1` flash hashes verified and board reset without issuing a solenoid command |
 | ESP32 physical source | `--esp32-source real --esp32-url http://ESP32_HOST` | sustained live pressure/flow, truthful source health, one deliberately safe solenoid command, and recorded ESP32 rows work |
 | DXMR90 real source | implemented | direct process windows sustain 10 Hz; heartbeat and selected metrics update |
 | full bench | planned | merged CSV includes both sources plus age/health fields |

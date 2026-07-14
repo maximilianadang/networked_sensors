@@ -902,3 +902,58 @@ passed and the operator confirmed the current Local Velocity image works. The
 complete D6/D8 disabled/wake/retreat matrix on this exact image and deployment
 of the matching updated Linux bridge remain before full physical/LAN parity is
 claimed.
+
+## Step 7B - independent ESP32 startup and ADC health
+
+**Direction given:** fix the headless ESP32 after field testing showed that an
+ESP32 used only for solenoid control never joined the WLAN when its ADS1115
+boards were absent, then audit adjacent startup and operator-state failures.
+
+**READ / INFER:** the archived firmware recorded failed `ads*.begin()` calls but
+continued to `WiFi.begin()`. The headless replacement instead entered an
+infinite loop before Wi-Fi while incorrectly claiming that behavior matched the
+existing system. The strict v2 laptop parser also required every sensor value to
+be finite, so deleting the loop alone would either fabricate values or leave the
+source stale. The page additionally labeled explicitly disabled sources Stale
+and enabled real solenoid buttons before a stream was live.
+
+**DE-RISK / executed:** kept all active-low relays OFF before I2C or networking,
+made pressure and flow ADC health independent, and introduced atomic payload v3.
+An unavailable ADC emits a false health flag and null engineering/voltage
+triplets; sample time and all four relay states continue at 10 Hz. I2C presence
+checks run at 1 Hz and unavailable devices retry at 5 seconds. The adapter
+accepts healthy v2 deployments, strictly validates v3 health/value consistency,
+and exposes separate merged ADC-health fields. The page now distinguishes Off,
+Stale, Live, and Live/ADC-unavailable, and real relay controls remain disabled
+until the ESP stream is live. No automatic or verification relay command exists.
+
+**Verification boundary:** seven focused layout/parser/SSE/runtime tests pass,
+including both ADCs absent while ESP transport and relay state remain live.
+Python compilation passes. The Feather ESP32-S3 target compiles at 1,095,853
+bytes/52% flash and 80,956 bytes/24% RAM; upload to the identified physical board
+completed with all flash hashes verified. Field-LAN descriptor/SSE observation
+and a deliberately safe operator relay toggle remain external physical checks.
+
+## Step 7C - source-worker isolation audit
+
+**Direction given:** fix the ESP32 regression and audit anything else that could
+break the field dashboard.
+
+**READ / INFER:** `run_lan_dashboard.sh` intentionally enables all three real
+source arms, but `RealDxmr90Source.poll()` still performed its Modbus connection
+and read synchronously inside the shared 10 Hz merge loop. An absent DXMR90
+could therefore hold every browser/recorder update for the one-second Modbus
+timeout even while the background ESP32 stream was healthy. This contradicted
+the documented no-quorum contract.
+
+**DE-RISK / executed:** moved DXMR90 acquisition into a source-owned worker with
+locked latest-value/error state and nonblocking merge projection. The worker
+maintains the configured direct/republished cadence, skips missed intervals
+instead of bursting, preserves source-scoped stale/error semantics, and shuts
+down through the existing runtime close path. A deterministic test blocks the
+Modbus client, proves ESP32 merged samples still advance, releases the read, and
+proves DXMR90 data then becomes live.
+
+**Verification boundary:** the source-independence regression and all 45 desktop
+tests pass. Existing live direct-process 10 Hz evidence remains valid; the
+field-LAN disconnect/recovery check remains a hardware smoke test.

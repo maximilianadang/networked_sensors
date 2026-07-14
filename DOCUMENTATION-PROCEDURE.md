@@ -524,3 +524,37 @@ emitted speed. Thirty-seven desktop tests, the 22,620-byte/78%-flash,
 `ds:1`/`en:0`/`aps:0`, and an operator-confirmed working Local Velocity run
 pass. The exact-image two-endpoint disable/wake/retreat matrix and matching
 Linux-bridge redeployment remain before full physical/LAN completion.
+
+## Step D26 - independent ESP32 startup documented
+
+**Direction given:** correct the new headless firmware's regression against the
+pre-existing startup behavior and audit nearby breakage before field retest.
+
+**Applied:** updated the interface inventory, README, runbook, checklist,
+handoff, task chronicles, and generated protocol source for payload v3,
+independent pressure/flow ADC health, null unavailable measurements, 1 Hz health
+checks, 5-second recovery attempts, and healthy-v2 compatibility. Documented UI
+states now distinguish a disabled source, stale transport, live controller, and
+live controller with unavailable ADC hardware. Solenoid controls are available
+only on a live simulated/real source and command failures render visibly.
+
+**Evidence and boundary:** focused tests, Python compilation, ESP32 target
+compile, and verified physical upload pass. These results establish the software
+and flash image, not field-router visibility or physical valve actuation. The
+field-LAN laptop must still observe the descriptor/SSE stream before one safe,
+deliberate solenoid test.
+
+## Step D27 - source-worker isolation documented
+
+**Direction given:** audit nearby field-dashboard failures while correcting the
+ESP32 startup regression.
+
+**Applied:** documented that all real network acquisition paths are isolated
+from the shared merge cadence. In particular, DXMR90 Modbus connection/read
+timeouts now update only DXMR90 error/stale state; they cannot throttle live
+ESP32 or Yún data, browser SSE, or recording. Updated task, runbook, checklist,
+handoff, and generated protocol surfaces with the blocked-read/recovery test.
+
+**Boundary recorded:** deterministic desktop coverage proves software
+isolation. A physical Ethernet disconnect/reconnect while another source is live
+remains part of field handoff.

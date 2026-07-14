@@ -8,7 +8,7 @@
  *
  * Network API:
  *   - GET  /          small JSON service description (no hosted webpage)
- *   - GET  /events    SSE: 10 Hz version-2 "reading" + "sol" state events
+ *   - GET  /events    SSE: 10 Hz version-3 "reading" + "sol" state events
  *   - POST /solenoid/toggle?n=0..3
  *
  * The laptop-hosted networked_sensors/dashboard.py owns the UI, plots,
@@ -44,6 +44,10 @@ const float P_V_MIN = 0.5, P_V_MAX = 4.5, P_MIN = 0.0, P_MAX = 10.0;
 const float F_V_MIN = 1.0, F_V_MAX = 5.0, F_MIN = 0.0, F_MAX = 258.58;
 const float VOLTS_PER_BIT = 0.0001875;
 const unsigned long SAMPLE_PERIOD_MS = 100;
+const unsigned long ADC_HEALTH_PERIOD_MS = 1000;
+const unsigned long ADC_RETRY_PERIOD_MS = 5000;
+const uint8_t PRESSURE_ADC_ADDRESS = 0x48;
+const uint8_t FLOW_ADC_ADDRESS = 0x49;
 // ────────────────────────────────────────────────────────────────────
 
 Adafruit_ADS1115 adsP;
@@ -52,7 +56,11 @@ AsyncWebServer server(80);
 AsyncEventSource events("/events");
 
 bool solenoidOn[SOLENOID_COUNT] = {false, false, false, false};
+bool pressureAdcReady = false;
+bool flowAdcReady = false;
 unsigned long lastSampleMs = 0;
+unsigned long lastAdcHealthMs = 0;
+unsigned long lastAdcRetryMs = 0;
 
 float mapFloat(float x, float a1, float a2, float b1, float b2) {
   return (x - a1) * (b2 - b1) / (a2 - a1) + b1;
@@ -77,18 +85,75 @@ void broadcastSolenoidState() {
   events.send(json, "sol", millis());
 }
 
+bool i2cDevicePresent(uint8_t address) {
+  Wire.beginTransmission(address);
+  return Wire.endTransmission() == 0;
+}
+
+bool initializePressureAdc() {
+  if (!adsP.begin(PRESSURE_ADC_ADDRESS)) return false;
+  adsP.setGain(GAIN_TWOTHIRDS);
+  adsP.setDataRate(RATE_ADS1115_860SPS);
+  Serial.println("ADS1115 pressure ADC (0x48) ready.");
+  return true;
+}
+
+bool initializeFlowAdc() {
+  if (!adsF.begin(FLOW_ADC_ADDRESS)) return false;
+  adsF.setGain(GAIN_TWOTHIRDS);
+  adsF.setDataRate(RATE_ADS1115_860SPS);
+  Serial.println("ADS1115 flow ADC (0x49) ready.");
+  return true;
+}
+
+void refreshAdcState(unsigned long now) {
+  if (now - lastAdcHealthMs < ADC_HEALTH_PERIOD_MS) return;
+  lastAdcHealthMs = now;
+
+  if (pressureAdcReady && !i2cDevicePresent(PRESSURE_ADC_ADDRESS)) {
+    pressureAdcReady = false;
+    Serial.println("WARNING: pressure ADC disconnected; publishing null values.");
+  }
+  if (flowAdcReady && !i2cDevicePresent(FLOW_ADC_ADDRESS)) {
+    flowAdcReady = false;
+    Serial.println("WARNING: flow ADC disconnected; publishing null values.");
+  }
+
+  if ((pressureAdcReady && flowAdcReady) ||
+      now - lastAdcRetryMs < ADC_RETRY_PERIOD_MS) return;
+  lastAdcRetryMs = now;
+  if (!pressureAdcReady) pressureAdcReady = initializePressureAdc();
+  if (!flowAdcReady) flowAdcReady = initializeFlowAdc();
+}
+
 void readSensors(float pressure[3], float flow[3],
                  float pressureVolts[3], float flowVolts[3]) {
   for (int i = 0; i < 3; i++) {
-    int16_t rawPressure = adsP.readADC_SingleEnded(i);
-    pressureVolts[i] = constrain(
-        rawPressure * VOLTS_PER_BIT, P_V_MIN, P_V_MAX);
-    pressure[i] = mapFloat(
-        pressureVolts[i], P_V_MIN, P_V_MAX, P_MIN, P_MAX);
+    pressure[i] = NAN;
+    flow[i] = NAN;
+    pressureVolts[i] = NAN;
+    flowVolts[i] = NAN;
 
-    int16_t rawFlow = adsF.readADC_SingleEnded(i);
-    flowVolts[i] = constrain(rawFlow * VOLTS_PER_BIT, F_V_MIN, F_V_MAX);
-    flow[i] = mapFloat(flowVolts[i], F_V_MIN, F_V_MAX, F_MIN, F_MAX);
+    if (pressureAdcReady) {
+      int16_t rawPressure = adsP.readADC_SingleEnded(i);
+      pressureVolts[i] = constrain(
+          rawPressure * VOLTS_PER_BIT, P_V_MIN, P_V_MAX);
+      pressure[i] = mapFloat(
+          pressureVolts[i], P_V_MIN, P_V_MAX, P_MIN, P_MAX);
+    }
+    if (flowAdcReady) {
+      int16_t rawFlow = adsF.readADC_SingleEnded(i);
+      flowVolts[i] = constrain(rawFlow * VOLTS_PER_BIT, F_V_MIN, F_V_MAX);
+      flow[i] = mapFloat(flowVolts[i], F_V_MIN, F_V_MAX, F_MIN, F_MAX);
+    }
+  }
+}
+
+void formatJsonNumber(char *buffer, size_t size, float value, int decimals) {
+  if (isfinite(value)) {
+    snprintf(buffer, size, "%.*f", decimals, value);
+  } else {
+    snprintf(buffer, size, "null");
   }
 }
 
@@ -96,22 +161,31 @@ void broadcastReading(unsigned long sampleMs) {
   float pressure[3], flow[3], pressureVolts[3], flowVolts[3];
   readSensors(pressure, flow, pressureVolts, flowVolts);
 
-  // Version 2 is one complete, atomic supervisor row.  p[]/f[] are engineering
-  // values, p_v[]/f_v[] are the corresponding clamped sensor voltages, and
-  // sol[] snapshots output state at the same sampling instant.  The laptop
-  // rejects unversioned/incomplete readings so a firmware mismatch is visible.
-  char json[384];
+  char p[3][16], f[3][16], pVolts[3][16], fVolts[3][16];
+  for (int i = 0; i < 3; i++) {
+    formatJsonNumber(p[i], sizeof(p[i]), pressure[i], 3);
+    formatJsonNumber(f[i], sizeof(f[i]), flow[i], 2);
+    formatJsonNumber(pVolts[i], sizeof(pVolts[i]), pressureVolts[i], 4);
+    formatJsonNumber(fVolts[i], sizeof(fVolts[i]), flowVolts[i], 4);
+  }
+
+  // Version 3 remains atomic but makes sensor availability explicit. Missing
+  // ADC families publish null triplets while sample time and relay state stay
+  // live, so an unavailable sensor cannot hide the controller from the laptop.
+  char json[448];
   int jsonLength = snprintf(
       json, sizeof(json),
-      "{\"v\":2,\"sample_ms\":%lu,"
-      "\"p\":[%.3f,%.3f,%.3f],\"f\":[%.2f,%.2f,%.2f],"
-      "\"p_v\":[%.4f,%.4f,%.4f],\"f_v\":[%.4f,%.4f,%.4f],"
+      "{\"v\":3,\"sample_ms\":%lu,"
+      "\"p_adc_ok\":%s,\"f_adc_ok\":%s,"
+      "\"p\":[%s,%s,%s],\"f\":[%s,%s,%s],"
+      "\"p_v\":[%s,%s,%s],\"f_v\":[%s,%s,%s],"
       "\"sol\":[%s,%s,%s,%s]}",
       sampleMs,
-      pressure[0], pressure[1], pressure[2],
-      flow[0], flow[1], flow[2],
-      pressureVolts[0], pressureVolts[1], pressureVolts[2],
-      flowVolts[0], flowVolts[1], flowVolts[2],
+      pressureAdcReady ? "true" : "false",
+      flowAdcReady ? "true" : "false",
+      p[0], p[1], p[2], f[0], f[1], f[2],
+      pVolts[0], pVolts[1], pVolts[2],
+      fVolts[0], fVolts[1], fVolts[2],
       solenoidOn[0] ? "true" : "false",
       solenoidOn[1] ? "true" : "false",
       solenoidOn[2] ? "true" : "false",
@@ -138,30 +212,16 @@ void setup() {
 
   Wire.begin(I2C_SDA, I2C_SCL);
 
-  bool hardwareReady = true;
-  if (!adsP.begin(0x48)) {
-    Serial.println("ERROR: ADS1115 pressure ADC (0x48) not found.");
-    hardwareReady = false;
+  pressureAdcReady = initializePressureAdc();
+  flowAdcReady = initializeFlowAdc();
+  if (!pressureAdcReady) {
+    Serial.println("WARNING: pressure ADC absent; network/control will continue.");
   }
-  if (!adsF.begin(0x49)) {
-    Serial.println("ERROR: ADS1115 flow ADC (0x49) not found.");
-    hardwareReady = false;
+  if (!flowAdcReady) {
+    Serial.println("WARNING: flow ADC absent; network/control will continue.");
   }
-  if (!hardwareReady) {
-    // Match the existing system's fail-closed bring-up: relays remain OFF and
-    // no network command surface starts with an incomplete sensor bus.
-    Serial.println("FATAL: sensor hardware unavailable; restart after repair.");
-    while (true) {
-      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
-      delay(250);
-    }
-  }
-
-  adsP.setGain(GAIN_TWOTHIRDS);
-  adsF.setGain(GAIN_TWOTHIRDS);
-  adsP.setDataRate(RATE_ADS1115_860SPS);
-  adsF.setDataRate(RATE_ADS1115_860SPS);
-  Serial.println("Both ADS1115 chips ready.");
+  lastAdcHealthMs = millis();
+  lastAdcRetryMs = millis();
 
   Serial.print("Connecting to WiFi");
   WiFi.mode(WIFI_STA);
@@ -190,10 +250,15 @@ void setup() {
   }
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(
-        200, "application/json",
-        "{\"service\":\"flow-management-esp32\",\"api_version\":2,"
-        "\"telemetry\":\"/events\",\"dashboard_host\":\"laptop\"}");
+    char descriptor[192];
+    snprintf(
+        descriptor, sizeof(descriptor),
+        "{\"service\":\"flow-management-esp32\",\"api_version\":3,"
+        "\"pressure_adc_ok\":%s,\"flow_adc_ok\":%s,"
+        "\"telemetry\":\"/events\",\"dashboard_host\":\"laptop\"}",
+        pressureAdcReady ? "true" : "false",
+        flowAdcReady ? "true" : "false");
+    request->send(200, "application/json", descriptor);
   });
 
   server.on("/solenoid/toggle", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -224,6 +289,7 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+  refreshAdcState(now);
   if (now - lastSampleMs < SAMPLE_PERIOD_MS) return;
   lastSampleMs = now;
   broadcastReading(now);

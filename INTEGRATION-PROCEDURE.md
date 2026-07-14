@@ -442,3 +442,28 @@ the 22,620-byte/78%-flash, 1,453-byte/56%-RAM compile, verified upload, stopped
 `ds:1`/`en:0`/`aps:0`, and an operator-confirmed working Local Velocity run
 pass. This arm remains wet until the matching Linux bridge is redeployed and
 the exact image passes both endpoint disable/wake/retreat checks over LAN.
+
+## Step I5B - partial-hardware ESP32 source integrated
+
+The ESP32 arm no longer conflates controller reachability with analog hardware
+completeness. Payload v3 adds `p_adc_ok` and `f_adc_ok`; false requires null
+engineering and voltage triplets for that family, while `sample_ms`, four relay
+states, the SSE transport, and the command endpoint remain live. The common
+schema exposes `esp32_pressure_adc_ready` and `esp32_flow_adc_ready`, and the
+recorder naturally preserves null cells plus those health fields.
+
+`RealEsp32Source` retains complete healthy-v2 compatibility and rejects missing,
+non-finite, or health/value-inconsistent frames. Loopback coverage proves a
+both-ADCs-missing v3 stream still yields `esp32_connected=true` and truthful
+relay state. The field image is compiled and hash-verified on the physical
+board; field-LAN streaming and deliberate actuation remain wet checks.
+
+## Step I5C - real-source timeout isolation integrated
+
+The real DXMR90 arm now matches the ESP32 and network Yún architecture: network
+I/O belongs to a source-owned worker, while `SourceMerger.poll()` only projects
+a completed generation. A slow or absent Modbus endpoint can set DXMR90 error
+and stale fields without delaying fresh ESP32/stepper data, browser SSE, or
+recording. Recovery publishes the next completed process-data generation
+without restarting the dashboard. Deterministic blocked-read coverage verifies
+both nonblocking behavior and recovery; field disconnect/reconnect remains wet.
