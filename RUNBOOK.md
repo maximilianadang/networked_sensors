@@ -410,7 +410,7 @@ on the isolated trusted bench LAN, do not forward that port through a router,
 and reserve the Yún address in DHCP. `arduino.local` may work through mDNS, but
 a DHCP reservation gives the dashboard a deterministic `YUN_URL`.
 
-The physical cold-start check on 2026-07-14 passed: after a Linux-side reboot,
+The physical cold-start check on 2026-07-13 passed: after a Linux-side reboot,
 the Wi-Fi address returned, the init service launched without SSH, health
 reported `command_synchronized: true` with no error, live stopped ATmega status
 resumed, and the dedicated maintenance key authenticated without a password.
