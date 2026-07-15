@@ -27,6 +27,10 @@ test-bench translation of `dpc-flight/FLIGHT_CHECKLIST.md`.
 - The clicked solenoid button shows pending feedback immediately, relay state
   updates without freezing plots/source ages, and repeated clicks do not queue
   duplicate toggles. Record observed click-to-relay and click-to-page latency.
+- With no form field focused, keys 1-4 toggle only Solenoids 1-4 respectively
+  through the same pending/live-state guard as the buttons. Holding a key must
+  not queue repeats. While an input, text area, selector, or editable element is
+  focused, those keys must type/select normally and must not actuate a relay.
 - If the page reports `Polling` instead of `Live`, verify recent history still
   advances near 0.1-second intervals; both browser paths are configured at 10 Hz.
 - Real ESP32 readings show version 3, advancing `sample_ms`, explicit
@@ -100,6 +104,8 @@ Before using the laptop supervisor as the primary logger:
 
 - Stop recording before powering down sensors.
 - Confirm CSV/export exists on laptop disk.
+- Press Export and confirm the browser downloads `export.csv` while the same
+  dashboard page continues updating source ages, plots, and controls.
 - Turn off solenoids before depressurizing or disconnecting lines.
 - Preserve raw logs when a run has any source disconnect or unexpected value.
 

@@ -220,6 +220,16 @@ INDEX_HTML = r"""<!doctype html>
       font-weight: 700;
     }
 
+    button.solenoid kbd {
+      margin-left: 0.35rem;
+      padding: 1px 5px;
+      border: 1px solid currentColor;
+      border-radius: 4px;
+      background: rgb(0 0 0 / 18%);
+      font: inherit;
+      font-size: 0.78em;
+    }
+
     input,
     select,
     textarea {
@@ -658,10 +668,10 @@ INDEX_HTML = r"""<!doctype html>
         <button id="exportRun" type="button">Export</button>
       </div>
       <div class="toolbar-actions">
-        <button id="sol0" class="solenoid" type="button">Solenoid 1</button>
-        <button id="sol1" class="solenoid" type="button">Solenoid 2</button>
-        <button id="sol2" class="solenoid" type="button">Solenoid 3</button>
-        <button id="sol3" class="solenoid" type="button">Solenoid 4</button>
+        <button id="sol0" class="solenoid" type="button" aria-keyshortcuts="1">Solenoid 1 <kbd aria-hidden="true">1</kbd></button>
+        <button id="sol1" class="solenoid" type="button" aria-keyshortcuts="2">Solenoid 2 <kbd aria-hidden="true">2</kbd></button>
+        <button id="sol2" class="solenoid" type="button" aria-keyshortcuts="3">Solenoid 3 <kbd aria-hidden="true">3</kbd></button>
+        <button id="sol3" class="solenoid" type="button" aria-keyshortcuts="4">Solenoid 4 <kbd aria-hidden="true">4</kbd></button>
       </div>
     </section>
 
@@ -887,7 +897,7 @@ INDEX_HTML = r"""<!doctype html>
         els[`sol${i}`].title = pending
           ? `Sending Solenoid ${i + 1} command`
           : enabled
-            ? `Toggle Solenoid ${i + 1}`
+            ? `Toggle Solenoid ${i + 1} (keyboard ${i + 1})`
             : "ESP32 control stream is not live";
       }
     }
@@ -1377,26 +1387,62 @@ INDEX_HTML = r"""<!doctype html>
     });
 
     els.exportRun.addEventListener("click", () => {
-      window.location.href = "/api/export/latest";
+      // Download without navigating the live dashboard away from its SSE,
+      // controls, and plots. A top-level location assignment can suspend or
+      // replace the page in some browsers even for an attachment response.
+      const link = document.createElement("a");
+      link.href = "/api/export/latest";
+      link.download = "export.csv";
+      link.hidden = true;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
     });
 
-    for (let i = 0; i < solenoidCount; i += 1) {
-      els[`sol${i}`].addEventListener("click", async () => {
-        if (pendingSolenoids.has(i)) return;
-        pendingSolenoids.add(i);
+    async function toggleSolenoid(index) {
+      const button = els[`sol${index}`];
+      if (!button || button.disabled || pendingSolenoids.has(index)) return;
+      pendingSolenoids.add(index);
+      updateSolenoidControls();
+      text("espTransport", `Sending Solenoid ${index + 1} command`);
+      try {
+        const payload = await postJson(`/api/solenoid/toggle?n=${index}`);
+        if (payload.sample) applySample(payload.sample);
+      } catch (error) {
+        text("espTransport", `Command failed: ${error.message}`);
+      } finally {
+        pendingSolenoids.delete(index);
         updateSolenoidControls();
-        text("espTransport", `Sending Solenoid ${i + 1} command`);
-        try {
-          const payload = await postJson(`/api/solenoid/toggle?n=${i}`);
-          if (payload.sample) applySample(payload.sample);
-        } catch (error) {
-          text("espTransport", `Command failed: ${error.message}`);
-        } finally {
-          pendingSolenoids.delete(i);
-          updateSolenoidControls();
-        }
+      }
+    }
+
+    for (let i = 0; i < solenoidCount; i += 1) {
+      els[`sol${i}`].addEventListener("click", () => {
+        void toggleSolenoid(i);
       });
     }
+
+    document.addEventListener("keydown", event => {
+      const target = event.target;
+      const tagName = target && target.tagName
+        ? target.tagName.toUpperCase()
+        : "";
+      const editing = target && (
+        target.isContentEditable ||
+        ["INPUT", "TEXTAREA", "SELECT"].includes(tagName)
+      );
+      if (
+        editing || event.defaultPrevented || event.repeat ||
+        event.ctrlKey || event.altKey || event.metaKey || event.shiftKey
+      ) return;
+
+      const index = Number(event.key) - 1;
+      if (!Number.isInteger(index) || index < 0 || index >= solenoidCount) return;
+      const button = els[`sol${index}`];
+      if (!button || button.disabled) return;
+      event.preventDefault();
+      void toggleSolenoid(index);
+    });
 
     els.emergencyStop.addEventListener("click", async () => {
       // Deliberately no confirmation dialog: an emergency stop must be a

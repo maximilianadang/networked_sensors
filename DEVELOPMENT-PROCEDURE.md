@@ -984,3 +984,43 @@ response proves the dashboard sequence advances at least twice during a 250 ms
 blocked POST, and deterministic resolution coverage proves the mDNS result is
 cached. All 46 desktop tests pass. Physical click-to-relay/page latency must be
 retested on the field WLAN.
+
+## Step 7E - guarded solenoid keyboard shortcuts
+
+**Direction given:** restore the original ESP32-hosted page's numeric solenoid
+shortcuts in the laptop dashboard and extend them to the fourth channel.
+
+**READ / INFER:** the archived page mapped keys 1-3 directly to its toggle POST
+and ignored input/text-area focus. The laptop page already owns the authoritative
+four-channel pending/live guards, so keyboard control must call the same action
+rather than create a second command path.
+
+**DE-RISK / executed:** added visible 1-4 key labels and accessibility shortcut
+metadata, factored click handling into one guarded `toggleSolenoid()` function,
+and routed numeric keydown events through it. Editable controls, key repeat,
+modifier combinations, disabled channels, and pending channels are ignored.
+
+**Verification boundary:** all nine focused ESP32 tests and the complete
+47-test desktop suite pass. The shortcut contract checks all four mappings and
+each guard. Physical key-to-relay mapping and held-key behavior remain part of
+the safe field smoke test.
+
+## Turn - non-navigating recording export
+
+**Direction given:** diagnose and fix the live webpage freezing when an export
+is downloaded.
+
+**READ / INFER:** Stop finalizes `export.csv` synchronously, but all field runs
+had valid stopped summaries and export artifacts. A localhost reproduction
+stopped a 2.2 MB run in 6 ms and served its export in 7 ms. The browser Export
+handler instead assigned `/api/export/latest` to `window.location.href`, making
+the download a top-level navigation that can suspend or replace the live page.
+
+**DE-RISK / executed:** replaced top-level navigation with a temporary hidden
+anchor carrying `download="export.csv"`. The existing same-origin endpoint and
+attachment response are unchanged; only browser navigation behavior changes.
+
+**Verification boundary:** the dashboard contract rejects restoration of the
+old location assignment and requires the isolated anchor click/remove sequence.
+All 10 focused dashboard/ESP32 tests and the complete 48-test desktop suite
+pass.

@@ -114,6 +114,10 @@ dashboard SSE, and the browser polling fallback remain at 10 Hz.
 Solenoid POSTs are serialized but run outside the shared dashboard state lock,
 so the immediate `sol` event can be rendered while the command response is still
 finishing. The clicked button shows a pending state and rejects duplicate clicks.
+Keyboard keys `1` through `4` use the same guarded action for Solenoids 1 through
+4. Shortcuts are ignored while focus is in an input, text area, selector, or
+editable element; key repeat and modifier combinations are also ignored. A
+shortcut does nothing when the matching button is disabled or already pending.
 For the default `testbench.local` URL, the adapter resolves mDNS in its background
 source path and reuses the numeric address for commands; it resolves again after
 a transport failure or restart.
@@ -212,8 +216,12 @@ Useful endpoints:
 | `/api/stepper/estop/reset` | reset the latch while stopped with physical D4 OFF; waits for fresh Yún confirmation |
 | `/api/stepper/speed` | USB/network Local Velocity speed setpoint; `{"speed_mm_s": 3.0}`, D4 must be OFF; success waits for a fresh Yún configured-speed echo |
 | `/api/recordings` | completed recordings and active recording status |
-| `/api/export/latest` | latest completed export CSV |
+| `/api/export/latest` | latest completed export CSV; the page downloads it without navigating away from the live dashboard |
 | `/api/export?run_id=...&file=...` | selected artifact download |
+
+The **Export** button uses an isolated same-page download. The dashboard URL,
+SSE stream, plots, and controls must remain live while the browser saves
+`export.csv`; a download must never replace the dashboard document.
 
 Start and stop a run from the dashboard controls. Each completed run writes:
 
@@ -547,7 +555,7 @@ Network assumptions:
 | SICK-only direct 10 Hz | `python3 networked_sensors/dashboard.py --esp32-source off --dxmr90-source real --dxmr90-host HOST --dxmr90-data-path direct --dxmr90-rate-hz 10` | dashboard runs without ESP32 and receives fresh direct process-data samples at 10 Hz |
 | source-independence contract | `python3 -m unittest -v networked_sensors.test_source_independence` | a deliberately blocked DXMR90 Modbus read does not delay advancing ESP32 merged samples; DXMR90 values appear after the read recovers |
 | DXMR90 CLI one-shot | current reader command | heartbeat and values print without Modbus errors |
-| ESP32 adapter contract | `python3 -m unittest -v networked_sensors.test_real_esp32` | 8 tests pass healthy-v2 compatibility, strict v3 health/null validation, missing-ADC live transport, mDNS command-address caching, delayed-POST merge responsiveness, four-solenoid projection, GPIO 10 layout, and dashboard real-source selection |
+| ESP32/dashboard contract | `python3 -m unittest -v networked_sensors.test_real_esp32` | 10 tests pass healthy-v2 compatibility, strict v3 health/null validation, missing-ADC live transport, mDNS command-address caching, guarded keyboard keys 1-4, non-navigating export, delayed-POST merge responsiveness, four-solenoid projection, GPIO 10 layout, and dashboard real-source selection |
 | ESP32 headless compile/upload | temporary official Arduino CLI with `esp32:esp32@3.3.10`, Adafruit ADS1X15/BusIO, ESP Async WebServer, and Async TCP | sensor-health-aware four-solenoid sketch compiles for `esp32:esp32:adafruit_feather_esp32s3_nopsram` at 1,095,853 bytes/52% flash and 80,956 bytes/24% global RAM; physical `/dev/ttyACM1` flash hashes verified and board reset without issuing a solenoid command |
 | ESP32 physical source | `--esp32-source real --esp32-url http://ESP32_HOST` | sustained live pressure/flow, truthful source health, one deliberately safe solenoid command, and recorded ESP32 rows work |
 | DXMR90 real source | implemented | direct process windows sustain 10 Hz; heartbeat and selected metrics update |

@@ -50,6 +50,8 @@ data acquisition and operator workflow:
   - [x] Write source-scoped fresh update logs and merged CSV to disk.
   - [x] Preserve existing metadata fields and computed summary fields.
   - [x] Add source mode, source health, and staleness fields to merged export.
+  - [x] Download exports through a temporary anchor so Export does not navigate
+    or suspend the live dashboard document.
   - [x] Verification: start/stop/export in simulation mode.
 - [x] **Step 5 - real DXMR90 adapter.**
   - [x] Reuse `read_dxmr90_modbus.py` functions instead of shelling out.
@@ -210,9 +212,13 @@ data acquisition and operator workflow:
   - [x] Keep relay commands outside the shared merge lock, cache the resolved
     field mDNS address, provide pending-button feedback, and retain 10 Hz browser
     updates through both SSE and the polling fallback.
-  - [x] Verification: 8 firmware-layout/adapter/parser/CLI/dashboard-runtime
+  - [x] Restore guarded keyboard shortcuts 1-4 through the same solenoid action;
+    ignore editable fields, repeats, modifiers, unavailable controls, and
+    already-pending channels.
+  - [x] Verification: 10 firmware-layout/adapter/parser/CLI/dashboard-runtime
     tests cover healthy v2/v3, missing-ADC live-controller behavior, mDNS address
-    caching, and uninterrupted 10 Hz merge cadence during a delayed relay POST.
+    caching, keyboard guards, non-navigating export, and uninterrupted 10 Hz
+    merge cadence during a delayed relay POST.
   - [ ] Verification: physical live stream smoke and safe solenoid toggle test.
 - [ ] **Step 7 - headless ESP32 firmware.**
   - [x] Archive the former self-hosted-dashboard sketch under `legacy/`.

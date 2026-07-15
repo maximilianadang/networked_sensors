@@ -233,7 +233,7 @@ latency cannot freeze sample publication or repeatedly pay mDNS lookup cost.
 | `/api/events` | GET | SSE `state` and `sample` events | primary live browser stream |
 | `/api/run/start` / `/api/run/stop` | POST | recording flag, timestamps, run artifact metadata | start opens a run directory; stop finalizes metadata, summary, and export CSV |
 | `/api/metadata` | POST | in-memory metadata object | accepts JSON object with known metadata keys |
-| `/api/solenoid/toggle?n=0..3` | POST | selected ESP32 solenoid state and latest sample | simulation toggles locally; real mode serializes one ESP32 POST outside the merge lock only while its stream is live; pending UI blocks duplicate clicks; index 3 maps to GPIO 10; immediate `sol` events and v3 readings update state |
+| `/api/solenoid/toggle?n=0..3` | POST | selected ESP32 solenoid state and latest sample | simulation toggles locally; real mode serializes one ESP32 POST outside the merge lock only while its stream is live; buttons and guarded keyboard keys 1-4 share this action; editable fields, repeats, modifiers, disabled controls, and pending channels suppress shortcuts; index 3 maps to GPIO 10; immediate `sol` events and v3 readings update state |
 | `/api/stepper/status` | GET | stable stepper health, mode, D4/D5, D6/D8, owner, configured/scheduled speed, measured emitted STEP pulses/s and converted mm/s, and command state | `aps` is optional for older firmware; USB position/target/remaining and software-envelope fields are null; legacy homed flag is not a Move guard |
 | `/api/stepper/control-mode` | POST | strict boolean `web_position` | mode changes only while D4 is OFF and motion is stopped; boot/default is Local Velocity |
 | `/api/stepper/home` | POST | no body fields | optional D8-limit seek; Web Position only, D4 armed, D5 Reverse, fixed 1.5 mm/s; not a Move prerequisite |
@@ -241,7 +241,7 @@ latency cannot freeze sample publication or repeatedly pay mDNS lookup cost.
 | `/api/stepper/stop` | POST | immediate abort and current status | simulation plus USB/network Web Position modes; D4 OFF independently aborts physical motion |
 | `/api/stepper/speed` | POST | `speed_mm_s` from 0.1 through 10.0 | USB/network Local Velocity; requires D4 OFF; changes the switch-controlled continuous speed without starting motion |
 | `/api/recordings` | GET | known completed recordings and active recording status | scans `--record-dir` summaries |
-| `/api/export/latest` | GET | latest completed `export.csv` | browser download path |
+| `/api/export/latest` | GET | latest completed `export.csv` | temporary same-page download anchor; never a top-level dashboard navigation |
 | `/api/export?run_id=...&file=...` | GET | selected artifact | allowed files include merged/export CSV, ESP32/DXMR90/stepper source CSVs, and metadata/summary JSON |
 
 SICK-only live dashboard command shape:
@@ -346,7 +346,7 @@ Required Step-1 fields:
 | dashboard/API smoke | `python3 networked_sensors/dashboard.py --host 127.0.0.1 --port 8000` plus localhost GET/POST/SSE probes | local UI and API render live samples, stale/missing source state, metadata, run state, and simulated solenoid controls | No |
 | recording/export smoke | `python3 networked_sensors/dashboard.py --record-dir /tmp/flow-dashboard-recordings` plus localhost start/stop/export probes | start/stop writes merged/source CSV, metadata JSON, summary JSON, export CSV, and download endpoints serve them | No |
 | no-quorum/source-independence contract | `python3 -m unittest -v networked_sensors.test_source_independence` | a deliberately blocked DXMR90 Modbus read does not delay advancing ESP32 merged samples; DXMR90 values publish after recovery | No; 1 deterministic test passed |
-| ESP32 adapter contract | `python3 -m unittest -v networked_sensors.test_real_esp32` | primary/legacy layout, healthy v2, strict v3 health/null consistency, missing-ADC live transport, cached mDNS address, delayed-POST 10 Hz merge responsiveness, 100 ms fallback, GPIO 10/fourth button, background `/events`, and dashboard states pass | No; 8 loopback/layout tests passed |
+| ESP32/dashboard contract | `python3 -m unittest -v networked_sensors.test_real_esp32` | primary/legacy layout, healthy v2, strict v3 health/null consistency, missing-ADC live transport, cached mDNS address, guarded keys 1-4, non-navigating export download, delayed-POST 10 Hz merge responsiveness, 100 ms fallback, GPIO 10/fourth button, background `/events`, and dashboard states pass | No; 10 loopback/layout tests passed |
 | ESP32 headless compile/upload | Arduino CLI/core/libraries, `esp32:esp32:adafruit_feather_esp32s3_nopsram` | nullable-sensor/four-output primary firmware compiles at 1,095,853 bytes/52% flash and 80,956 bytes/24% global RAM without HTML or `/test/*`; physical upload hashes verify | ESP32 USB for upload; passed |
 | ESP32 physical smoke | dashboard with `--esp32-source real --esp32-url URL` | sustained stream, plausible readings, safe real solenoid toggle, and recorded rows | ESP32 network |
 | SICK/DXMR90 adapter smoke | dashboard `--dxmr90-source real --dxmr90-data-path direct --dxmr90-rate-hz 10` plus API/history probe | both direct SICK process windows decode, fresh source rows sustain 10 Hz, and selected metrics reach the browser | SICK/DXMR90 network |

@@ -50,6 +50,27 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertIn("function stopPollingFallback()", INDEX_HTML)
         self.assertIn("}, 100);", INDEX_HTML)
 
+    def test_dashboard_solenoid_keyboard_shortcuts_are_guarded(self) -> None:
+        for key in range(1, 5):
+            self.assertIn(f'aria-keyshortcuts="{key}"', INDEX_HTML)
+        self.assertIn('document.addEventListener("keydown", event => {', INDEX_HTML)
+        self.assertIn('async function toggleSolenoid(index)', INDEX_HTML)
+        self.assertIn('void toggleSolenoid(index)', INDEX_HTML)
+        self.assertIn('target.isContentEditable', INDEX_HTML)
+        self.assertIn('["INPUT", "TEXTAREA", "SELECT"]', INDEX_HTML)
+        self.assertIn('event.defaultPrevented || event.repeat', INDEX_HTML)
+        self.assertIn('event.ctrlKey || event.altKey || event.metaKey', INDEX_HTML)
+        self.assertIn('if (!button || button.disabled) return;', INDEX_HTML)
+
+    def test_dashboard_export_download_does_not_navigate_live_page(self) -> None:
+        self.assertNotIn('window.location.href = "/api/export/latest"', INDEX_HTML)
+        self.assertIn('const link = document.createElement("a")', INDEX_HTML)
+        self.assertIn('link.href = "/api/export/latest"', INDEX_HTML)
+        self.assertIn('link.download = "export.csv"', INDEX_HTML)
+        self.assertIn('document.body.appendChild(link)', INDEX_HTML)
+        self.assertIn('link.click()', INDEX_HTML)
+        self.assertIn('link.remove()', INDEX_HTML)
+
 
 class _Esp32ContractServer(ThreadingHTTPServer):
     daemon_threads = True
