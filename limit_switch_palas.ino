@@ -1,12 +1,9 @@
-#include <AccelStepper.h>
+#include <math.h>
 #include <util/atomic.h>
 
 const int PIN_STEP = 3;
 const int PIN_DRIVER_DIR = 2;
-AccelStepper stepper(
-    AccelStepper::DRIVER,
-    PIN_STEP,
-    PIN_DRIVER_DIR);  // STEP=D3, DIR=D2
+// STEP=D3, DIR=D2. Timer1 is the sole STEP-edge owner in every motion mode.
 
 // --- Mechanism calibration ---
 // CALIBRATED pulse conversion (2026-07-13): the mechanism advances
@@ -35,8 +32,7 @@ const long MAX_HOME_SEARCH_STEPS =
 // --- Fixed motion settings ---
 // Acceleration is intentionally a firmware setting rather than an operator
 // field. The page controls speed and distance, while this conservative value
-// stays reviewable in source. The DM542T has already run smoothly with the
-// existing wiring; setMinPulseWidth(5) preserves a comfortably wide STEP pulse.
+// stays reviewable in source. Timer1 preserves a 5 us STEP pulse.
 const long MIN_SPEED_SPS = 25L;        // nearest pulse rate to 0.1 mm/s
 const long MAX_SPEED_SPS = 2520L;      // nearest pulse rate to 10.0 mm/s
 const long DEFAULT_SPEED_SPS = 378L;   // nearest pulse rate to 1.5 mm/s
@@ -44,18 +40,41 @@ const long HOME_SPEED_SPS = 378L;      // fixed conservative homing speed
 const float FIXED_ACCELERATION_SPS2 = 1260.0;  // approximately 5 mm/s^2
 long targetSpeedSps = DEFAULT_SPEED_SPS;
 
-// --- Timer-backed Local Velocity pulses ---
-// AccelStepper::runSpeed() can emit at most one pulse per cooperative loop.
-// USB/network/status work therefore capped measured output below the requested
-// rate. Timer1 now owns only Local Velocity pulse timing. The main loop still
-// checks D4, D5, D6, D8, and E-STOP continuously and disables this interrupt
-// before dropping D9/ENA-. Web Position retains AccelStepper acceleration and
-// distance behavior and never enables this timer path.
-const unsigned long LOCAL_PULSE_TIMER_HZ = F_CPU / 64UL;
-volatile bool localPulseTimerEnabled = false;
-volatile int localPulseTimerDirection = 1;
-volatile long localPulseTimerPosition = 0L;
-volatile long localPulseTimerSpeedSps = 0L;
+// --- Unified Timer1 pulse engine ---
+// Timer1 owns every STEP edge in Local Velocity, bounded Web Position, and
+// Home. Modes differ only in authorization and whether a finite target exists;
+// they cannot silently acquire different speed implementations. The main loop
+// checks D4, D5, qualified D6/D8, and E-STOP continuously. It updates the
+// acceleration ramp without blocking, while the ISR applies pending compare
+// values only immediately after a pulse so shortening an interval cannot miss
+// a compare event. Finite targets stop in the ISR at the exact signed count.
+const unsigned long PULSE_TIMER_HZ = F_CPU / 64UL;
+const unsigned long PULSE_RAMP_UPDATE_US = 1000UL;
+const unsigned long PULSE_RAMP_MAX_UPDATE_US = 10000UL;
+const long PULSE_RAMP_START_SPS = 50L;  // approximately sqrt(2 * 1260)
+
+enum PulseEngineMode : byte {
+  PULSE_ENGINE_IDLE = 0,
+  PULSE_ENGINE_LOCAL = 1,
+  PULSE_ENGINE_POSITION = 2,
+  PULSE_ENGINE_HOME = 3,
+};
+
+volatile bool pulseTimerEnabled = false;
+volatile PulseEngineMode pulseTimerMode = PULSE_ENGINE_IDLE;
+volatile bool pulseTimerFiniteTarget = false;
+volatile bool pulseTimerTargetReached = false;
+volatile int pulseTimerDirection = 1;
+volatile long pulseTimerPosition = 0L;
+volatile long pulseTimerTarget = 0L;
+volatile long pulseTimerScheduledSpeedSps = 0L;
+volatile uint16_t pulseTimerPendingCompare = 0;
+volatile long pulseTimerPendingSpeedSps = 0L;
+volatile bool pulseTimerComparePending = false;
+
+float pulseRampSpeedSps = 0.0;
+long pulseRampCruiseSpeedSps = 0L;
+unsigned long pulseRampLastUpdateUs = 0UL;
 
 // --- Fixed physical direction calibration ---
 // This Normal mapping was physically verified across the complete stroke:
@@ -77,6 +96,28 @@ const int PIN_DRIVER_ENABLE_NEG = 9;
 // is LOW. A broken limit wire therefore looks clear and is not fail-safe.
 const int POS_LIMIT_ACTIVE_LEVEL = LOW;
 const int NEG_LIMIT_ACTIVE_LEVEL = LOW;
+
+// --- Magnetic-limit input qualification ---
+// A raw LOW must remain continuous for this bounded interval before it may
+// stop motion or set a persistent endpoint latch. Bench recordings captured
+// isolated raw edges shortly after driver enable which disappeared before the
+// next status frame but nevertheless latched an endpoint. A 5 ms assertion
+// qualification rejects those electrical transients while adding at most
+// 0.05 mm of stopping travel at the 10 mm/s firmware maximum. Releases remain
+// immediate; the persistent directional latch still prevents renewed travel
+// into a confirmed endpoint until motion away from that endpoint is selected.
+// No delay() is used, so D4, D5, E-STOP, transport, and STEP service continue.
+const unsigned long LIMIT_ASSERT_QUALIFY_US = 5000UL;
+
+struct QualifiedLimitInput {
+  bool qualifiedActive;
+  bool assertionPending;
+  unsigned long assertionStartedUs;
+  byte rejectedGlitches;
+};
+
+QualifiedLimitInput positiveLimitInput = {false, false, 0UL, 0};
+QualifiedLimitInput negativeLimitInput = {false, false, 0UL, 0};
 
 // DM542T common-anode enable wiring (verified against its V4.0 manual):
 // ENA+ remains at Yún 5 V and ENA- connects to D9. LOW places 5 V across the
@@ -130,6 +171,7 @@ bool homingMotion = false;
 int activePhysicalDirection = 0;
 unsigned int activeCommandId = 0;
 long reportedTargetSteps = 0;
+long activePulseTargetSteps = 0;
 const char *motionReason = "run_off";
 
 bool positiveLimitLatched = false;
@@ -170,7 +212,8 @@ const char *lastCommandError = "none";
 // Compact status keeps Serial work bounded. In addition to the established
 // fields, m is control mode, h is homed, mv is moving, st is MotionState,
 // a means D4 OFF has been observed since boot, p/g are current/target steps,
-// c is the active command number, and e is the software E-STOP latch.
+// c is the active command number, e is the software E-STOP latch, and lx packs
+// qualified limit state plus diagnostic-only rejected-edge counters.
 const unsigned long STATUS_HEARTBEAT_MS = 1000UL;
 const unsigned long STATUS_MOTION_MS = 100UL;
 unsigned long statusSequence = 0;
@@ -179,8 +222,8 @@ bool statusDirty = true;
 // --- Emitted STEP instrumentation ---
 // The scheduled speed is not proof of how often D3 was actually pulsed.
 // Measure the change in the shared pulse-position counter over a fixed window:
-// Timer1 advances it in Local Velocity, and AccelStepper advances it in Web
-// Position. This remains open-loop electrical evidence: it proves D3 pulse
+// The same Timer1 counter advances it in every mode. This remains open-loop
+// electrical evidence: it proves D3 pulse
 // attempts, not DM542T acceptance or physical piston travel.
 const unsigned long PULSE_RATE_WINDOW_US = 250000UL;
 long measuredPulseRateSps = 0L;
@@ -199,7 +242,11 @@ byte usbCommandLength = 0;
 const byte NETWORK_COMMAND_BUFFER_SIZE = USB_COMMAND_BUFFER_SIZE;
 char networkCommandBuffer[NETWORK_COMMAND_BUFFER_SIZE];
 byte networkCommandLength = 0;
-char networkTxActive[256];
+// The compact status has a checked upper bound below this size, including its
+// newline and terminator. Keeping one named size prevents the formatter and
+// shared transport buffer from drifting apart as telemetry evolves.
+const unsigned int STATUS_FRAME_SIZE = 288;
+char networkTxActive[STATUS_FRAME_SIZE];
 unsigned int networkTxActiveLength = 0;
 unsigned int networkTxActiveOffset = 0;
 unsigned int usbTxActiveOffset = 0;
@@ -208,77 +255,212 @@ char networkTxPendingAck[80];
 bool networkAckPending = false;
 
 ISR(TIMER1_COMPA_vect) {
-  if (!localPulseTimerEnabled) return;
+  if (!pulseTimerEnabled) return;
   digitalWrite(PIN_STEP, HIGH);
   delayMicroseconds(5);
   digitalWrite(PIN_STEP, LOW);
-  localPulseTimerPosition += localPulseTimerDirection;
+  pulseTimerPosition += pulseTimerDirection;
+
+  if (pulseTimerFiniteTarget &&
+      ((pulseTimerDirection > 0 &&
+        pulseTimerPosition >= pulseTimerTarget) ||
+       (pulseTimerDirection < 0 &&
+        pulseTimerPosition <= pulseTimerTarget))) {
+    pulseTimerEnabled = false;
+    pulseTimerTargetReached = true;
+    pulseTimerScheduledSpeedSps = 0L;
+    pulseTimerComparePending = false;
+    TIMSK1 &= ~_BV(OCIE1A);
+    return;
+  }
+
+  // OCR1A is changed only at this pulse boundary. Updating a shorter compare
+  // value asynchronously while TCNT1 is already beyond it can otherwise defer
+  // the next match until timer wrap and create a large speed discontinuity.
+  if (pulseTimerComparePending) {
+    OCR1A = pulseTimerPendingCompare;
+    pulseTimerScheduledSpeedSps = pulseTimerPendingSpeedSps;
+    pulseTimerComparePending = false;
+  }
 }
 
-bool localPulseTimerIsEnabled() {
+uint16_t pulseCompareForSpeed(long speedSps) {
+  unsigned long magnitude = (unsigned long)labs(speedSps);
+  if (magnitude < 1UL) magnitude = 1UL;
+  unsigned long timerTicks =
+      (PULSE_TIMER_HZ + magnitude / 2UL) / magnitude;
+  if (timerTicks < 2UL) timerTicks = 2UL;
+  if (timerTicks > 65536UL) timerTicks = 65536UL;
+  return (uint16_t)(timerTicks - 1UL);
+}
+
+bool pulseEngineIsEnabled() {
   bool enabled = false;
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    enabled = localPulseTimerEnabled;
+    enabled = pulseTimerEnabled;
   }
   return enabled;
 }
 
 long currentPulsePosition() {
-  bool enabled = false;
   long position = 0L;
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    enabled = localPulseTimerEnabled;
-    position = localPulseTimerPosition;
+    position = pulseTimerPosition;
   }
-  return enabled ? position : stepper.currentPosition();
+  return position;
 }
 
-void stopLocalPulseTimerAndSync() {
-  bool wasEnabled = false;
-  long finalPosition = 0L;
+void setPulsePosition(long position) {
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    wasEnabled = localPulseTimerEnabled;
-    localPulseTimerEnabled = false;
+    pulseTimerPosition = position;
+  }
+}
+
+long pulseEngineSignedScheduledSpeed() {
+  long speed = 0L;
+  int direction = 1;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    speed = pulseTimerScheduledSpeedSps;
+    direction = pulseTimerDirection;
+  }
+  return direction * speed;
+}
+
+bool pulseEngineTargetWasReached() {
+  bool reached = false;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    reached = pulseTimerTargetReached;
+  }
+  return reached;
+}
+
+void stopPulseEngine() {
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    pulseTimerEnabled = false;
     TIMSK1 &= ~_BV(OCIE1A);
-    finalPosition = localPulseTimerPosition;
-    localPulseTimerSpeedSps = 0L;
+    pulseTimerMode = PULSE_ENGINE_IDLE;
+    pulseTimerFiniteTarget = false;
+    pulseTimerTargetReached = false;
+    pulseTimerScheduledSpeedSps = 0L;
+    pulseTimerPendingSpeedSps = 0L;
+    pulseTimerComparePending = false;
   }
-  if (!wasEnabled) return;
   digitalWrite(PIN_STEP, LOW);
-  stepper.setCurrentPosition(finalPosition);
+  pulseRampSpeedSps = 0.0;
+  pulseRampCruiseSpeedSps = 0L;
 }
 
-void startLocalPulseTimer(long signedSpeedSps) {
-  int direction = signedSpeedSps >= 0L ? 1 : -1;
-  long speedMagnitude = labs(signedSpeedSps);
-  bool alreadyConfigured = false;
+bool pulseEngineMatches(
+    PulseEngineMode mode,
+    int direction,
+    long target,
+    long cruiseSpeedSps) {
+  bool matches = false;
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    alreadyConfigured = localPulseTimerEnabled &&
-        localPulseTimerDirection == direction &&
-        localPulseTimerSpeedSps == speedMagnitude;
+    matches = pulseTimerEnabled &&
+        pulseTimerMode == mode &&
+        pulseTimerDirection == direction &&
+        (!pulseTimerFiniteTarget || pulseTimerTarget == target) &&
+        pulseRampCruiseSpeedSps == cruiseSpeedSps;
   }
-  if (alreadyConfigured || speedMagnitude == 0L) return;
+  return matches;
+}
 
-  stopLocalPulseTimerAndSync();
-  long initialPosition = stepper.currentPosition();
-  unsigned long timerTicks =
-      (LOCAL_PULSE_TIMER_HZ + (unsigned long)speedMagnitude / 2UL) /
-      (unsigned long)speedMagnitude;
-  if (timerTicks < 2UL) timerTicks = 2UL;
-  if (timerTicks > 65536UL) timerTicks = 65536UL;
+void startPulseEngine(
+    PulseEngineMode mode,
+    int direction,
+    bool finiteTarget,
+    long target,
+    long cruiseSpeedSps) {
+  stopPulseEngine();
+  long initialSpeedSps = cruiseSpeedSps < PULSE_RAMP_START_SPS
+      ? cruiseSpeedSps
+      : PULSE_RAMP_START_SPS;
+  if (initialSpeedSps < 1L) initialSpeedSps = 1L;
+  uint16_t initialCompare = pulseCompareForSpeed(initialSpeedSps);
 
   digitalWrite(PIN_DRIVER_DIR, direction > 0 ? HIGH : LOW);
   digitalWrite(PIN_STEP, LOW);
+  pulseRampSpeedSps = (float)initialSpeedSps;
+  pulseRampCruiseSpeedSps = cruiseSpeedSps;
+  pulseRampLastUpdateUs = micros();
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    localPulseTimerPosition = initialPosition;
-    localPulseTimerDirection = direction;
-    localPulseTimerSpeedSps = speedMagnitude;
-    OCR1A = (uint16_t)(timerTicks - 1UL);
+    pulseTimerMode = mode;
+    pulseTimerFiniteTarget = finiteTarget;
+    pulseTimerTargetReached = false;
+    pulseTimerDirection = direction;
+    pulseTimerTarget = target;
+    pulseTimerScheduledSpeedSps = initialSpeedSps;
+    pulseTimerPendingSpeedSps = initialSpeedSps;
+    pulseTimerComparePending = false;
+    OCR1A = initialCompare;
     TCNT1 = 0;
     TIFR1 = _BV(OCF1A);
-    localPulseTimerEnabled = true;
+    pulseTimerEnabled = true;
     TIMSK1 |= _BV(OCIE1A);
   }
+}
+
+void queuePulseEngineSpeed(long speedSps) {
+  if (speedSps < 1L) speedSps = 1L;
+  uint16_t compare = pulseCompareForSpeed(speedSps);
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    if (pulseTimerEnabled) {
+      pulseTimerPendingCompare = compare;
+      pulseTimerPendingSpeedSps = speedSps;
+      pulseTimerComparePending = true;
+    }
+  }
+}
+
+void updatePulseEngineRamp() {
+  bool enabled = false;
+  bool finiteTarget = false;
+  long position = 0L;
+  long target = 0L;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    enabled = pulseTimerEnabled;
+    finiteTarget = pulseTimerFiniteTarget;
+    position = pulseTimerPosition;
+    target = pulseTimerTarget;
+  }
+  if (!enabled) return;
+
+  unsigned long nowUs = micros();
+  unsigned long elapsedUs = nowUs - pulseRampLastUpdateUs;
+  if (elapsedUs < PULSE_RAMP_UPDATE_US) return;
+  pulseRampLastUpdateUs = nowUs;
+  if (elapsedUs > PULSE_RAMP_MAX_UPDATE_US) {
+    elapsedUs = PULSE_RAMP_MAX_UPDATE_US;
+  }
+
+  float desiredSpeedSps = (float)pulseRampCruiseSpeedSps;
+  if (finiteTarget) {
+    unsigned long remainingPulses = (unsigned long)labs(target - position);
+    float brakingSpeedSps = sqrt(
+        2.0 * FIXED_ACCELERATION_SPS2 * (float)remainingPulses);
+    if (brakingSpeedSps < desiredSpeedSps) {
+      desiredSpeedSps = brakingSpeedSps;
+    }
+  }
+
+  float maxChangeSps =
+      FIXED_ACCELERATION_SPS2 * ((float)elapsedUs / 1000000.0);
+  if (pulseRampSpeedSps < desiredSpeedSps) {
+    pulseRampSpeedSps += maxChangeSps;
+    if (pulseRampSpeedSps > desiredSpeedSps) {
+      pulseRampSpeedSps = desiredSpeedSps;
+    }
+  } else if (pulseRampSpeedSps > desiredSpeedSps) {
+    pulseRampSpeedSps -= maxChangeSps;
+    if (pulseRampSpeedSps < desiredSpeedSps) {
+      pulseRampSpeedSps = desiredSpeedSps;
+    }
+  }
+
+  long requestedSpeedSps = (long)(pulseRampSpeedSps + 0.5);
+  if (requestedSpeedSps < 1L) requestedSpeedSps = 1L;
+  queuePulseEngineSpeed(requestedSpeedSps);
 }
 
 constexpr bool limitBlocksPhysicalDirection(
@@ -320,18 +502,67 @@ void clearOppositeLimitLatch(int physicalDirection) {
   if (physicalDirection > 0) negativeLimitLatched = false;
 }
 
+void initializeQualifiedLimit(
+    QualifiedLimitInput *input,
+    bool rawActive,
+    unsigned long nowUs) {
+  input->qualifiedActive = false;
+  input->assertionPending = rawActive;
+  input->assertionStartedUs = nowUs;
+  input->rejectedGlitches = 0;
+}
+
+bool updateQualifiedLimit(
+    QualifiedLimitInput *input,
+    bool rawActive,
+    unsigned long nowUs) {
+  if (input->qualifiedActive) {
+    // Release immediately so a carriage can retreat from a confirmed end.
+    // The endpoint latch remains set and continues to block travel into it.
+    if (!rawActive) {
+      input->qualifiedActive = false;
+      input->assertionPending = false;
+      statusDirty = true;
+    }
+    return input->qualifiedActive;
+  }
+
+  if (!rawActive) {
+    if (input->assertionPending) {
+      input->assertionPending = false;
+      if (input->rejectedGlitches < 255) ++input->rejectedGlitches;
+      statusDirty = true;
+    }
+    return false;
+  }
+
+  if (!input->assertionPending) {
+    input->assertionPending = true;
+    input->assertionStartedUs = nowUs;
+    return false;
+  }
+
+  // Unsigned subtraction is intentionally wrap-safe across micros() rollover.
+  if (nowUs - input->assertionStartedUs >= LIMIT_ASSERT_QUALIFY_US) {
+    input->qualifiedActive = true;
+    input->assertionPending = false;
+    statusDirty = true;
+  }
+  return input->qualifiedActive;
+}
+
 void updatePhysicalEndpointLatches(
     bool positiveLimitActive,
     bool negativeLimitActive) {
   // The carriage cannot physically occupy both ends of its stroke. When one
-  // raw endpoint is exclusively active, it is authoritative and clears stale
-  // history from the opposite endpoint. Without this rule, visiting D8 and
+  // qualified endpoint is exclusively active, it is authoritative and clears
+  // stale history from the opposite endpoint. Without this rule, visiting D8 and
   // later reaching D6 leaves both latches set; each selected direction then
   // appears blocked even though the raw switches correctly identify D6.
   //
-  // If both raw inputs are LOW simultaneously, retain both latches and block
-  // both directions. That state is treated conservatively as a wiring/sensor
-  // fault rather than guessing which endpoint is real.
+  // If both qualified inputs are active simultaneously, retain both latches
+  // and block both directions. That state is treated conservatively as a
+  // wiring/sensor fault rather than guessing which endpoint is real.
   if (positiveLimitActive && negativeLimitActive) {
     positiveLimitLatched = true;
     negativeLimitLatched = true;
@@ -345,7 +576,7 @@ void updatePhysicalEndpointLatches(
 }
 
 void disableDriverOutput() {
-  stopLocalPulseTimerAndSync();
+  stopPulseEngine();
   digitalWrite(PIN_DRIVER_ENABLE_NEG, DRIVER_OUTPUT_DISABLED_LEVEL);
   if (driverOutputEnabled) statusDirty = true;
   driverOutputEnabled = false;
@@ -375,13 +606,10 @@ void reportLimitLevels(int positiveRaw, int negativeRaw) {
 }
 
 void stopStepperImmediately() {
-  stopLocalPulseTimerAndSync();
-  long current = stepper.currentPosition();
-  // setCurrentPosition sets current and target to the same value and clears
-  // AccelStepper's internal speed. It therefore aborts without emitting the
-  // deceleration pulses that stop() would schedule.
-  stepper.setCurrentPosition(current);
+  stopPulseEngine();
+  long current = currentPulsePosition();
   reportedTargetSteps = current;
+  activePulseTargetSteps = current;
   activeWebMotion = false;
   homingMotion = false;
   activePhysicalDirection = 0;
@@ -396,8 +624,9 @@ void abortWebMotion(MotionState state, const char *reason) {
 }
 
 void establishD8Reference() {
-  stepper.setCurrentPosition(0L);
+  setPulsePosition(0L);
   reportedTargetSteps = 0L;
+  activePulseTargetSteps = 0L;
   positionHomed = true;
 }
 
@@ -411,7 +640,9 @@ bool parseLongExact(char *text, long *value) {
 }
 
 bool stoppedWithD4Off() {
-  return digitalRead(PIN_RUN) == HIGH && !activeWebMotion;
+  return digitalRead(PIN_RUN) == HIGH &&
+      !activeWebMotion &&
+      !pulseEngineIsEnabled();
 }
 
 void rejectCommand(const __FlashStringHelper *message) {
@@ -479,7 +710,7 @@ void startHomeCommand() {
     return;
   }
 
-  if (digitalRead(PIN_LIMIT_NEG) == NEG_LIMIT_ACTIVE_LEVEL) {
+  if (negativeLimitInput.qualifiedActive) {
     establishD8Reference();
     motionState = STATE_WEB_READY;
     motionReason = "home_complete";
@@ -496,9 +727,9 @@ void startHomeCommand() {
   positiveLimitLatched = false;
   motionState = STATE_HOMING;
   motionReason = "none";
-  stepper.setMaxSpeed((float)HOME_SPEED_SPS);
-  stepper.setAcceleration(FIXED_ACCELERATION_SPS2);
-  stepper.moveTo(stepper.currentPosition() - MAX_HOME_SEARCH_STEPS);
+  stopPulseEngine();
+  setPulsePosition(0L);
+  activePulseTargetSteps = -MAX_HOME_SEARCH_STEPS;
   reportedTargetSteps = 0L;
   requestDriverOutputEnable();
   statusDirty = true;
@@ -557,7 +788,8 @@ void startMoveCommand(long deltaSteps, long speedSps, long commandId) {
   // Each command owns a fresh relative pulse counter. This counter controls
   // only the requested travel quantity; it is not an absolute-position safety
   // input. D6/D8 remain the travel safety decisions.
-  stepper.setCurrentPosition(0L);
+  stopPulseEngine();
+  setPulsePosition(0L);
   long target = deltaSteps;
   targetSpeedSps = speedSps;
   activeCommandId = (unsigned int)commandId;
@@ -565,11 +797,9 @@ void startMoveCommand(long deltaSteps, long speedSps, long commandId) {
   homingMotion = false;
   activePhysicalDirection = requestedDirection;
   reportedTargetSteps = target;
+  activePulseTargetSteps = target;
   motionState = STATE_WEB_MOVING;
   motionReason = "none";
-  stepper.setMaxSpeed((float)targetSpeedSps);
-  stepper.setAcceleration(FIXED_ACCELERATION_SPS2);
-  stepper.moveTo(target);
   requestDriverOutputEnable();
   statusDirty = true;
   Serial.println(F("Bounded Web Position move accepted."));
@@ -586,7 +816,6 @@ void processCommandBody(char *commandBuffer, CommandTransport transport) {
   if (strcmp(commandBuffer, "V1 E1") == 0) {
     emergencyStopLatched = true;
     stopStepperImmediately();
-    stepper.setSpeed(0.0);
     motionState = STATE_EMERGENCY_STOP;
     motionReason = "emergency_stop";
     statusDirty = true;
@@ -749,7 +978,7 @@ void pollUsbCommands() {
 
 bool queueNetworkStatus(const char *line) {
   // One immutable buffer feeds both transports with independent offsets. This
-  // avoids a second 256-byte AVR buffer and keeps USB transmission off the
+  // avoids a second AVR status buffer and keeps USB transmission off the
   // blocking Serial.println path. If either consumer is still draining, drop
   // this periodic snapshot; the next bounded heartbeat supplies a fresh one.
   bool usbBusy = networkTxActiveSharedWithUsb &&
@@ -922,14 +1151,26 @@ bool reportMachineStatus(
   // physical signed rates identical. ds remains in status as read-only
   // compatibility telemetry; it is no longer a command capability.
   long electricalSpeedSps = effectivePhysicalSpeedSps;
-  char line[256];
-  snprintf(
+  // lx packs qualified state and two saturating diagnostic-only counters
+  // without expanding this AVR frame excessively:
+  //   bit 17=D6 qualified active, bit 16=D8 qualified active,
+  //   bits 15..8=D6 rejected edges, bits 7..0=D8 rejected edges.
+  // The counters never participate in a motion decision. They make rejected
+  // raw edges visible even when short raw LOW/HIGH frames are overwritten in
+  // transport.
+  unsigned long packedLimitDiagnostics =
+      ((unsigned long)(positiveLimitInput.qualifiedActive ? 1 : 0) << 17) |
+      ((unsigned long)(negativeLimitInput.qualifiedActive ? 1 : 0) << 16) |
+      ((unsigned long)positiveLimitInput.rejectedGlitches << 8) |
+      (unsigned long)negativeLimitInput.rejectedGlitches;
+  char line[STATUS_FRAME_SIZE];
+  int formattedLength = snprintf(
       line,
       sizeof(line),
       "{\"v\":1,\"t\":\"s\",\"q\":%lu,\"d4\":%d,\"d5\":%d,"
-      "\"d6\":%d,\"d8\":%d,\"lp\":%d,\"ln\":%d,\"b\":%d,"
+      "\"d6\":%d,\"d8\":%d,\"lx\":%lu,\"lp\":%d,\"ln\":%d,\"b\":%d,"
       "\"r\":\"%s\",\"sps\":%ld,\"csps\":%ld,\"aps\":%ld,\"ds\":%d,"
-      "\"en\":%d,"
+      "\"en\":%d,\"ut\":1,"
       "\"m\":%d,\"h\":%d,\"a\":%d,\"e\":%d,\"mv\":%d,\"st\":%d,\"p\":%ld,"
       "\"g\":%ld,\"c\":%u,\"o\":%d}",
       ++statusSequence,
@@ -937,6 +1178,7 @@ bool reportMachineStatus(
       directionRaw,
       positiveRaw,
       negativeRaw,
+      packedLimitDiagnostics,
       positiveLimitLatched ? 1 : 0,
       negativeLimitLatched ? 1 : 0,
       blocked ? 1 : 0,
@@ -956,6 +1198,13 @@ bool reportMachineStatus(
       reportedTargetSteps,
       activeCommandId,
       (int)controlOwner);
+  // Never place syntactically truncated JSON on either transport. The desktop
+  // contract test also constructs the numeric worst case and keeps it below
+  // STATUS_FRAME_SIZE, so this guard is a final fail-closed invariant.
+  if (formattedLength < 0 ||
+      (unsigned int)formattedLength >= sizeof(line) - 1) {
+    return false;
+  }
   return queueNetworkStatus(line);
 }
 
@@ -967,6 +1216,15 @@ void setup() {
   pinMode(PIN_DIR, INPUT_PULLUP);
   pinMode(PIN_LIMIT_POS, INPUT_PULLUP);
   pinMode(PIN_LIMIT_NEG, INPUT_PULLUP);
+  unsigned long limitInitUs = micros();
+  initializeQualifiedLimit(
+      &positiveLimitInput,
+      digitalRead(PIN_LIMIT_POS) == POS_LIMIT_ACTIVE_LEVEL,
+      limitInitUs);
+  initializeQualifiedLimit(
+      &negativeLimitInput,
+      digitalRead(PIN_LIMIT_NEG) == NEG_LIMIT_ACTIVE_LEVEL,
+      limitInitUs);
   // Set the output latch LOW before enabling the pin driver so D9 cannot
   // produce an enable glitch during setup.
   digitalWrite(PIN_DRIVER_ENABLE_NEG, DRIVER_OUTPUT_DISABLED_LEVEL);
@@ -974,13 +1232,8 @@ void setup() {
   driverOutputEnabled = false;
   d4OffObservedSinceBoot = digitalRead(PIN_RUN) == HIGH;
 
-  stepper.setMaxSpeed((float)MAX_SPEED_SPS);
-  stepper.setAcceleration(FIXED_ACCELERATION_SPS2);
-  stepper.setMinPulseWidth(5);
-  stepper.setPinsInverted(false, false, false);
-
   // Timer1 CTC at F_CPU/64. The compare interrupt remains disabled until an
-  // authorized Local Velocity run has completed the 200 ms driver wake-up.
+  // authorized motion in either mode has completed the 200 ms driver wake-up.
   TCCR1A = 0;
   TCCR1B = _BV(WGM12) | _BV(CS11) | _BV(CS10);
   TIMSK1 &= ~_BV(OCIE1A);
@@ -989,7 +1242,8 @@ void setup() {
   Serial.println(F("Stepper ready in stopped Local Velocity mode."));
   Serial.println(F("D4/D5 run Local Velocity; Web Position uses D4 arm and D5 direction."));
   Serial.println(F("USB and Yún-Linux controls share V1 S, M, H, G, X, E1, E0."));
-  Serial.println(F("DIR is fixed Normal; D9 disables DM542T holding current while stopped."));
+  Serial.println(F("Timer1 owns Local/Web/Home STEP timing; DIR is fixed Normal."));
+  Serial.println(F("D9 disables DM542T holding current while stopped."));
   reportLimitLevels(digitalRead(PIN_LIMIT_POS), digitalRead(PIN_LIMIT_NEG));
 }
 
@@ -1014,8 +1268,15 @@ void loop() {
   releaseExpiredOwner();
   bool d4MotionArmed = d4On && d4OffObservedSinceBoot;
   bool d5Reverse = directionRaw == LOW;
-  bool positiveLimitActive = positiveRaw == POS_LIMIT_ACTIVE_LEVEL;
-  bool negativeLimitActive = negativeRaw == NEG_LIMIT_ACTIVE_LEVEL;
+  unsigned long limitNowUs = micros();
+  bool positiveLimitActive = updateQualifiedLimit(
+      &positiveLimitInput,
+      positiveRaw == POS_LIMIT_ACTIVE_LEVEL,
+      limitNowUs);
+  bool negativeLimitActive = updateQualifiedLimit(
+      &negativeLimitInput,
+      negativeRaw == NEG_LIMIT_ACTIVE_LEVEL,
+      limitNowUs);
 
   static int lastPositiveRaw = -1;
   static int lastNegativeRaw = -1;
@@ -1038,7 +1299,6 @@ void loop() {
     if (activeWebMotion || motionState != STATE_EMERGENCY_STOP) {
       stopStepperImmediately();
     }
-    stepper.setSpeed(0.0);
     disableDriverOutput();
     blocked = true;
     statusReason = "emergency_stop";
@@ -1055,25 +1315,34 @@ void loop() {
     if (blocked) {
       statusReason = physicalLimitReason(physicalDirection);
       motionState = STATE_LIMIT_BLOCKED;
-      stepper.setSpeed(0.0);
       disableDriverOutput();
     } else if (!d4MotionArmed) {
       statusReason = d4On ? "boot_disarmed" : "run_off";
       motionState = STATE_LOCAL_STOPPED;
-      stepper.setSpeed(0.0);
       disableDriverOutput();
     } else if (!driverReadyForMotion()) {
       statusReason = "driver_wakeup";
       motionState = STATE_LOCAL_STOPPED;
-      stepper.setSpeed(0.0);
+      stopPulseEngine();
     } else {
       statusReason = "none";
       motionState = STATE_LOCAL_MOVING;
-      effectivePhysicalSpeedSps = physicalDirection * targetSpeedSps;
-      startLocalPulseTimer(effectivePhysicalSpeedSps);
-      moving = localPulseTimerIsEnabled();
-      // The Timer1 pulse counter is synchronized back into AccelStepper when
-      // Local Velocity stops. Position is diagnostic open-loop telemetry only.
+      if (!pulseEngineMatches(
+              PULSE_ENGINE_LOCAL,
+              physicalDirection,
+              0L,
+              targetSpeedSps)) {
+        startPulseEngine(
+            PULSE_ENGINE_LOCAL,
+            physicalDirection,
+            false,
+            0L,
+            targetSpeedSps);
+      }
+      updatePulseEngineRamp();
+      effectivePhysicalSpeedSps = pulseEngineSignedScheduledSpeed();
+      moving = pulseEngineIsEnabled();
+      // Position is diagnostic open-loop telemetry only.
       reportedTargetSteps = currentPulsePosition();
     }
     motionReason = statusReason;
@@ -1092,8 +1361,8 @@ void loop() {
                      negativeLimitActive)) {
         if (activePhysicalDirection < 0 &&
             (homingMotion || motionState == STATE_HOMING)) {
-          establishD8Reference();
           stopStepperImmediately();
+          establishD8Reference();
           motionState = STATE_WEB_READY;
           motionReason = "home_complete";
           statusDirty = true;
@@ -1104,22 +1373,54 @@ void loop() {
         }
       } else if (!driverReadyForMotion()) {
         statusReason = "driver_wakeup";
+        stopPulseEngine();
       } else {
         motionReason = "none";
-        stepper.run();
-        moving = true;
-        effectivePhysicalSpeedSps = (long)stepper.speed();
-        if (stepper.distanceToGo() == 0) {
+        if (pulseEngineTargetWasReached()) {
+          long finalPosition = currentPulsePosition();
+          bool exhaustedHomeSearch = homingMotion;
+          stopPulseEngine();
           activeWebMotion = false;
           homingMotion = false;
           activePhysicalDirection = 0;
           moving = false;
           effectivePhysicalSpeedSps = 0L;
-          reportedTargetSteps = stepper.currentPosition();
-          motionState = STATE_WEB_COMPLETED;
-          motionReason = "move_complete";
+          reportedTargetSteps = finalPosition;
+          activePulseTargetSteps = finalPosition;
+          motionState = exhaustedHomeSearch
+              ? STATE_WEB_ABORTED
+              : STATE_WEB_COMPLETED;
+          motionReason = exhaustedHomeSearch
+              ? "home_search_exhausted"
+              : "move_complete";
           disableDriverOutput();
           statusDirty = true;
+        } else {
+          PulseEngineMode requiredMode = homingMotion
+              ? PULSE_ENGINE_HOME
+              : PULSE_ENGINE_POSITION;
+          long requiredSpeedSps = homingMotion
+              ? HOME_SPEED_SPS
+              : targetSpeedSps;
+          bool engineMatches = pulseEngineMatches(
+              requiredMode,
+              activePhysicalDirection,
+              activePulseTargetSteps,
+              requiredSpeedSps);
+          // If the ISR reached the finite target between the earlier check and
+          // this point, leave it stopped for completion handling next loop.
+          // Never restart a just-completed bounded move.
+          if (!engineMatches && !pulseEngineTargetWasReached()) {
+            startPulseEngine(
+                requiredMode,
+                activePhysicalDirection,
+                true,
+                activePulseTargetSteps,
+                requiredSpeedSps);
+          }
+          updatePulseEngineRamp();
+          moving = pulseEngineIsEnabled();
+          effectivePhysicalSpeedSps = pulseEngineSignedScheduledSpeed();
         }
       }
     }

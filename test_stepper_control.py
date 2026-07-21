@@ -221,11 +221,17 @@ class UsbStepperSourceTests(unittest.TestCase):
         '"lp":0,"ln":0,"b":1,"r":"emergency_stop","sps":0,"csps":378,"ds":1,"en":0,'
         '"m":0,"h":0,"a":1,"e":1,"mv":0,"st":9,"p":0,"g":0,"c":0}'
     )
+    FILTERED_RAW_D6_GLITCH = (
+        '{"v":1,"t":"s","q":24,"d4":1,"d5":1,"d6":0,"d8":1,'
+        '"lx":515,"lp":0,"ln":0,"b":0,"r":"run_off","sps":0,'
+        '"csps":378,"ds":1,"en":0,"ut":1}'
+    )
 
     def test_firmware_locks_direction_and_centralizes_physical_interlocks(self) -> None:
         firmware = Path(__file__).with_name("limit_switch_palas.ino").read_text()
         self.assertIn("const int FIXED_DIRECTION_SIGN = 1;", firmware)
-        self.assertIn("stepper.setPinsInverted(false, false, false);", firmware)
+        self.assertNotIn("#include <AccelStepper.h>", firmware)
+        self.assertNotIn("stepper.run()", firmware)
         self.assertNotIn("V1 D0", firmware)
         self.assertNotIn("V1 D1", firmware)
         self.assertNotIn("directionSign", firmware)
@@ -249,12 +255,102 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertIn("void serviceTransports()", firmware)
         self.assertNotIn("Serial.println(line);", firmware)
         self.assertIn("ISR(TIMER1_COMPA_vect)", firmware)
-        self.assertIn("startLocalPulseTimer(effectivePhysicalSpeedSps);", firmware)
-        self.assertIn("stopLocalPulseTimerAndSync();", firmware)
+        self.assertIn("PULSE_ENGINE_LOCAL", firmware)
+        self.assertIn("PULSE_ENGINE_POSITION", firmware)
+        self.assertIn("PULSE_ENGINE_HOME", firmware)
+        self.assertGreaterEqual(firmware.count("startPulseEngine("), 3)
+        self.assertIn("pulseTimerPosition >= pulseTimerTarget", firmware)
+        self.assertIn("pulseTimerPosition <= pulseTimerTarget", firmware)
+        self.assertIn("OCR1A = pulseTimerPendingCompare;", firmware)
+        self.assertIn("void updatePulseEngineRamp()", firmware)
+        self.assertIn("2.0 * FIXED_ACCELERATION_SPS2", firmware)
+        self.assertNotIn("startLocalPulseTimer", firmware)
+        self.assertIn(
+            "const unsigned long LIMIT_ASSERT_QUALIFY_US = 5000UL;",
+            firmware,
+        )
+        qualifier_body = firmware.split("bool updateQualifiedLimit", 1)[1].split(
+            "void updatePhysicalEndpointLatches", 1
+        )[0]
+        self.assertIn(
+            "nowUs - input->assertionStartedUs >= LIMIT_ASSERT_QUALIFY_US",
+            qualifier_body,
+        )
+        self.assertIn("input->rejectedGlitches < 255", qualifier_body)
+        self.assertNotIn("delay(", qualifier_body)
+        self.assertIn('\\"lx\\":%lu', firmware)
+        self.assertIn("const unsigned int STATUS_FRAME_SIZE = 288;", firmware)
         stop_body = firmware.split("void stopStepperImmediately()", 1)[1].split(
             "void abortWebMotion", 1
         )[0]
+        self.assertIn("stopPulseEngine();", stop_body)
         self.assertIn("disableDriverOutput();", stop_body)
+
+    def test_unified_timer_compare_quantization_matches_commanded_cruise(self) -> None:
+        timer_hz = 16_000_000 // 64
+        for requested_sps in (378, 504, 756, 1260, 2520):
+            with self.subTest(requested_sps=requested_sps):
+                ticks = (timer_hz + requested_sps // 2) // requested_sps
+                emitted_sps = timer_hz / ticks
+                self.assertLess(
+                    abs(emitted_sps - requested_sps) / requested_sps,
+                    0.0025,
+                )
+
+    def test_unified_timer_profile_keeps_short_and_long_targets_exact(self) -> None:
+        acceleration_sps2 = 1260.0
+        cruise_sps = 1260.0
+        for target_pulses in (1, 25, 252, 10_000):
+            with self.subTest(target_pulses=target_pulses):
+                position = 0
+                speed_sps = min(cruise_sps, 50.0)
+                peak_sps = speed_sps
+                while position < target_pulses:
+                    remaining = target_pulses - position
+                    braking_sps = math.sqrt(2.0 * acceleration_sps2 * remaining)
+                    desired_sps = min(cruise_sps, braking_sps)
+                    max_change_sps = acceleration_sps2 / max(speed_sps, 1.0)
+                    if speed_sps < desired_sps:
+                        speed_sps = min(desired_sps, speed_sps + max_change_sps)
+                    else:
+                        speed_sps = max(desired_sps, speed_sps - max_change_sps)
+                    peak_sps = max(peak_sps, speed_sps)
+                    position += 1
+                self.assertEqual(position, target_pulses)
+                self.assertLessEqual(peak_sps, cruise_sps)
+                if target_pulses <= 252:
+                    self.assertLess(peak_sps, cruise_sps)
+                else:
+                    self.assertAlmostEqual(peak_sps, cruise_sps)
+
+    def test_qualified_limit_state_is_distinct_from_raw_and_counts_glitches(self) -> None:
+        status = UsbStepperSource.decode_status_line(self.FILTERED_RAW_D6_GLITCH)
+        self.assertEqual(status["stepper_d6_raw"], "LOW")
+        self.assertFalse(status["stepper_positive_limit_active"])
+        self.assertFalse(status["stepper_positive_limit_latched"])
+        self.assertTrue(status["stepper_limit_filter_capable"])
+        self.assertTrue(status["stepper_unified_timer_capable"])
+        self.assertEqual(status["stepper_limit_qualification_ms"], 5.0)
+        self.assertEqual(status["stepper_positive_limit_glitch_count"], 2)
+        self.assertEqual(status["stepper_negative_limit_glitch_count"], 3)
+
+        qualified = UsbStepperSource.decode_status_line(
+            self.FILTERED_RAW_D6_GLITCH.replace('"lx":515', '"lx":131587')
+        )
+        self.assertTrue(qualified["stepper_positive_limit_active"])
+
+    def test_compact_status_numeric_worst_case_fits_transport_frame(self) -> None:
+        # Mirror the compact protocol's longest numeric representations. The
+        # shared AVR buffer must still have room for newline and NUL.
+        frame = (
+            '{"v":1,"t":"s","q":4294967295,"d4":1,"d5":1,'
+            '"d6":1,"d8":1,"lx":262143,"lp":1,"ln":1,"b":1,'
+            '"r":"negative_limit","sps":-2147483648,"csps":2520,'
+            '"aps":2147483647,"ds":1,"en":1,"ut":1,"m":1,"h":1,"a":1,'
+            '"e":1,"mv":1,"st":9,"p":-2147483648,"g":-2147483648,'
+            '"c":65535,"o":2}'
+        )
+        self.assertLessEqual(len(frame) + 2, 288)
 
     def test_decodes_forward_blocked_by_positive_limit(self) -> None:
         status = UsbStepperSource.decode_status_line(self.FORWARD_BLOCKED)
@@ -343,6 +439,9 @@ class UsbStepperSourceTests(unittest.TestCase):
             self.FORWARD_BLOCKED.replace('"en":0', '"en":1'),
             self.REVERSE_MOVING.replace('"aps":350', '"aps":true'),
             self.REVERSE_MOVING.replace('"aps":350', '"aps":-1'),
+            self.FILTERED_RAW_D6_GLITCH.replace('"lx":515', '"lx":true'),
+            self.FILTERED_RAW_D6_GLITCH.replace('"lx":515', '"lx":262144'),
+            self.FILTERED_RAW_D6_GLITCH.replace('"ut":1', '"ut":0'),
             self.WEB_READY_FORWARD_ARMED.replace('"st":5', '"st":10'),
             self.WEB_READY_FORWARD_ARMED.replace('"p":1000', '"p":true'),
         )
@@ -355,6 +454,9 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertFalse(legacy["stepper_pulse_measurement_capable"])
         self.assertIsNone(legacy["stepper_measured_pulse_rate_sps"])
         self.assertIsNone(legacy["stepper_measured_speed_mm_s"])
+        self.assertFalse(legacy["stepper_limit_filter_capable"])
+        self.assertIsNone(legacy["stepper_positive_limit_glitch_count"])
+        self.assertFalse(legacy["stepper_unified_timer_capable"])
 
     def test_reads_latest_status_from_usb_like_pseudo_terminal(self) -> None:
         master_fd, slave_fd = pty.openpty()
@@ -769,11 +871,36 @@ class NetworkStepperSourceTests(unittest.TestCase):
 
 
 class UsbStepperDashboardTests(unittest.TestCase):
+    def test_web_position_spacebar_uses_guarded_move_stop_actions(self) -> None:
+        self.assertIn('id="stepperMove"', INDEX_HTML)
+        self.assertIn('id="stepperStop"', INDEX_HTML)
+        self.assertEqual(INDEX_HTML.count('aria-keyshortcuts="Space"'), 2)
+        self.assertIn('const spacePressed = event.code === "Space" || event.key === " ";', INDEX_HTML)
+        self.assertIn('latest?.stepper_control_mode === "web_position"', INDEX_HTML)
+        self.assertIn('const actionButton = moving ? els.stepperStop : els.stepperMove;', INDEX_HTML)
+        self.assertIn('if (!actionButton || actionButton.hidden || actionButton.disabled) return;', INDEX_HTML)
+        self.assertIn('void requestStepperMove()', INDEX_HTML)
+        self.assertIn('void requestStepperStop()', INDEX_HTML)
+        self.assertIn('["INPUT", "TEXTAREA", "SELECT"].includes(tagName)', INDEX_HTML)
+        self.assertIn('const activatingControl = ["BUTTON", "A"].includes(tagName);', INDEX_HTML)
+        self.assertIn('event.defaultPrevented || event.repeat', INDEX_HTML)
+        self.assertIn('event.ctrlKey || event.altKey || event.metaKey || event.shiftKey', INDEX_HTML)
+        self.assertIn('let stepperMotionRequestPending = false;', INDEX_HTML)
+        self.assertIn('stepperMotionRequestPending = "move";', INDEX_HTML)
+        self.assertIn('stepperMotionRequestPending = "stop";', INDEX_HTML)
+
     def test_dashboard_separates_scheduled_and_measured_step_output(self) -> None:
         self.assertIn("Scheduled speed", INDEX_HTML)
         self.assertIn('id="stepperMeasuredSpeed"', INDEX_HTML)
         self.assertIn("stepper_measured_pulse_rate_sps", INDEX_HTML)
         self.assertIn("stepper_measured_speed_mm_s", INDEX_HTML)
+        self.assertIn('id="stepperPulseEngine"', INDEX_HTML)
+        self.assertIn("stepper_unified_timer_capable", INDEX_HTML)
+        self.assertIn('id="stepperLimitFilter"', INDEX_HTML)
+        self.assertIn("stepper_limit_qualification_ms", INDEX_HTML)
+        self.assertIn("stepper_positive_limit_glitch_count", INDEX_HTML)
+        self.assertIn("stepper_negative_limit_glitch_count", INDEX_HTML)
+        self.assertIn("/ raw ${latest.stepper_d6_raw", INDEX_HTML)
 
     def test_dashboard_exposes_and_latches_simulated_software_estop(self) -> None:
         self.assertIn('id="emergencyStop"', INDEX_HTML)

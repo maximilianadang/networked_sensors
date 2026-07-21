@@ -1024,3 +1024,172 @@ attachment response are unchanged; only browser navigation behavior changes.
 old location assignment and requires the isolated anchor click/remove sequence.
 All 10 focused dashboard/ESP32 tests and the complete 48-test desktop suite
 pass.
+
+## Turn - light dashboard theme
+
+**Direction given:** finish converting the laptop dashboard to light mode while
+preserving the operator's initial root-palette edits.
+
+**READ / INFER:** changing only `color-scheme` and the six base colors left
+buttons, form controls, toggles, the sticky header, and all canvas plots with
+hard-coded dark fills. The canvas colors are JavaScript drawing state, so CSS
+alone cannot make the complete live page light.
+
+**DE-RISK / executed:** retained the operator's light base palette, moved the
+remaining controls and panel shadows onto light theme variables, and added
+higher-contrast plot colors specifically for a white background. Canvas fill,
+grid, label, and series colors now resolve from the same CSS theme at draw time.
+Strong green/red safety and action semantics remain distinct.
+
+**Verification boundary:** a dashboard contract now requires light browser
+controls and CSS-driven light canvas rendering and rejects the former dark
+canvas/control fills. All 11 focused dashboard/ESP32 tests and the complete
+49-test desktop suite pass. No API, source, firmware, or run-protocol contract
+changed.
+
+## Turn - guarded Web Position Space shortcut
+
+**Direction given:** make Space control the Web Position Move and Stop buttons
+with the same field-editing protections as numeric solenoid shortcuts.
+
+**READ / INFER:** Move was a form-submit-only action and Stop had a separate
+click handler. Calling button clicks from a global handler would share most
+guards, but Space on an already focused button has native activation behavior;
+overriding a focused SOFTWARE E-STOP would be unsafe. A Move request also needs
+an in-flight lock without hiding Stop after firmware status confirms motion.
+
+**DE-RISK / executed:** factored Move and Stop into shared guarded functions
+used by both buttons and Space. The shortcut operates only in Web Position,
+chooses Move while idle and Stop while moving, and requires the selected action
+to be visible and enabled. Editable fields, focused buttons/links, repeats,
+modifiers, and duplicate pending actions suppress it. Both controls advertise
+Space visibly and through `aria-keyshortcuts`; confirmed motion keeps Stop
+available even while the corresponding Move HTTP response is outstanding.
+
+**Verification boundary:** the new dashboard contract checks conditional
+Move/Stop routing, shared functions, field and focused-control guards,
+visibility/disabled checks, modifier/repeat suppression, and in-flight command
+state. All 38 stepper tests and the complete 50-test desktop suite pass;
+compile and generated-protocol checks pass. Physical keyboard-to-motion and
+focused-E-STOP behavior remain explicit bench checks.
+
+## Turn - prioritize the Yún operator panel
+
+**Direction given:** swap the vertical placement of Yún Stepper Motion with the
+Test Metadata/Sources row.
+
+**Executed:** moved the existing full-width stepper article ahead of both
+secondary panels in the HTML grid. IDs, forms, event handlers, responsive grid
+rules, and source/motion behavior are unchanged. Reordering markup rather than
+using CSS `order` keeps visual order aligned with keyboard and screen-reader
+navigation.
+
+**Verification boundary:** the dashboard presentation contract asserts that
+the stepper heading precedes both Test Metadata and Sources. The existing
+50-test suite count is unchanged; no API, firmware, or protocol behavior
+changed.
+
+## Turn - qualify transient Yún magnetic-limit assertions
+
+**Direction given:** investigate intermittent mid-stroke endpoint latches and,
+after reviewing the latency/complexity trade, implement the bounded correction
+under the repository's rigorous software-management mandate.
+
+**READ / evidence:** firmware previously converted one loop's raw D6 or D8 LOW
+directly into both the active safety input and a persistent endpoint latch.
+Neither USB, the Yún HTTP bridge, nor the dashboard synthesized that state. Two
+saved recordings contain the signature: a clear frame followed by a sequence
+gap and then a latched endpoint while the next retained raw frame is already
+HIGH. The events occurred shortly after driver enable or initial motion, which
+is consistent with an electrical transient coupled into an `INPUT_PULLUP` line.
+The latest-frame bridge can legitimately overwrite the short raw frame while
+the firmware latch persists, explaining why the page appeared to latch without
+an active physical switch.
+
+**DE-RISK / executed:** D6 and D8 now have independent, non-blocking assertion
+state machines. A raw LOW must remain continuous for 5 ms before it becomes a
+qualified active limit, can stop motion, or can update the persistent endpoint
+latch. Raw HIGH releases qualified-active immediately, but does not erase a
+confirmed directional latch. At the 10 mm/s maximum the bounded detection delay
+adds no more than 0.05 mm of travel. `micros()` subtraction is rollover-safe;
+there is no `delay()`, extra LAN round trip, or change to STEP scheduling.
+
+Each rejected short assertion increments a saturating per-input counter. The
+new compact optional `lx` field packs D6/D8 qualified state and both counters;
+the values are expanded into stable USB/network schema, recorder columns, and a
+read-only Interlocks row. Counters are diagnostic only and are never read by
+the firmware's motion-decision path. Older frames without `lx` remain observable
+with their historical raw-equals-active semantics. The status buffer is now a
+shared named 288-byte bound, and formatting fails closed instead of forwarding
+truncated JSON.
+
+**Verification boundary:** decoder tests distinguish raw LOW from qualified
+active, validate counter unpacking and malformed `lx`, enforce the non-blocking
+firmware contract, and check the numeric worst-case status length. All 40
+stepper tests and the complete 52-test desktop suite pass; Python compilation
+and the generated-protocol check pass. The pinned Arduino AVR 1.8.8 /
+AccelStepper 1.64.0 build uses 22,692 bytes/79% flash and 1,509 bytes/58% RAM.
+No Yún was visible over USB, so upload, stopped USB/LAN parity, and the physical
+endpoint/rejected-edge matrix remain explicitly pending.
+
+## Turn - Web Position emitted-rate deficit
+
+**Observation:** in Web Position, approximately 1.75 mm/s must be commanded to
+measure 1.5 mm/s, 2.4 to measure 2.0, and 4.0 to measure 3.0. Local Velocity's
+earlier hardware-timer correction was expected to have solved pulse timing.
+
+**READ / root cause:** Timer1 currently owns only Local Velocity. Web Position
+and Home retain cooperative `AccelStepper::run()` so that the library supplies
+target-count termination and acceleration. AccelStepper emits at most one pulse
+per call and assigns `_lastStepTime` to the late call time; it explicitly does
+not account for the time spent or missed around a step. Therefore main-loop
+lateness is accumulated once per pulse instead of being recovered.
+
+Using the calibrated 0.00396875 mm/pulse, the three field pairs correspond to
+requested/actual rates of 441/378, 605/504, and 1008/756 pulses/s. Their period
+differences are approximately 378, 331, and 331 microseconds per pulse. The
+consistent added interval is direct evidence of cooperative scheduling loss,
+not an incorrect distance conversion. Fixed acceleration may additionally
+reduce the average of a short move, but it does not explain this repeated
+steady-rate signature.
+
+**Decision boundary:** do not introduce a nonlinear UI correction factor or
+alter millimetres per driver pulse. The pending correction is a timer-backed
+bounded-move engine that preserves exact pulse count, bounded ramps, all local
+interlocks, driver wake/disable, and status parity. No motion code was changed
+in this diagnostic turn.
+
+## Turn - unify all STEP scheduling on Timer1
+
+**Direction given:** the same commanded motor speed must not use two different
+implementations. Replace the cooperative Web Position/Home scheduler with the
+same hardware-timer foundation as Local Velocity.
+
+**DE-RISK / executed:** Timer1 is now the sole owner of STEP edges for Local
+Velocity, relative Web Position, and Home. The modes differ only in authority
+and termination: Local Velocity is indefinite, while Web Position and Home
+provide a signed finite target. The compare ISR updates the signed pulse
+counter and disables itself on the exact target pulse. A single non-blocking
+1 ms ramp controller supplies the fixed 1260 pulse/s² acceleration and the
+finite-move braking bound `sqrt(2*a*remaining)`; pending compare values become
+active only at a pulse boundary. Delayed controller updates are capped at 10 ms
+instead of being allowed to produce a large speed jump.
+
+All established guards remain outside and above that shared pulse engine: D4
+authority, D5 direction, 5 ms qualified D6/D8 endpoint inputs, stale-opposite
+latch correction, software E-STOP, immediate abort, D9 driver disable, and the
+200 ms enable wake-up. Home exhaustion now aborts explicitly instead of being
+reported as a successful move. The status frame adds optional `ut:1`; adapters
+and the dashboard show whether the connected firmware has the unified engine,
+while an older frame without `ut` remains readable and is identified as legacy
+split scheduling. The AccelStepper dependency and cooperative `run()` path are
+removed rather than retained as an alternative implementation.
+
+**Verification boundary:** static firmware contracts require one Timer1 owner,
+exact ISR target termination, and pulse-boundary compare changes. Numeric tests
+cover timer quantization at 1.5, 2, 3, 5, and 10 mm/s plus exact short/long
+finite pulse counts and ramp behavior. All 42 stepper tests and the complete
+54-test desktop suite pass. Arduino CLI 1.4.0 with AVR core 1.8.8 compiles the
+Yún target without an external library at 20,222 bytes/70% flash and 1,457
+bytes/56% RAM. Upload, physical cruise-rate comparison, exact finite travel,
+both directional endpoint retreats, and Home remain hardware acceptance checks.

@@ -98,19 +98,31 @@ INDEX_HTML = r"""<!doctype html>
   <title>Flow Management Supervisor</title>
   <style>
     :root {
-      color-scheme: dark;
-      --bg: #101114;
-      --surface: #181b20;
-      --surface-2: #20242b;
-      --line: #303844;
-      --text: #f2f5f8;
-      --muted: #9ba8b6;
+      color-scheme: light;
+      --bg: #ffffff;
+      --surface: #f5f5f5;
+      --surface-2: #ebebeb;
+      --line: #d0d0d0;
+      --text: #111111;
+      --muted: #666666;
       --green: #36c275;
       --blue: #4aa3ff;
       --amber: #f2b84b;
       --red: #ff6b6b;
       --violet: #a78bfa;
-      --shadow: rgba(0, 0, 0, 0.32);
+      --control: #ffffff;
+      --control-hover: #e1e5e9;
+      --control-line: #aeb7c2;
+      --chart-bg: #ffffff;
+      --chart-grid: #d8dee6;
+      --chart-label: #596574;
+      --chart-blue: #1769aa;
+      --chart-green: #177a45;
+      --chart-amber: #a35d00;
+      --chart-red: #bd3541;
+      --chart-cyan: #087f8c;
+      --chart-violet: #7040b8;
+      --shadow: rgba(15, 23, 42, 0.10);
     }
 
     * {
@@ -149,7 +161,7 @@ INDEX_HTML = r"""<!doctype html>
       min-height: 38px;
       border: 1px solid var(--line);
       border-radius: 7px;
-      background: #242a32;
+      background: var(--surface-2);
       color: var(--text);
       cursor: pointer;
       padding: 0 14px;
@@ -157,8 +169,8 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     button:hover {
-      border-color: #5a6776;
-      background: #2b323d;
+      border-color: var(--control-line);
+      background: var(--control-hover);
     }
 
     button:active {
@@ -166,13 +178,20 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     button.primary {
+      color: #fff;
       background: #1f7a4c;
       border-color: #299a60;
     }
 
     button.stop {
+      color: #fff;
       background: #7b2c31;
       border-color: #a53c43;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
     }
 
     .emergency-actions {
@@ -198,7 +217,7 @@ INDEX_HTML = r"""<!doctype html>
 
     button.emergency-reset {
       min-height: 32px;
-      background: #242a32;
+      background: var(--surface-2);
     }
 
     .emergency-state {
@@ -220,12 +239,12 @@ INDEX_HTML = r"""<!doctype html>
       font-weight: 700;
     }
 
-    button.solenoid kbd {
+    button kbd.shortcut-key {
       margin-left: 0.35rem;
       padding: 1px 5px;
       border: 1px solid currentColor;
       border-radius: 4px;
-      background: rgb(0 0 0 / 18%);
+      background: rgb(0 0 0 / 8%);
       font: inherit;
       font-size: 0.78em;
     }
@@ -237,7 +256,7 @@ INDEX_HTML = r"""<!doctype html>
       min-height: 38px;
       border: 1px solid var(--line);
       border-radius: 6px;
-      background: #0f1217;
+      background: var(--control);
       color: var(--text);
       padding: 8px 10px;
     }
@@ -278,9 +297,9 @@ INDEX_HTML = r"""<!doctype html>
       position: relative;
       width: 46px;
       height: 24px;
-      border: 1px solid #5a6776;
+      border: 1px solid var(--control-line);
       border-radius: 999px;
-      background: #242a32;
+      background: #d7dce2;
       transition: background 120ms ease, border-color 120ms ease;
     }
 
@@ -292,13 +311,14 @@ INDEX_HTML = r"""<!doctype html>
       width: 16px;
       height: 16px;
       border-radius: 50%;
-      background: var(--text);
+      background: #ffffff;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.28);
       transition: transform 120ms ease;
     }
 
     .toggle-control input:checked + .toggle-track {
       border-color: var(--blue);
-      background: #1f5f99;
+      background: var(--blue);
     }
 
     .toggle-control input:checked + .toggle-track::after {
@@ -322,8 +342,8 @@ INDEX_HTML = r"""<!doctype html>
       align-items: center;
       padding: 18px clamp(16px, 3vw, 32px);
       border-bottom: 1px solid var(--line);
-      background: #13161a;
-      box-shadow: 0 12px 30px var(--shadow);
+      background: var(--control);
+      box-shadow: 0 4px 16px var(--shadow);
       position: sticky;
       top: 0;
       z-index: 10;
@@ -442,7 +462,7 @@ INDEX_HTML = r"""<!doctype html>
       padding: 13px;
       display: grid;
       align-content: space-between;
-      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+      box-shadow: 0 3px 12px var(--shadow);
     }
 
     .metric label {
@@ -475,7 +495,7 @@ INDEX_HTML = r"""<!doctype html>
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--surface);
-      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+      box-shadow: 0 3px 12px var(--shadow);
     }
 
     .plot-head,
@@ -521,6 +541,7 @@ INDEX_HTML = r"""<!doctype html>
       display: block;
       width: 100%;
       height: 260px;
+      background: var(--chart-bg);
     }
 
     .lower-grid {
@@ -668,10 +689,10 @@ INDEX_HTML = r"""<!doctype html>
         <button id="exportRun" type="button">Export</button>
       </div>
       <div class="toolbar-actions">
-        <button id="sol0" class="solenoid" type="button" aria-keyshortcuts="1">Solenoid 1 <kbd aria-hidden="true">1</kbd></button>
-        <button id="sol1" class="solenoid" type="button" aria-keyshortcuts="2">Solenoid 2 <kbd aria-hidden="true">2</kbd></button>
-        <button id="sol2" class="solenoid" type="button" aria-keyshortcuts="3">Solenoid 3 <kbd aria-hidden="true">3</kbd></button>
-        <button id="sol3" class="solenoid" type="button" aria-keyshortcuts="4">Solenoid 4 <kbd aria-hidden="true">4</kbd></button>
+        <button id="sol0" class="solenoid" type="button" aria-keyshortcuts="1">Solenoid 1 <kbd class="shortcut-key" aria-hidden="true">1</kbd></button>
+        <button id="sol1" class="solenoid" type="button" aria-keyshortcuts="2">Solenoid 2 <kbd class="shortcut-key" aria-hidden="true">2</kbd></button>
+        <button id="sol2" class="solenoid" type="button" aria-keyshortcuts="3">Solenoid 3 <kbd class="shortcut-key" aria-hidden="true">3</kbd></button>
+        <button id="sol3" class="solenoid" type="button" aria-keyshortcuts="4">Solenoid 4 <kbd class="shortcut-key" aria-hidden="true">4</kbd></button>
       </div>
     </section>
 
@@ -689,9 +710,9 @@ INDEX_HTML = r"""<!doctype html>
         <div class="plot-head">
           <h2>ESP32 Pressure (bar)</h2>
           <div class="legend">
-            <span style="color: var(--blue)"><i class="swatch"></i>P1</span>
-            <span style="color: var(--green)"><i class="swatch"></i>P2</span>
-            <span style="color: var(--amber)"><i class="swatch"></i>P3</span>
+            <span style="color: var(--chart-blue)"><i class="swatch"></i>P1</span>
+            <span style="color: var(--chart-green)"><i class="swatch"></i>P2</span>
+            <span style="color: var(--chart-amber)"><i class="swatch"></i>P3</span>
           </div>
         </div>
         <canvas id="pressureChart" width="900" height="320"></canvas>
@@ -700,8 +721,8 @@ INDEX_HTML = r"""<!doctype html>
         <div class="plot-head">
           <h2>SICK Pressure (bar)</h2>
           <div class="legend">
-            <span style="color: var(--red)"><i class="swatch"></i>SICK 1</span>
-            <span style="color: #22d3ee"><i class="swatch"></i>SICK 2</span>
+            <span style="color: var(--chart-red)"><i class="swatch"></i>SICK 1</span>
+            <span style="color: var(--chart-cyan)"><i class="swatch"></i>SICK 2</span>
           </div>
         </div>
         <canvas id="sickPressureChart" width="900" height="320"></canvas>
@@ -710,10 +731,10 @@ INDEX_HTML = r"""<!doctype html>
         <div class="plot-head">
           <h2>Mass Flow Rate (g/min)</h2>
           <div class="legend">
-            <span style="color: var(--blue)"><i class="swatch"></i>ESP32</span>
-            <span style="color: var(--green)"><i class="swatch"></i>SICK 1</span>
-            <span style="color: var(--amber)"><i class="swatch"></i>SICK 2</span>
-            <span style="color: var(--violet)"><i class="swatch"></i>SICK total</span>
+            <span style="color: var(--chart-blue)"><i class="swatch"></i>ESP32</span>
+            <span style="color: var(--chart-green)"><i class="swatch"></i>SICK 1</span>
+            <span style="color: var(--chart-amber)"><i class="swatch"></i>SICK 2</span>
+            <span style="color: var(--chart-violet)"><i class="swatch"></i>SICK total</span>
           </div>
         </div>
         <canvas id="flowChart" width="900" height="320"></canvas>
@@ -721,6 +742,62 @@ INDEX_HTML = r"""<!doctype html>
     </section>
 
     <section class="lower-grid">
+      <article class="control-panel wide">
+        <div class="panel-head"><h2>Yún Stepper Motion</h2><span class="pill" id="stepperState">Unknown</span></div>
+        <div class="control-body">
+          <form id="stepperForm">
+            <div class="form-grid">
+              <label>Control mode
+                <span class="toggle-control">
+                  <input id="stepperControlMode" type="checkbox" role="switch" aria-label="Enable Web Position mode">
+                  <span class="toggle-track" aria-hidden="true"></span>
+                  <span id="stepperControlModeLabel">Local Velocity</span>
+                </span>
+              </label>
+              <label id="stepperDistanceField" hidden>Relative travel distance (mm)<input id="stepperDistance" name="distance_mm" type="number" step="0.01" min="0.01" max="137.18" value="1.0" required disabled></label>
+              <label><span id="stepperSpeedLabel">Local velocity speed (mm/s)</span><input id="stepperSpeed" name="speed_mm_s" type="number" step="0.1" min="0.1" max="10" value="1.5" required></label>
+              <label id="stepperCommandField" hidden>Command ID (optional)<input id="stepperCommandInput" name="command_id" maxlength="64" autocomplete="off" disabled></label>
+            </div>
+            <div class="form-actions">
+              <button id="stepperMove" class="primary" type="submit" aria-keyshortcuts="Space" hidden>Move <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
+              <button id="stepperHome" type="button" hidden>Move to D8 Limit</button>
+              <button id="stepperStop" class="stop" type="button" aria-keyshortcuts="Space" hidden>Stop Motion <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
+              <button id="stepperApplySpeed" type="button">Apply Local Velocity Speed</button>
+              <span class="pill" id="stepperMessage" aria-live="polite">Simulation only</span>
+            </div>
+          </form>
+          <div class="source-grid">
+            <section class="source-row">
+              <header><h3>Motion</h3></header>
+              <dl>
+                <dt>Source / owner</dt><dd id="stepperOwner">--</dd>
+                <dt>Control mode</dt><dd id="stepperModeStatus">--</dd>
+                <dt>Configured speed</dt><dd id="stepperConfiguredSpeed">--</dd>
+                <dt>Scheduled speed</dt><dd id="stepperEffectiveSpeed">--</dd>
+                <dt>Measured STEP output</dt><dd id="stepperMeasuredSpeed">--</dd>
+                <dt>STEP pulse engine</dt><dd id="stepperPulseEngine">--</dd>
+                <dt>Command</dt><dd id="stepperCommand">--</dd>
+              </dl>
+            </section>
+            <section class="source-row">
+              <header><h3>Interlocks</h3></header>
+              <dl>
+                <dt>Local enable (D4)</dt><dd id="stepperLocal">--</dd>
+                <dt id="stepperD5Label">Manual direction (D5)</dt><dd id="stepperManualDirection">--</dd>
+                <dt>Fixed physical direction</dt><dd id="stepperDirectionStatus">--</dd>
+                <dt>Driver output (D9 / ENA-)</dt><dd id="stepperDriverOutput">--</dd>
+                <dt>Positive limit (D6)</dt><dd id="stepperPositiveLimit">--</dd>
+                <dt>Negative limit (D8)</dt><dd id="stepperNegativeLimit">--</dd>
+                <dt>Limit input filter</dt><dd id="stepperLimitFilter">--</dd>
+                <dt>Motion decision</dt><dd id="stepperBlocked">--</dd>
+                <dt>USB status sequence</dt><dd id="stepperSequence">--</dd>
+                <dt>Transport</dt><dd id="stepperTransport">--</dd>
+              </dl>
+            </section>
+          </div>
+        </div>
+      </article>
+
       <article class="metadata-panel">
         <div class="panel-head"><h2>Test Metadata</h2><span class="pill" id="metadataStatus">Unsaved</span></div>
         <form id="metadataForm">
@@ -768,59 +845,6 @@ INDEX_HTML = r"""<!doctype html>
         </div>
       </article>
 
-      <article class="control-panel wide">
-        <div class="panel-head"><h2>Yún Stepper Motion</h2><span class="pill" id="stepperState">Unknown</span></div>
-        <div class="control-body">
-          <form id="stepperForm">
-            <div class="form-grid">
-              <label>Control mode
-                <span class="toggle-control">
-                  <input id="stepperControlMode" type="checkbox" role="switch" aria-label="Enable Web Position mode">
-                  <span class="toggle-track" aria-hidden="true"></span>
-                  <span id="stepperControlModeLabel">Local Velocity</span>
-                </span>
-              </label>
-              <label id="stepperDistanceField" hidden>Relative travel distance (mm)<input id="stepperDistance" name="distance_mm" type="number" step="0.01" min="0.01" max="137.18" value="1.0" required disabled></label>
-              <label><span id="stepperSpeedLabel">Local velocity speed (mm/s)</span><input id="stepperSpeed" name="speed_mm_s" type="number" step="0.1" min="0.1" max="10" value="1.5" required></label>
-              <label id="stepperCommandField" hidden>Command ID (optional)<input id="stepperCommandInput" name="command_id" maxlength="64" autocomplete="off" disabled></label>
-            </div>
-            <div class="form-actions">
-              <button id="stepperMove" class="primary" type="submit" hidden>Move</button>
-              <button id="stepperHome" type="button" hidden>Move to D8 Limit</button>
-              <button id="stepperStop" class="stop" type="button" hidden>Stop Motion</button>
-              <button id="stepperApplySpeed" type="button">Apply Local Velocity Speed</button>
-              <span class="pill" id="stepperMessage" aria-live="polite">Simulation only</span>
-            </div>
-          </form>
-          <div class="source-grid">
-            <section class="source-row">
-              <header><h3>Motion</h3></header>
-              <dl>
-                <dt>Source / owner</dt><dd id="stepperOwner">--</dd>
-                <dt>Control mode</dt><dd id="stepperModeStatus">--</dd>
-                <dt>Configured speed</dt><dd id="stepperConfiguredSpeed">--</dd>
-                <dt>Scheduled speed</dt><dd id="stepperEffectiveSpeed">--</dd>
-                <dt>Measured STEP output</dt><dd id="stepperMeasuredSpeed">--</dd>
-                <dt>Command</dt><dd id="stepperCommand">--</dd>
-              </dl>
-            </section>
-            <section class="source-row">
-              <header><h3>Interlocks</h3></header>
-              <dl>
-                <dt>Local enable (D4)</dt><dd id="stepperLocal">--</dd>
-                <dt id="stepperD5Label">Manual direction (D5)</dt><dd id="stepperManualDirection">--</dd>
-                <dt>Fixed physical direction</dt><dd id="stepperDirectionStatus">--</dd>
-                <dt>Driver output (D9 / ENA-)</dt><dd id="stepperDriverOutput">--</dd>
-                <dt>Positive limit (D6)</dt><dd id="stepperPositiveLimit">--</dd>
-                <dt>Negative limit (D8)</dt><dd id="stepperNegativeLimit">--</dd>
-                <dt>Motion decision</dt><dd id="stepperBlocked">--</dd>
-                <dt>USB status sequence</dt><dd id="stepperSequence">--</dd>
-                <dt>Transport</dt><dd id="stepperTransport">--</dd>
-              </dl>
-            </section>
-          </div>
-        </div>
-      </article>
     </section>
   </main>
 
@@ -836,6 +860,7 @@ INDEX_HTML = r"""<!doctype html>
     let controlModeRequestPending = false;
     let stepperMessageSticky = false;
     let speedRequestPending = false;
+    let stepperMotionRequestPending = false;
     const pendingSolenoids = new Set();
 
     const els = {};
@@ -851,9 +876,9 @@ INDEX_HTML = r"""<!doctype html>
       "stepperForm", "stepperDistanceField", "stepperDistance", "stepperSpeed", "stepperSpeedLabel", "stepperControlMode", "stepperControlModeLabel",
       "stepperCommandField", "stepperCommandInput", "stepperMove", "stepperHome", "stepperStop", "stepperApplySpeed", "stepperMessage",
       "stepperState",
-      "stepperConfiguredSpeed", "stepperEffectiveSpeed", "stepperMeasuredSpeed", "stepperCommand", "stepperOwner", "stepperModeStatus", "stepperLocal",
+      "stepperConfiguredSpeed", "stepperEffectiveSpeed", "stepperMeasuredSpeed", "stepperPulseEngine", "stepperCommand", "stepperOwner", "stepperModeStatus", "stepperLocal",
       "stepperD5Label", "stepperManualDirection", "stepperDirectionStatus", "stepperDriverOutput", "stepperPositiveLimit", "stepperNegativeLimit",
-      "stepperBlocked", "stepperSequence", "stepperTransport"
+      "stepperLimitFilter", "stepperBlocked", "stepperSequence", "stepperTransport"
     ]) {
       els[id] = document.getElementById(id);
     }
@@ -1027,6 +1052,9 @@ INDEX_HTML = r"""<!doctype html>
       text("stepperMeasuredSpeed", pulseMeasurementCapable
         ? `${numberValue("stepper_measured_speed_mm_s", 3)} mm/s (${numberValue("stepper_measured_pulse_rate_sps", 0)} pulses/s)`
         : "Unavailable — firmware update required");
+      text("stepperPulseEngine", latest.stepper_unified_timer_capable === true
+        ? "Unified Timer1 (Local / Web / Home)"
+        : "Legacy split scheduler — firmware update required");
       text("stepperCommand", latest.stepper_command_id || "--");
       text("stepperLocal", `${localEnabled ? (webPositionMode ? "Armed" : "Running") : (webPositionMode ? "Disarmed" : "Stopped")} / ${latest.stepper_d4_raw || "--"}`);
       text("stepperD5Label", webPositionMode ? "Travel direction (D5)" : "Manual direction (D5)");
@@ -1052,8 +1080,11 @@ INDEX_HTML = r"""<!doctype html>
         : "Unavailable — firmware update required");
       const positiveLatch = latest.stepper_positive_limit_latched ? " / LATCHED" : "";
       const negativeLatch = latest.stepper_negative_limit_latched ? " / LATCHED" : "";
-      text("stepperPositiveLimit", `${latest.stepper_positive_limit_active ? "ACTIVE / LOW" : "Clear / HIGH"}${positiveLatch}`);
-      text("stepperNegativeLimit", `${latest.stepper_negative_limit_active ? "ACTIVE / LOW" : "Clear / HIGH"}${negativeLatch}`);
+      text("stepperPositiveLimit", `${latest.stepper_positive_limit_active ? "ACTIVE" : "Clear"} / raw ${latest.stepper_d6_raw || "--"}${positiveLatch}`);
+      text("stepperNegativeLimit", `${latest.stepper_negative_limit_active ? "ACTIVE" : "Clear"} / raw ${latest.stepper_d8_raw || "--"}${negativeLatch}`);
+      text("stepperLimitFilter", latest.stepper_limit_filter_capable === true
+        ? `${numberValue("stepper_limit_qualification_ms", 0)} ms qualification; rejected D6=${latest.stepper_positive_limit_glitch_count ?? "--"}, D8=${latest.stepper_negative_limit_glitch_count ?? "--"}`
+        : "Unavailable — firmware update required");
       const decisionReason = latest.stepper_blocked_reason || "none";
       const decisionText = estopLatched
         ? "E-STOP LATCHED: motion inhibited"
@@ -1121,6 +1152,10 @@ INDEX_HTML = r"""<!doctype html>
       return [min - pad, max + pad];
     }
 
+    function themeColor(name) {
+      return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    }
+
     function drawChart(canvasId, series) {
       const canvas = document.getElementById(canvasId);
       const ctx = canvas.getContext("2d");
@@ -1133,7 +1168,7 @@ INDEX_HTML = r"""<!doctype html>
         canvas.height = height;
       }
       ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = "#12161b";
+      ctx.fillStyle = themeColor("--chart-bg");
       ctx.fillRect(0, 0, width, height);
       const padL = 54 * ratio;
       const padR = 18 * ratio;
@@ -1142,9 +1177,9 @@ INDEX_HTML = r"""<!doctype html>
       const plotW = width - padL - padR;
       const plotH = height - padT - padB;
 
-      ctx.strokeStyle = "#2f3945";
+      ctx.strokeStyle = themeColor("--chart-grid");
       ctx.lineWidth = 1 * ratio;
-      ctx.fillStyle = "#9ba8b6";
+      ctx.fillStyle = themeColor("--chart-label");
       ctx.font = `${11 * ratio}px system-ui, sans-serif`;
       ctx.textAlign = "right";
       ctx.textBaseline = "middle";
@@ -1191,19 +1226,19 @@ INDEX_HTML = r"""<!doctype html>
 
     function drawAllCharts() {
       drawChart("pressureChart", [
-        {key: "esp32_p1_bar", color: "#4aa3ff"},
-        {key: "esp32_p2_bar", color: "#36c275"},
-        {key: "esp32_p3_bar", color: "#f2b84b"}
+        {key: "esp32_p1_bar", color: themeColor("--chart-blue")},
+        {key: "esp32_p2_bar", color: themeColor("--chart-green")},
+        {key: "esp32_p3_bar", color: themeColor("--chart-amber")}
       ]);
       drawChart("sickPressureChart", [
-        {key: "dxmr90_port1_pressure_bar", color: "#ff6b6b"},
-        {key: "dxmr90_port2_pressure_bar", color: "#22d3ee"}
+        {key: "dxmr90_port1_pressure_bar", color: themeColor("--chart-red")},
+        {key: "dxmr90_port2_pressure_bar", color: themeColor("--chart-cyan")}
       ]);
       drawChart("flowChart", [
-        {key: "esp32_f_combined_gmin", color: "#4aa3ff"},
-        {key: "dxmr90_port1_mass_flow_g_min", color: "#36c275"},
-        {key: "dxmr90_port2_mass_flow_g_min", color: "#f2b84b"},
-        {key: "dxmr90_total_mass_flow_g_min", color: "#a78bfa"}
+        {key: "esp32_f_combined_gmin", color: themeColor("--chart-blue")},
+        {key: "dxmr90_port1_mass_flow_g_min", color: themeColor("--chart-green")},
+        {key: "dxmr90_port2_mass_flow_g_min", color: themeColor("--chart-amber")},
+        {key: "dxmr90_total_mass_flow_g_min", color: themeColor("--chart-violet")}
       ]);
     }
 
@@ -1275,13 +1310,21 @@ INDEX_HTML = r"""<!doctype html>
       text("stepperSpeedLabel", webPositionMode
         ? "Web Position move speed (mm/s)"
         : "Local velocity speed (mm/s)");
-      els.stepperMove.disabled = !commandCapable || !directionCalibrationSafe || !connected || !webPositionMode ||
+      els.stepperMove.disabled = stepperMotionRequestPending !== false || !commandCapable || !directionCalibrationSafe || !connected || !webPositionMode ||
         estopLatched || !enabled || moving || !valid || !directionSelected || positiveBlocked || negativeBlocked;
-      els.stepperStop.disabled = estopLatched || !commandCapable || !webPositionMode || !moving;
-      els.stepperHome.disabled = !homeCapable || !directionCalibrationSafe || !connected || !webPositionMode ||
+      // A confirmed moving state must expose Stop even if the preceding Move
+      // request has not returned yet. Only an in-flight Stop disables Stop.
+      els.stepperStop.disabled = stepperMotionRequestPending === "stop" || estopLatched || !commandCapable || !webPositionMode || !moving;
+      els.stepperHome.disabled = stepperMotionRequestPending !== false || !homeCapable || !directionCalibrationSafe || !connected || !webPositionMode ||
         estopLatched || !enabled || moving || (authorizedDirection !== "reverse" && authorizedDirection !== "both");
-      els.stepperControlMode.disabled = controlModeRequestPending || !directionCalibrationSafe || !modeCommandCapable ||
+      els.stepperControlMode.disabled = stepperMotionRequestPending !== false || controlModeRequestPending || !directionCalibrationSafe || !modeCommandCapable ||
         estopLatched || !connected || !d4Off || moving;
+      els.stepperMove.title = stepperMotionRequestPending !== false
+        ? "Waiting for the current motion command"
+        : "Start the Web Position move (Space while the page has focus)";
+      els.stepperStop.title = stepperMotionRequestPending === "stop"
+        ? "Waiting for Stop confirmation"
+        : "Stop Web Position motion (Space while the page has focus)";
       if (controlModeRequestPending) {
         els.stepperControlMode.title = "Waiting for the Yún to confirm the control mode";
       } else if (!connected) {
@@ -1431,10 +1474,31 @@ INDEX_HTML = r"""<!doctype html>
         target.isContentEditable ||
         ["INPUT", "TEXTAREA", "SELECT"].includes(tagName)
       );
+      // A focused button or link owns its Space-key behavior. In particular,
+      // never turn Space on a focused E-STOP into a global motion command.
+      const activatingControl = ["BUTTON", "A"].includes(tagName);
       if (
-        editing || event.defaultPrevented || event.repeat ||
+        editing || activatingControl || event.defaultPrevented || event.repeat ||
         event.ctrlKey || event.altKey || event.metaKey || event.shiftKey
       ) return;
+
+      const spacePressed = event.code === "Space" || event.key === " ";
+      if (spacePressed) {
+        const webPositionMode = latest?.stepper_control_mode === "web_position";
+        if (!webPositionMode) return;
+        const moving = latest?.stepper_moving === true;
+        if ((moving && stepperMotionRequestPending === "stop") ||
+            (!moving && stepperMotionRequestPending !== false)) return;
+        const actionButton = moving ? els.stepperStop : els.stepperMove;
+        if (!actionButton || actionButton.hidden || actionButton.disabled) return;
+        event.preventDefault();
+        if (moving) {
+          void requestStepperStop();
+        } else {
+          void requestStepperMove();
+        }
+        return;
+      }
 
       const index = Number(event.key) - 1;
       if (!Number.isInteger(index) || index < 0 || index >= solenoidCount) return;
@@ -1504,8 +1568,8 @@ INDEX_HTML = r"""<!doctype html>
         updateStepperControls();
       }
     });
-    els.stepperForm.addEventListener("submit", async event => {
-      event.preventDefault();
+    async function requestStepperMove() {
+      if (els.stepperMove.hidden || els.stepperMove.disabled || stepperMotionRequestPending !== false) return;
       const distance = Number(els.stepperDistance.value);
       const speed = Number(els.stepperSpeed.value);
       const selectedDirection = latest?.stepper_authorized_direction === "both"
@@ -1523,23 +1587,43 @@ INDEX_HTML = r"""<!doctype html>
       };
       const commandId = els.stepperCommandInput.value.trim();
       if (commandId) body.command_id = commandId;
+      stepperMotionRequestPending = "move";
+      updateStepperControls();
       try {
         const payload = await postJson("/api/stepper/move", body);
         text("stepperMessage", `${payload.resolved_direction || selectedDirection} move accepted`);
         if (payload.sample) applySample(payload.sample);
       } catch (error) {
         text("stepperMessage", `Rejected: ${error.message}`);
+      } finally {
+        if (stepperMotionRequestPending === "move") stepperMotionRequestPending = false;
+        updateStepperControls();
       }
+    }
+
+    els.stepperForm.addEventListener("submit", event => {
+      event.preventDefault();
+      void requestStepperMove();
     });
 
-    els.stepperStop.addEventListener("click", async () => {
+    async function requestStepperStop() {
+      if (els.stepperStop.hidden || els.stepperStop.disabled || stepperMotionRequestPending === "stop") return;
+      stepperMotionRequestPending = "stop";
+      updateStepperControls();
       try {
         const payload = await postJson("/api/stepper/stop");
         text("stepperMessage", "Motion stopped");
         if (payload.sample) applySample(payload.sample);
       } catch (error) {
         text("stepperMessage", `Stop failed: ${error.message}`);
+      } finally {
+        if (stepperMotionRequestPending === "stop") stepperMotionRequestPending = false;
+        updateStepperControls();
       }
+    }
+
+    els.stepperStop.addEventListener("click", () => {
+      void requestStepperStop();
     });
 
     els.stepperHome.addEventListener("click", async () => {

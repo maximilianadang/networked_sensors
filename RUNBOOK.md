@@ -313,12 +313,11 @@ travel-away checks before attempting anything faster.
 
 With the instrumented firmware, **Measured STEP output** is calculated from the
 change in the firmware's signed pulse-position counter over a 250 ms window.
-Timer1 advances that counter in Local Velocity; AccelStepper advances it in Web
-Position. It shows both pulses/s and the corresponding magnitude in mm/s.
-Compare it with
-**Configured speed** and **Scheduled speed** during a continuous Local Velocity
-run. A 5 mm/s request should schedule about 1260 pulses/s; the measured field
-reveals how many D3 pulse attempts the firmware actually emitted. This remains
+One Timer1 engine advances that counter in Local Velocity, Web Position, and
+Home. It shows both pulses/s and the corresponding magnitude in mm/s. Compare
+it with **Configured speed** and **Scheduled speed** at the cruise plateau;
+Scheduled is intentionally lower while the fixed ramp accelerates or
+decelerates. A 5 mm/s request should cruise near 1260 pulses/s. This remains
 open-loop electrical evidence: it does not prove that the DM542T accepted every
 pulse or that the piston travelled the converted distance, so retain the DRO
 comparison.
@@ -581,11 +580,11 @@ strict adapter will reject it and report the version error.
 
 Keep the DM542T motor supply off for compilation, upload, and raw limit-input
 characterization. Power the Yún only over USB. The verified board target is
-`arduino:avr:yun`; install its core and the sketch dependency once:
+`arduino:avr:yun`; install its core once. The current sketch has no external
+library dependency:
 
 ```bash
 arduino-cli core install arduino:avr
-arduino-cli lib install AccelStepper
 ```
 
 Arduino requires the main `.ino` name to match its sketch directory. Stage an

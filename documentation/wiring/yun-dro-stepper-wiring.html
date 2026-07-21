@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=2702, initial-scale=1">
+  <title>Arduino Yún + iGaging AbsoluteDRO Plus — physical wiring layout</title>
+  <style>
+    :root {
+      --ink: #111;
+      --muted: #5d6267;
+      --border: #bfc4c7;
+      --v33: #f28c28;
+      --v5: #d92222;
+      --gnd: #17191b;
+      --clock: #146ec8;
+      --data: #7b45b5;
+      --step: #16965c;
+      --dir: #cf9800;
+      --enable: #008b92;
+      --switch: #65717a;
+      --v24: #e27580;
+      --motor: #8b552e;
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      width: 2702px;
+      height: 1530px;
+      margin: 0;
+      overflow: hidden;
+      background: #eef0f1;
+      color: var(--ink);
+      font-family: Arial, Helvetica, sans-serif;
+    }
+
+    .sheet {
+      position: relative;
+      width: 2702px;
+      height: 1530px;
+      overflow: hidden;
+      background: #fff;
+      border: 16px solid #eef0f1;
+    }
+
+    .sheet::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border: 2px solid var(--border);
+      pointer-events: none;
+      z-index: 30;
+    }
+
+    .title {
+      position: absolute;
+      left: 64px;
+      top: 48px;
+      z-index: 12;
+    }
+
+    .title h1 {
+      margin: 0;
+      font-size: 37px;
+      line-height: 1;
+      letter-spacing: .2px;
+      font-weight: 800;
+    }
+
+    .title p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 21px;
+      letter-spacing: 1.5px;
+      font-weight: 700;
+    }
+
+    .key {
+      position: absolute;
+      right: 64px;
+      top: 48px;
+      width: 725px;
+      min-height: 146px;
+      padding: 18px 28px 20px;
+      border: 3px solid #111;
+      background: rgba(255,255,255,.97);
+      z-index: 14;
+    }
+
+    .key h2 {
+      margin: 0 0 11px;
+      text-align: center;
+      font-size: 29px;
+      letter-spacing: 1px;
+    }
+
+    .legend-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+      column-gap: 23px;
+      row-gap: 8px;
+      font-size: 20px;
+      font-weight: 800;
+    }
+
+    .legend-row span { white-space: nowrap; }
+    .v33 { color: var(--v33); }
+    .v5 { color: var(--v5); }
+    .gnd { color: var(--gnd); }
+    .clock { color: var(--clock); }
+    .data { color: var(--data); }
+    .step { color: var(--step); }
+    .dir { color: var(--dir); }
+    .enable { color: var(--enable); }
+    .switch { color: var(--switch); }
+    .v24 { color: var(--v24); }
+    .motor { color: var(--motor); }
+
+    .hardware {
+      position: absolute;
+      object-fit: contain;
+      z-index: 2;
+      user-select: none;
+    }
+
+    .white-photo { mix-blend-mode: multiply; }
+
+    .dro      { left: 30px;   top: 135px; width: 700px; height: 700px; }
+    .cable    { left: 670px;  top: 105px; width: 450px; height: 450px; }
+    .adapter  { left: 1115px; top: 330px; width: 270px; height: 285px; }
+    .shifter  { left: 1440px; top: 315px; width: 360px; height: 360px; }
+    .yun      { left: 1880px; top: 220px; width: 760px; height: 760px; }
+    .driver   { left: 1020px; top: 770px; width: 650px; height: 650px; }
+
+    .hw-label {
+      position: absolute;
+      z-index: 14;
+      padding: 4px 7px;
+      background: #fff;
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: .8px;
+      color: #303438;
+      white-space: nowrap;
+    }
+
+    .hw-label small {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: .2px;
+    }
+
+    .dro-label     { left: 56px;   top: 190px; }
+    .cable-label   { left: 705px;  top: 565px; text-align: center; }
+    .adapter-label { left: 1100px; top: 276px; }
+    .shift-label   { left: 1432px; top: 276px; }
+    .yun-label     { left: 2045px; top: 274px; }
+    .driver-label  { left: 1018px; top: 733px; }
+
+    .connection-labels {
+      position: absolute;
+      left: 70px;
+      top: 870px;
+      width: 850px;
+      z-index: 14;
+      color: #42474b;
+    }
+
+    .connection-labels h3 {
+      margin: 0 0 15px;
+      color: #1c1f21;
+      font-size: 27px;
+      letter-spacing: 1px;
+    }
+
+    .connection-labels p {
+      margin: 10px 0;
+      font-size: 19px;
+      line-height: 1.3;
+      font-weight: 700;
+    }
+
+    .connection-labels b {
+      display: inline-block;
+      min-width: 126px;
+      color: #1c1f21;
+      letter-spacing: .5px;
+    }
+
+    .yun-pin-labels {
+      position: absolute;
+      inset: 0;
+      z-index: 18;
+      pointer-events: none;
+    }
+
+    .yun-pin-labels::before {
+      content: "YÚN PINS";
+      position: absolute;
+      left: 2070px;
+      top: 368px;
+      padding: 4px 7px;
+      background: #fff;
+      color: #34393d;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: .4px;
+    }
+
+    .yun-pin-labels span {
+      position: absolute;
+      left: var(--x);
+      top: var(--y);
+      width: 42px;
+      height: 28px;
+      transform: translateX(-50%);
+      display: grid;
+      place-items: center;
+      border: 2px solid currentColor;
+      border-radius: 3px;
+      background: #fff;
+      font-size: 16px;
+      line-height: 1;
+      font-weight: 900;
+    }
+
+    .yun-power-labels {
+      position: absolute;
+      inset: 0;
+      z-index: 18;
+      pointer-events: none;
+    }
+
+    .yun-power-labels::before {
+      content: "YÚN POWER";
+      position: absolute;
+      left: 2118px;
+      top: 792px;
+      padding: 4px 7px;
+      background: #fff;
+      color: #34393d;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: .4px;
+    }
+
+    .yun-power-labels span {
+      position: absolute;
+      left: var(--x);
+      top: var(--y);
+      width: 48px;
+      height: 28px;
+      transform: translateX(-50%);
+      display: grid;
+      place-items: center;
+      border: 2px solid currentColor;
+      border-radius: 3px;
+      background: #fff;
+      font-size: 15px;
+      line-height: 1;
+      font-weight: 900;
+    }
+
+    svg.wires {
+      position: absolute;
+      inset: 0;
+      width: 2670px;
+      height: 1498px;
+      z-index: 7;
+      overflow: visible;
+      pointer-events: none;
+    }
+
+    .wire {
+      fill: none;
+      stroke-width: 7;
+      stroke-linecap: square;
+      stroke-linejoin: round;
+      filter: url(#wire-halo);
+    }
+
+    .thin { stroke-width: 5; }
+    .cable-wire { stroke: #24272a; stroke-width: 11; }
+    .wire-v33 { stroke: var(--v33); }
+    .wire-v5 { stroke: var(--v5); }
+    .wire-gnd { stroke: var(--gnd); }
+    .wire-clock { stroke: var(--clock); }
+    .wire-data { stroke: var(--data); }
+    .wire-step { stroke: var(--step); }
+    .wire-dir { stroke: var(--dir); }
+    .wire-enable { stroke: var(--enable); }
+    .wire-switch { stroke: var(--switch); }
+    .wire-v24 { stroke: var(--v24); }
+    .wire-motor { stroke: var(--motor); }
+
+    .landing {
+      stroke: #fff;
+      stroke-width: 2.5;
+    }
+
+    .notes {
+      position: absolute;
+      left: 74px;
+      bottom: 52px;
+      width: 825px;
+      z-index: 12;
+      color: #565b60;
+      font-size: 17px;
+      line-height: 1.42;
+    }
+
+    .notes strong { color: #1a1d20; }
+
+    .harness {
+      position: absolute;
+      z-index: 12;
+      color: #42474b;
+    }
+
+    .harness h3 {
+      margin: 0 0 10px;
+      color: #1c1f21;
+      font-size: 21px;
+      letter-spacing: .8px;
+    }
+
+    .harness p {
+      margin: 7px 0;
+      width: max-content;
+      padding: 0 6px;
+      background: rgba(255,255,255,.96);
+      font-size: 17px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .switch-harness { left: 2205px; top: 1015px; width: 400px; }
+    .plant-harness { left: 1788px; top: 1270px; width: 780px; }
+
+    .plant-harness p {
+      display: inline-block;
+      margin-right: 31px;
+    }
+
+    .source-line {
+      position: absolute;
+      right: 60px;
+      bottom: 30px;
+      z-index: 12;
+      color: #858a8d;
+      font-size: 11px;
+    }
+  </style>
+</head>
+<body>
+  <main class="sheet">
+    <header class="title">
+      <h1>ARDUINO YÚN CLOSED-LOOP AXIS</h1>
+      <p>PHYSICAL WIRING LAYOUT · ONE iGAGING ABSOLUTEDRO PLUS AXIS</p>
+    </header>
+
+    <section class="key" aria-label="Wire color key">
+      <h2>KEY</h2>
+      <div class="legend-row">
+        <span class="v33">3.3V</span>
+        <span class="v5">5V</span>
+        <span class="gnd">GND</span>
+        <span class="clock">CLOCK</span>
+        <span class="data">DATA</span>
+        <span class="step">STEP</span>
+        <span class="dir">DIR</span>
+        <span class="enable">ENA</span>
+        <span class="switch">SWITCH</span>
+        <span class="v24">24V</span>
+        <span class="motor">MOTOR</span>
+      </div>
+    </section>
+
+    <img class="hardware white-photo dro" src="assets/igaging-single-axis.jpg" alt="iGaging AbsoluteDRO Plus scale and readout">
+    <img class="hardware white-photo cable" src="assets/micro-usb-mm-cable.jpg" alt="Micro USB male to male cable">
+    <img class="hardware adapter" src="assets/adafruit-3970-cutout-trimmed.png" alt="Adafruit Micro USB terminal adapter with A through E terminals">
+    <img class="hardware white-photo shifter" src="assets/sparkfun-bob-12009.jpg" alt="SparkFun BOB-12009 bidirectional logic level converter">
+    <img class="hardware white-photo yun" src="assets/arduino-yun-rev2-photo.jpg" alt="Arduino Yún Rev2">
+    <img class="hardware white-photo driver" src="assets/dm542t.jpg" alt="StepperOnline DM542T stepper driver">
+
+    <div class="hw-label dro-label">iGAGING ABSOLUTEDRO PLUS<small>Micro-B data port on readout</small></div>
+    <div class="hw-label cable-label">MICRO-B MALE ↔ MALE CABLE<small>5 conductors</small></div>
+    <div class="hw-label adapter-label">MICRO-B BREAKOUT<small>Adafruit 3970 · cable plugs into top</small></div>
+    <div class="hw-label shift-label">LOGIC LEVEL SHIFTER<small>SparkFun BOB-12009 · LV 3.3 V · HV 5 V</small></div>
+    <div class="hw-label yun-label">ARDUINO YÚN REV2</div>
+    <div class="hw-label driver-label">DM542T<small>5 V logic · common-anode inputs</small></div>
+
+    <section class="connection-labels" aria-label="Terminal assignments">
+      <h3>TERMINAL LABELS</h3>
+      <p><b>ADAPTER</b> <span class="v33">A = 3.3V</span> · <span class="clock">B = CLOCK</span> · <span class="data">C = DATA</span> · D + E = GND</p>
+      <p><b>LOW SIDE</b> <span class="clock">B → LV1</span> · <span class="data">C → LV2</span> · <span class="v33">A → LV</span> · D + E → GND</p>
+      <p><b>HIGH SIDE</b> <span class="clock">HV1 → YÚN D10</span> · <span class="data">HV2 → YÚN D11</span> · <span class="v5">HV → 5V</span> · GND → GND</p>
+      <p><b>DRIVER</b> <span class="step">D3 → PUL−</span> · <span class="dir">D2 → DIR−</span> · <span class="enable">D9 → ENA−</span> · <span class="v5">5V → PUL+/DIR+/ENA+</span></p>
+    </section>
+
+    <div class="yun-pin-labels" aria-label="Arduino Yún digital pin numbers aligned with the photographed header">
+      <span class="data" style="--x:2207px; --y:334px" aria-label="D11">D11</span>
+      <span class="clock" style="--x:2232px; --y:366px" aria-label="D10">D10</span>
+      <span class="enable" style="--x:2257px; --y:334px" aria-label="D9">D9</span>
+      <span class="switch" style="--x:2282px; --y:366px" aria-label="D8">D8</span>
+      <span class="switch" style="--x:2344px; --y:334px" aria-label="D6">D6</span>
+      <span class="switch" style="--x:2369px; --y:366px" aria-label="D5">D5</span>
+      <span class="switch" style="--x:2394px; --y:334px" aria-label="D4">D4</span>
+      <span class="step" style="--x:2419px; --y:366px" aria-label="D3">D3</span>
+      <span class="dir" style="--x:2444px; --y:334px" aria-label="D2">D2</span>
+    </div>
+
+    <div class="yun-power-labels" aria-label="Arduino Yún power pins aligned with the photographed header">
+      <span class="v33" style="--x:2267px; --y:760px">3V3</span>
+      <span class="v5" style="--x:2291px; --y:792px">5V</span>
+      <span class="gnd" style="--x:2317px; --y:760px">GND</span>
+    </div>
+
+    <svg class="wires" viewBox="0 0 2670 1498" role="img" aria-label="Physical wire routes between the pictured components">
+      <defs>
+        <!-- A white isolation edge keeps unlike colors visually separate at a crossover. -->
+        <filter id="wire-halo" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
+          <feMorphology in="SourceAlpha" operator="dilate" radius="2.5" result="expanded" />
+          <feFlood flood-color="#fff" result="white" />
+          <feComposite in="white" in2="expanded" operator="in" result="outline" />
+          <feMerge>
+            <feMergeNode in="outline" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+
+      <!-- The two photographed Micro-B plugs: readout to cable, cable to adapter. -->
+      <path class="wire cable-wire" d="M590 373 H686 V456 H720" />
+      <path class="wire cable-wire" d="M1008 474 H1060 V362 H1249 V338" />
+
+      <!-- AbsoluteDRO adapter A-E to the 3.3 V side of the level shifter. -->
+      <path class="wire wire-v33" d="M1149 585 V688 H1671 V539 H1810 V831 H2267" />
+      <path class="wire wire-clock" d="M1201 585 V708 H1603 V570" />
+      <path class="wire wire-data" d="M1250 585 V728 H1634 V553" />
+
+      <!-- 5 V side: CLOCK/DATA into D10/D11. -->
+      <path class="wire wire-clock" d="M1534 507 V250 H2232 V402" />
+      <path class="wire wire-data" d="M1563 490 V270 H2207 V402" />
+
+      <!-- Shifter rails to the Yún power header. -->
+      <path class="wire wire-v5" d="M1595 472 H1788 V851 H2291 V831 M2291 831 V895 H1735 V905 H1502 M1735 905 V955 H1502 M1735 955 V1006 H1502" />
+      <path class="wire wire-gnd" d="M1300 585 V748 H1699 V523 H1766 M1352 585 V768 H1415 M1415 748 V788 H1766 M1625 455 H1766 V871 H2317 V831 M2317 831 V930 H2160 V1213 H2192" />
+
+      <!-- Existing common-anode stepper interface: D3/D2/D9 and Yún 5 V. -->
+      <path class="wire wire-step" d="M2419 402 V440 H1835 V930 H1502" />
+      <path class="wire wire-dir" d="M2444 402 V458 H1870 V980 H1502" />
+      <path class="wire wire-enable" d="M2257 402 V805 H1720 V1031 H1502" />
+
+      <!-- Existing switches/limits: passive contacts return to the ground harness. -->
+      <path class="wire wire-switch thin" d="M2394 402 V360 H2590 V1065 H2192" />
+      <path class="wire wire-switch thin" d="M2369 402 V340 H2610 V1102 H2192" />
+      <path class="wire wire-switch thin" d="M2344 402 V320 H2630 V1139 H2192" />
+      <path class="wire wire-switch thin" d="M2282 402 V300 H2650 V1176 H2192" />
+
+      <!-- Existing field wiring from DM542T. -->
+      <path class="wire wire-v24" d="M1502 1159 H1748 V1305 H1775" />
+      <path class="wire wire-gnd" d="M1502 1135 H1728 V1338 H1775" />
+      <path class="wire wire-motor" d="M1502 1183 H1690 V1371 H2105" />
+      <path class="wire wire-motor" d="M1502 1208 H1670 V1393 H2105" />
+      <path class="wire wire-motor" d="M1502 1233 H1650 V1415 H2105" />
+      <path class="wire wire-motor" d="M1502 1258 H1630 V1437 H2105" />
+
+      <!-- Visible landing markers sit on the photographed screws/pads/headers. -->
+      <g>
+        <circle class="landing" cx="1149" cy="585" r="7" fill="var(--v33)" />
+        <circle class="landing" cx="1201" cy="585" r="7" fill="var(--clock)" />
+        <circle class="landing" cx="1250" cy="585" r="7" fill="var(--data)" />
+        <circle class="landing" cx="1300" cy="585" r="7" fill="var(--gnd)" />
+        <circle class="landing" cx="1352" cy="585" r="7" fill="var(--gnd)" />
+        <circle class="landing" cx="1603" cy="570" r="6" fill="var(--clock)" />
+        <circle class="landing" cx="1634" cy="553" r="6" fill="var(--data)" />
+        <circle class="landing" cx="1671" cy="539" r="6" fill="var(--v33)" />
+        <circle class="landing" cx="1699" cy="523" r="6" fill="var(--gnd)" />
+        <circle class="landing" cx="1534" cy="507" r="6" fill="var(--clock)" />
+        <circle class="landing" cx="1563" cy="490" r="6" fill="var(--data)" />
+        <circle class="landing" cx="1595" cy="472" r="6" fill="var(--v5)" />
+        <circle class="landing" cx="1625" cy="455" r="6" fill="var(--gnd)" />
+        <circle class="landing" cx="2207" cy="402" r="6" fill="var(--data)" />
+        <circle class="landing" cx="2232" cy="402" r="6" fill="var(--clock)" />
+        <circle class="landing" cx="2257" cy="402" r="6" fill="var(--enable)" />
+        <circle class="landing" cx="2282" cy="402" r="6" fill="var(--switch)" />
+        <circle class="landing" cx="2344" cy="402" r="6" fill="var(--switch)" />
+        <circle class="landing" cx="2369" cy="402" r="6" fill="var(--switch)" />
+        <circle class="landing" cx="2394" cy="402" r="6" fill="var(--switch)" />
+        <circle class="landing" cx="2419" cy="402" r="6" fill="var(--step)" />
+        <circle class="landing" cx="2444" cy="402" r="6" fill="var(--dir)" />
+        <circle class="landing" cx="2267" cy="831" r="6" fill="var(--v33)" />
+        <circle class="landing" cx="2291" cy="831" r="6" fill="var(--v5)" />
+        <circle class="landing" cx="2317" cy="831" r="6" fill="var(--gnd)" />
+        <circle class="landing" cx="1502" cy="905" r="7" fill="var(--v5)" />
+        <circle class="landing" cx="1502" cy="930" r="7" fill="var(--step)" />
+        <circle class="landing" cx="1502" cy="955" r="7" fill="var(--v5)" />
+        <circle class="landing" cx="1502" cy="980" r="7" fill="var(--dir)" />
+        <circle class="landing" cx="1502" cy="1006" r="7" fill="var(--v5)" />
+        <circle class="landing" cx="1502" cy="1031" r="7" fill="var(--enable)" />
+        <circle class="landing" cx="1502" cy="1135" r="7" fill="var(--gnd)" />
+        <circle class="landing" cx="1502" cy="1159" r="7" fill="var(--v24)" />
+        <circle class="landing" cx="1502" cy="1183" r="7" fill="var(--motor)" />
+        <circle class="landing" cx="1502" cy="1208" r="7" fill="var(--motor)" />
+        <circle class="landing" cx="1502" cy="1233" r="7" fill="var(--motor)" />
+        <circle class="landing" cx="1502" cy="1258" r="7" fill="var(--motor)" />
+      </g>
+    </svg>
+
+    <section class="harness switch-harness">
+      <h3>EXISTING SWITCH / LIMIT HARNESS</h3>
+      <p>D4&nbsp; RUN — contact to GND</p>
+      <p>D5&nbsp; DIRECTION — contact to GND</p>
+      <p>D6&nbsp; POSITIVE LIMIT — contact to GND</p>
+      <p>D8&nbsp; NEGATIVE LIMIT — contact to GND</p>
+      <p>GND&nbsp; COMMON RETURN</p>
+    </section>
+
+    <section class="harness plant-harness">
+      <h3>EXISTING FIELD WIRING — KEEP AS INSTALLED</h3>
+      <p><span class="v24">24 VDC SUPPLY</span></p>
+      <p><span class="motor">LN176S-E06008-210-S-200 ACTUATOR · A+/A−/B+/B− UNCHANGED</span></p>
+    </section>
+
+    <section class="notes">
+      <strong>Wire the DRO only with all power removed.</strong> This Micro-B connection carries the scale’s 3.3 V clock/data protocol; it is not a USB host connection. Configure D10 and D11 as <strong>INPUT</strong> with no internal pull-ups. Keep both physical limit switches active—the DRO is position feedback, not a safety device. D9/ENA does not isolate the 24 V supply. <strong>Power the Yún from regulated 5 V; VIN is 5 V maximum.</strong>
+    </section>
+
+    <div class="source-line">Terminal mapping: TouchDRO AbsoluteDRO Plus · Adafruit 3970 · SparkFun BOB-12009 · DM542T V4.0</div>
+  </main>
+</body>
+</html>

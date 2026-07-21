@@ -45,6 +45,8 @@ data acquisition and operator workflow:
     endpoints.
   - [x] Include cards, plots, metadata form, run state, and simulated solenoid
     controls.
+  - [x] Place the full-width Yún Stepper Motion panel above the secondary Test
+    Metadata and Sources row in both visual and keyboard-navigation order.
   - [x] Verification: localhost HTML/API/SSE smoke in simulation mode.
 - [x] **Step 4 - recorder/exporter.**
   - [x] Write source-scoped fresh update logs and merged CSV to disk.
@@ -154,6 +156,9 @@ data acquisition and operator workflow:
     use an absolute software envelope; D6/D8 are the travel safety inputs.
   - [x] Remove operator-adjustable acceleration from the shared webpage/API;
     add immediate mode selection and optional Move to D8 Limit.
+  - [x] Make guarded Space start an available Web Position Move while idle and
+    Stop while moving; suppress it in editable/focused controls, on repeat or
+    modifier input, and while the applicable command is unavailable or pending.
   - [x] Verify 22 desktop tests and compile the limit-switch-only Yún target at
     63% flash and 27% global RAM.
   - [x] Upload the limit-switch-only authorization revision with verification;
@@ -201,6 +206,36 @@ data acquisition and operator workflow:
     returns synchronized stopped status without an SSH login.
   - [ ] Verify ownership and E-STOP parity, then measure moving jitter and stop
     latency before claiming the motion-qualification gate.
+- [ ] **Step 5H - qualify magnetic-limit assertions and expose rejected edges.**
+  - [x] Trace false mid-stroke latches through raw D6/D8 sampling, persistent
+    endpoint state, bridge latest-status retention, dashboard fields, and saved
+    run artifacts.
+  - [x] Add independent, non-blocking 5 ms assertion qualification for D6 and
+    D8 while retaining immediate raw telemetry and directional latches.
+  - [x] Pack qualified state and saturating rejected-edge counters into optional
+    compact `lx`; decode, record, and render it without making counters part of
+    a motion decision or breaking observation of older firmware.
+  - [x] Add source, decoder, UI, malformed-frame, and status-size regression
+    coverage; regenerate the protocol map.
+  - [x] Pass the current 42 stepper tests and complete 54-test desktop suite;
+    compile the combined image at 20,222 bytes/70% flash and 1,457 bytes/56% RAM.
+  - [ ] Upload, confirm stopped USB and LAN parity, then prove real endpoints
+    still stop and de-energize the driver in both directions.
+- [ ] **Step 5I - timer-back bounded Web Position pulses.**
+  - [x] Distinguish the Timer1 Local Velocity path from cooperative
+    AccelStepper Web Position and quantify the field error as roughly 0.33 to
+    0.38 ms of repeated lateness per pulse.
+  - [x] Extend the timer design without losing target-count termination, fixed
+    acceleration, driver wake/disable, D4/D5 authorization, limit filtering,
+    software E-STOP, or USB/network status parity.
+  - [x] Make Timer1 the sole STEP-edge owner, apply ramp changes at pulse
+    boundaries, stop finite moves in the ISR, remove the AccelStepper dependency,
+    and expose compact `ut:1` capability through USB/network/page/recordings.
+  - [x] Prove cruise-rate timer quantization below 0.25%, exact target guards,
+    and unchanged abort/interlock contracts in 42 stepper/54 total tests; compile
+    at 20,222 bytes/70% flash and 1,457 bytes/56% RAM.
+  - [ ] Upload, then compare emitted pulses and DRO speed across the operating
+    range in both modes.
 - [ ] **Step 6 - real ESP32 adapter.**
   - [x] Consume healthy version-2 and sensor-health-aware version-3 ESP32 SSE
     samples plus the solenoid command endpoint in a background adapter so
@@ -215,10 +250,10 @@ data acquisition and operator workflow:
   - [x] Restore guarded keyboard shortcuts 1-4 through the same solenoid action;
     ignore editable fields, repeats, modifiers, unavailable controls, and
     already-pending channels.
-  - [x] Verification: 10 firmware-layout/adapter/parser/CLI/dashboard-runtime
+  - [x] Verification: 11 firmware-layout/adapter/parser/CLI/dashboard-runtime
     tests cover healthy v2/v3, missing-ADC live-controller behavior, mDNS address
-    caching, keyboard guards, non-navigating export, and uninterrupted 10 Hz
-    merge cadence during a delayed relay POST.
+    caching, keyboard guards, non-navigating export, complete light-theme
+    rendering, and uninterrupted 10 Hz merge cadence during a delayed relay POST.
   - [ ] Verification: physical live stream smoke and safe solenoid toggle test.
 - [ ] **Step 7 - headless ESP32 firmware.**
   - [x] Archive the former self-hosted-dashboard sketch under `legacy/`.

@@ -57,10 +57,9 @@ when runnable behavior changes.
 - Acceleration is fixed in firmware at a provisional 5 mm/s² rather than being
   an operator-adjustable webpage/API field.
 - Firmware pulse instrumentation measures the shared pulse-position counter
-  over a 250 ms window. Timer1 advances it in Local Velocity and AccelStepper
-  advances it in Web Position. It distinguishes configured/scheduled rate from
-  actual D3 pulse attempts, but it is not driver-acceptance or piston-position
-  feedback.
+  over a 250 ms window. One Timer1 engine advances it in Local Velocity, Web
+  Position, and Home. It distinguishes configured/scheduled rate from actual
+  D3 pulse attempts, but it is not driver-acceptance or piston-position feedback.
 - The standalone sketch now reads both limits, reports raw switch-level changes
   over Serial, and blocks only motion farther into the corresponding end.
 - The Yún Linux side is configured as a WPA2 client of `GL-MT3000-b3a` using
@@ -80,8 +79,8 @@ when runnable behavior changes.
   - Execution order is T2-T4 (contract/simulation/UI), T4A (USB diagnostics),
     T4B (manual speed tuning without remote motion), retired T4C (runtime
     direction mapping), T4D (fixed physical direction and D9 driver disable),
-    T5 (bounded USB motion), T5A (latched software
-    E-STOP), T6 (network/Bridge), T7
+    T4E (qualified limit inputs), T4F (timer-backed Web Position pulses), T5
+    (bounded USB motion), T5A (latched software E-STOP), T6 (network/Bridge), T7
     (transport parity), then T8-T9 (hardware and acceptance). T1
     hardware-envelope values remain a gate before remotely started motion, but
     do not block diagnostics or D4-off calibration settings.
@@ -293,11 +292,63 @@ when runnable behavior changes.
     motor holding torque disappears, and the opposite D5 direction re-enables
     after at least 200 ms and moves away.
 
+- [ ] **ACTIVE - T4E - reject transient magnetic-limit edges without hiding diagnostics.**
+  - [x] Audit firmware, USB/network adapters, dashboard rendering, and recorded
+    `stepper_raw.csv` evidence for the false mid-stroke endpoint latch.
+  - [x] Require D6 or D8 to remain continuously LOW for 5 ms before the input
+    becomes active, can stop motion, or can update an endpoint latch. Keep this
+    state machine non-blocking and use wrap-safe `micros()` subtraction.
+  - [x] Preserve immediate raw electrical levels and persistent directional
+    endpoint latches. A confirmed endpoint must still block travel into itself
+    and permit retreat; the filter must not auto-clear a valid latch.
+  - [x] Add separate saturating D6/D8 rejected-edge counters. Pack qualified
+    state and counters into compact `lx` status, decode it identically over USB
+    and LAN, record the stable fields, and show them read-only in Interlocks.
+    Counters are diagnostic only and never participate in motion authorization.
+  - [x] Keep old firmware observable: absence of `lx` retains legacy raw-equals-
+    active decoding while the page clearly reports that the filter is absent.
+  - [x] Add a shared 288-byte frame bound, reject rather than transmit truncated
+    JSON, and regression-test the compact protocol's numeric worst case.
+  - [x] Compile the combined qualified-limit/unified-timer image for
+    `arduino:avr:yun`: 20,222 bytes/70% flash and 1,457 bytes/56% RAM.
+  - [ ] Upload with verification and confirm a stopped live frame reports `lx`,
+    raw/qualified agreement, and stable counts.
+  - [ ] At a safe mid-stroke position, perform repeated Web Position starts and
+    stops in both directions. Confirm isolated counter increments do not latch
+    or stop motion, then hold each real switch active and confirm it qualifies,
+    latches the correct endpoint, stops STEP, and disables D9/ENA-.
+
+- [ ] **ACTIVE - T4F - make Web Position STEP timing match its command.**
+  - [x] Confirm the existing Timer1 path is deliberately limited to Local
+    Velocity; bounded Web Position and Home still call `AccelStepper::run()`
+    cooperatively from the main loop.
+  - [x] Convert field observations through the calibrated 0.00396875 mm/pulse:
+    1.75→1.5, 2.4→2.0, and 4.0→3.0 mm/s imply approximately 378, 331, and
+    331 microseconds of repeated per-pulse scheduling lateness respectively.
+    This matches AccelStepper resetting `_lastStepTime` to each late call and
+    not catching up missed time.
+  - [x] Design and implement one Timer1 pulse engine for all modes. Web Position retains
+    an exact signed target count, bounded acceleration/deceleration, D4/D5 and
+    qualified D6/D8 aborts, software E-STOP, 200 ms driver wake-up, and D9
+    disable at completion. Do not replace this defect with a speed multiplier.
+    Pending compare values are applied only at a pulse boundary, and the ISR
+    disables itself at the exact finite target without main-loop scheduling.
+  - [x] Remove the AccelStepper STEP path and add compact `ut:1` deployment
+    capability plus a read-only unified-engine dashboard row. Older firmware
+    remains observable and is explicitly labeled as the legacy split scheduler.
+  - [x] Add requested-versus-emitted pulse-rate and exact-target regression
+    tests across 1.5, 2.0, 3.0, 5.0, and 10.0 mm/s, including short moves that
+    never reach cruise speed and all abort/interlock paths.
+    Timer quantization is bounded below 0.25% at the tested cruise rates.
+  - [x] Pass 42 stepper tests and the complete 54-test desktop suite; compile
+    the exact Yún target at 20,222 bytes/70% flash and 1,457 bytes/56% RAM.
+  - [ ] Upload and compare configured, scheduled, emitted, and DRO speed in both
+    Local Velocity and Web Position before closing the task.
+
 - [ ] **ACTIVE - T5 - refactor Yún firmware into a non-blocking distance engine.**
   - Preserve D2-D6 and D8 assignments and local safety inputs.
-  - Replace indefinite-only `runSpeed()` behavior with a motion state machine
-    using `setMaxSpeed()`, `setAcceleration()`, `move()`/`moveTo()`, and frequent
-    `run()` calls.
+  - Use one Timer1 motion state machine for indefinite Local Velocity and
+    finite Web Position/Home; no cooperative loop may own STEP timing.
   - Convert millimetres to steps in one checked function; prevent overflow and
     clamp values to the T1 limits.
   - Evaluate local enable and both limit inputs every loop iteration.

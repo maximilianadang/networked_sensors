@@ -406,7 +406,7 @@ verification, and restarted stopped with D4 OFF, D6 active, zero motion, and
 
 The Yún firmware, USB/network decoder, common stepper schema, recorder stream,
 and dashboard now share optional compact field `aps`. Firmware derives it from
-the absolute AccelStepper counter change over 250 ms; adapters expose measured
+the absolute emitted-pulse counter change over 250 ms; adapters expose measured
 pulses/s and the calibrated mm/s magnitude separately from configured and
 scheduled speed. Older firmware remains observable with measurement capability
 false and null measured values.
@@ -434,14 +434,16 @@ enable before STEP without blocking limit/E-STOP polling. Old frames remain
 decodable with driver-enable capability false and state null.
 
 Follow-on hardware work made exclusive raw endpoint state authoritative over a
-stale opposite latch and moved Local Velocity STEP scheduling to Timer1 after
-measured output proved cooperative `runSpeed()` was transport-loop limited.
-The timer synchronizes pulse position back into AccelStepper on stop; Web
-Position retains its existing accelerated distance engine. Thirty-seven tests,
-the 22,620-byte/78%-flash, 1,453-byte/56%-RAM compile, verified upload, stopped
-`ds:1`/`en:0`/`aps:0`, and an operator-confirmed working Local Velocity run
-pass. This arm remains wet until the matching Linux bridge is redeployed and
-the exact image passes both endpoint disable/wake/retreat checks over LAN.
+stale opposite latch and initially moved only Local Velocity STEP scheduling to
+Timer1 after measured output proved cooperative `runSpeed()` was transport-loop
+limited. Field Web Position measurements then exposed the same defect in the
+remaining cooperative path. The current source removes that split: Timer1 owns
+Local Velocity, Web Position, and Home, applies ramp updates only at pulse
+boundaries, and stops finite moves at the exact ISR target. Compact `ut:1`
+identifies this deployment. Forty-two stepper tests, all 54 desktop tests, and
+the 20,222-byte/70%-flash, 1,457-byte/56%-RAM compile pass. This arm remains wet
+until the unified image is uploaded and passes cruise-rate, endpoint
+disable/wake/retreat, and exact finite-target checks over LAN.
 
 ## Step I5B - partial-hardware ESP32 source integrated
 

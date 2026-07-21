@@ -98,26 +98,16 @@ safe mechanical limit must still be established on the actual motor, driver,
 load, and screw. Any SW5-SW8 change invalidates this conversion and requires a
 new pulses/mm calculation.
 
-Timer1 now provides indefinite constant-velocity Local Velocity motion; it does
-not stop at a requested distance. For bounded Web Position moves, the adapted
-sketch uses AccelStepper and must:
+Timer1 is now the only STEP-edge owner in Local Velocity, Web Position, and
+Home. Local Velocity runs indefinitely. Web Position and Home give the same
+engine a signed finite target; the ISR stops at the exact pulse count. A
+non-blocking 1 ms controller applies the fixed acceleration/deceleration ramp,
+and new timer compare values take effect only at pulse boundaries. This keeps
+STEP timing independent of transport/status traffic without a separate
+cooperative motion implementation. The current sketch has no external Arduino
+library dependency.
 
-1. validate and clamp the requested speed and distance;
-2. convert millimetres to steps;
-3. call `setMaxSpeed()`, `setAcceleration()`, and `move(relative_steps)` (or
-   `moveTo()` for a known absolute position);
-4. call `stepper.run()` as frequently as possible from every loop iteration;
-5. stop immediately if the run switch opens or motion is directed into an
-   asserted limit switch.
-
-Do not use blocking `runToPosition()` in the network event loop. The official
-Bridge example's `delay(50)` is also unsuitable for this motor loop: at the
-default 378 pulses/s, a pulse can be due every 2.65 ms. Network command handling
-must remain non-blocking. Timer1 makes Local Velocity pulse timing independent
-of transport/status traffic, while Web Position still depends on frequent
-`stepper.run()` calls and requires separate timing tests.
-
-Distance is open-loop: AccelStepper counts commanded pulses, not actual travel.
+Distance remains open-loop: firmware counts commanded pulses, not actual travel.
 If the motor stalls or loses steps, its believed position becomes wrong. A
 repeatable absolute-position feature therefore needs a homing procedure. The
 installed D6 and D8 switches independently stop travel into their physical
@@ -132,7 +122,7 @@ Existing laptop dashboard
         -> validated HTTP command
 Yún AR9331 Linux / Bridge endpoint
         -> compact queued command
-Yún ATmega32U4 + Timer1 / AccelStepper
+Yún ATmega32U4 + unified Timer1 engine
         -> STEP/DIR driver and switches
 ```
 
@@ -145,11 +135,11 @@ state.
 
 The classic Bridge library can implement the transport with `BridgeServer` or
 Mailbox, but it is archived and no longer maintained. Keep a Yún deployment on
-an isolated/trusted LAN and avoid exposing it to the Internet. Local Velocity
-now uses timer-driven pulse generation; Web Position remains cooperative. At
-substantially higher bounded-move speeds or when precise motion is
-safety-critical, extend the timer-backed engine or use a dedicated motion
-controller instead of relying on a cooperative AccelStepper loop.
+an isolated/trusted LAN and avoid exposing it to the Internet. All current
+motion modes use timer-driven pulse generation. At substantially higher speeds
+or when precise motion is safety-critical, use a dedicated motion controller
+and closed-loop feedback rather than treating commanded pulse count as measured
+travel.
 
 ## Minimum safety acceptance checks
 

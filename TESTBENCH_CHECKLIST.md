@@ -167,6 +167,13 @@ Before using the laptop supervisor as the primary logger:
   internet Wi-Fi.
 - Confirm D4 raw/enabled and D5 raw/Forward/Reverse change correctly on screen.
 - Confirm D6/D8 raw, active, and latched fields agree with the magnet positions.
+- Confirm **Limit input filter** reports 5 ms qualification and separate D6/D8
+  rejected-edge counts. Away from both endpoints, raw and active should both be
+  clear; a brief raw LOW may increment its counter but must not set a latch.
+- Hold each magnetic switch active for longer than 5 ms and confirm its raw LOW
+  becomes qualified ACTIVE and latches only the corresponding endpoint. The
+  worst-case added stopping travel is 0.05 mm at the 10 mm/s firmware maximum;
+  include that allowance when positioning for this check.
 - Reproduce Forward blocked at D6 and confirm the page says
   `BLOCKED: positive_limit` with zero effective speed; select Reverse and
   confirm motion-away is allowed and the positive latch clears.
@@ -195,9 +202,15 @@ Before using the laptop supervisor as the primary logger:
   mm/s, and DRO speed. Stop escalation at the first missed step, stall,
   roughness, or unexpected motion. The measured STEP field proves firmware D3
   pulse attempts only, not driver acceptance or piston travel.
-- Local Velocity is Timer1-backed in the current image. Verify requested versus
-  measured D3 pulse rate at both 1.5 and 5.0 mm/s. Qualify Web Position timing
-  separately because bounded moves still use cooperative AccelStepper `run()`.
+- Confirm **STEP pulse engine** reports **Unified Timer1 (Local / Web / Home)**.
+  Treat **Legacy split scheduler** as firmware requiring replacement before
+  speed qualification. Verify requested versus measured D3 pulse rate at 1.5,
+  2.0, 3.0, 5.0, and 10.0 mm/s in both Local Velocity and Web Position.
+- During finite moves, distinguish the acceleration/deceleration ramp from the
+  cruise plateau: Scheduled speed may be below Configured speed during a ramp,
+  but Measured STEP output must agree with Scheduled speed at cruise. Confirm
+  the move still emits exactly its requested pulse count and does not restart
+  after the target ISR disables Timer1.
 - Do not deliberately move with legacy T4C inverted firmware. The current
   laptop adapter must refuse Web Position mode/Home/Move when `ds:-1` is seen.
 
@@ -224,6 +237,13 @@ Before using the laptop supervisor as the primary logger:
   confirm there is no absolute open-loop target or software-margin rejection.
 - During a short move, test **Stop Motion** and D4 OFF separately. Both must stop
   in the ATmega loop without waiting for the webpage or Linux side.
+- In Web Position mode with page background focus, press Space while idle and
+  confirm it invokes the same guarded Move action; press Space while moving and
+  confirm it invokes Stop. Repeat with the cursor in the distance, speed, and
+  command-ID fields and confirm Space only edits the field and never moves.
+- Focus SOFTWARE E-STOP and press Space; confirm the focused safety button owns
+  the key and no global Move command is issued. Confirm held Space, modified
+  Space, disabled actions, and an in-flight command cannot duplicate motion.
 - Repeat away from each active limit: D6 blocks D5 Forward, D8 blocks D5
   Reverse, and the opposite D5 direction remains permitted.
 - Confirm the operator page does not present Homed, Position, Target, or

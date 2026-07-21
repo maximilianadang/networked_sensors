@@ -71,6 +71,22 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertIn('link.click()', INDEX_HTML)
         self.assertIn('link.remove()', INDEX_HTML)
 
+    def test_dashboard_light_theme_and_operator_panel_order(self) -> None:
+        self.assertIn("color-scheme: light", INDEX_HTML)
+        self.assertIn("--control: #ffffff", INDEX_HTML)
+        self.assertIn("--chart-bg: #ffffff", INDEX_HTML)
+        self.assertIn('ctx.fillStyle = themeColor("--chart-bg")', INDEX_HTML)
+        self.assertIn('ctx.strokeStyle = themeColor("--chart-grid")', INDEX_HTML)
+        self.assertIn('ctx.fillStyle = themeColor("--chart-label")', INDEX_HTML)
+        self.assertIn('color: themeColor("--chart-blue")', INDEX_HTML)
+        self.assertNotIn('ctx.fillStyle = "#12161b"', INDEX_HTML)
+        self.assertNotIn("background: #242a32", INDEX_HTML)
+        stepper_panel = INDEX_HTML.index("<h2>Yún Stepper Motion</h2>")
+        metadata_panel = INDEX_HTML.index("<h2>Test Metadata</h2>")
+        sources_panel = INDEX_HTML.index("<h2>Sources</h2>")
+        self.assertLess(stepper_panel, metadata_panel)
+        self.assertLess(stepper_panel, sources_panel)
+
 
 class _Esp32ContractServer(ThreadingHTTPServer):
     daemon_threads = True

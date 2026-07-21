@@ -81,6 +81,7 @@ DEFAULT_STEPPER_MM_PER_PULSE = 0.00396875
 DEFAULT_STEPPER_STEPS_PER_MM = 1.0 / DEFAULT_STEPPER_MM_PER_PULSE
 DEFAULT_STEPPER_TRAVEL_MM = 137.18
 DEFAULT_STEPPER_HOME_SPEED_MM_S = 1.5
+DEFAULT_STEPPER_LIMIT_QUALIFICATION_MS = 5.0
 
 # Quantity bounds only. They are not an absolute-position safety envelope;
 # D6/D8 stop travel into their respective ends.
@@ -347,6 +348,7 @@ class SimulatedStepperSource:
         "stepper_direction_calibration_safe",
         "stepper_driver_enable_capable",
         "stepper_driver_enabled",
+        "stepper_unified_timer_capable",
         "stepper_mode_command_capable",
         "stepper_home_capable",
         "stepper_estop_capable",
@@ -373,6 +375,10 @@ class SimulatedStepperSource:
         "stepper_negative_limit_active",
         "stepper_positive_limit_latched",
         "stepper_negative_limit_latched",
+        "stepper_limit_filter_capable",
+        "stepper_limit_qualification_ms",
+        "stepper_positive_limit_glitch_count",
+        "stepper_negative_limit_glitch_count",
         "stepper_d6_raw",
         "stepper_d8_raw",
         "stepper_d4_raw",
@@ -633,6 +639,7 @@ class SimulatedStepperSource:
             "stepper_direction_calibration_safe": True,
             "stepper_driver_enable_capable": True,
             "stepper_driver_enabled": self._moving,
+            "stepper_unified_timer_capable": True,
             "stepper_mode_command_capable": True,
             "stepper_home_capable": True,
             "stepper_estop_capable": True,
@@ -659,6 +666,10 @@ class SimulatedStepperSource:
             "stepper_negative_limit_active": self._negative_limit_active,
             "stepper_positive_limit_latched": self._positive_limit_latched,
             "stepper_negative_limit_latched": self._negative_limit_latched,
+            "stepper_limit_filter_capable": True,
+            "stepper_limit_qualification_ms": DEFAULT_STEPPER_LIMIT_QUALIFICATION_MS,
+            "stepper_positive_limit_glitch_count": 0,
+            "stepper_negative_limit_glitch_count": 0,
             "stepper_d6_raw": "LOW" if self._positive_limit_active else "HIGH",
             "stepper_d8_raw": "LOW" if self._negative_limit_active else "HIGH",
             "stepper_d4_raw": "LOW" if self._local_enabled else "HIGH",
@@ -758,6 +769,27 @@ class UsbStepperSource:
         d5 = cls._wire_level(payload, "d5")
         d6 = cls._wire_level(payload, "d6")
         d8 = cls._wire_level(payload, "d8")
+        limit_diagnostics_value = payload.get("lx")
+        limit_filter_capable = limit_diagnostics_value is not None
+        if limit_filter_capable:
+            if (
+                isinstance(limit_diagnostics_value, bool)
+                or not isinstance(limit_diagnostics_value, int)
+                or limit_diagnostics_value < 0
+                or limit_diagnostics_value > 0x3FFFF
+            ):
+                raise ValueError("USB stepper field lx must be in 0..262143")
+            positive_active = bool(limit_diagnostics_value & (1 << 17))
+            negative_active = bool(limit_diagnostics_value & (1 << 16))
+            positive_limit_glitch_count = (limit_diagnostics_value >> 8) & 0xFF
+            negative_limit_glitch_count = limit_diagnostics_value & 0xFF
+        else:
+            # Older firmware had no input qualifier and used each raw level
+            # directly for its active state.
+            positive_active = d6 == 0
+            negative_active = d8 == 0
+            positive_limit_glitch_count = None
+            negative_limit_glitch_count = None
         positive_latched = cls._wire_level(payload, "lp") == 1
         negative_latched = cls._wire_level(payload, "ln") == 1
         blocked = cls._wire_level(payload, "b") == 1
@@ -849,6 +881,10 @@ class UsbStepperSource:
                 "USB stepper cannot report driver enabled while interlocked"
             )
 
+        unified_timer_capable = "ut" in payload
+        if unified_timer_capable and cls._wire_level(payload, "ut") != 1:
+            raise ValueError("USB stepper field ut must be 1 when present")
+
         owner_value = payload.get("o")
         owner_capable = owner_value is not None
         if owner_capable:
@@ -928,8 +964,6 @@ class UsbStepperSource:
 
         local_enabled = d4 == 0 and boot_armed and not estop_latched
         manual_direction = "reverse" if d5 == 0 else "forward"
-        positive_active = d6 == 0
-        negative_active = d8 == 0
         logical_speed_sps = speed_sps * direction_sign
         if estop_latched:
             moving = False
@@ -970,6 +1004,7 @@ class UsbStepperSource:
             "stepper_direction_calibration_safe": direction_calibration_safe,
             "stepper_driver_enable_capable": driver_enable_capable,
             "stepper_driver_enabled": driver_enabled,
+            "stepper_unified_timer_capable": unified_timer_capable,
             "stepper_mode_command_capable": position_command_capable,
             "stepper_home_capable": position_command_capable,
             "stepper_estop_capable": estop_capable,
@@ -1022,6 +1057,14 @@ class UsbStepperSource:
             "stepper_negative_limit_active": negative_active,
             "stepper_positive_limit_latched": positive_latched,
             "stepper_negative_limit_latched": negative_latched,
+            "stepper_limit_filter_capable": limit_filter_capable,
+            "stepper_limit_qualification_ms": (
+                DEFAULT_STEPPER_LIMIT_QUALIFICATION_MS
+                if limit_filter_capable
+                else None
+            ),
+            "stepper_positive_limit_glitch_count": positive_limit_glitch_count,
+            "stepper_negative_limit_glitch_count": negative_limit_glitch_count,
             "stepper_d6_raw": "LOW" if d6 == 0 else "HIGH",
             "stepper_d8_raw": "LOW" if d8 == 0 else "HIGH",
             "stepper_d4_raw": "LOW" if d4 == 0 else "HIGH",
