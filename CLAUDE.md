@@ -71,6 +71,8 @@ the reasoning; source files remain the interface of record.
 - `TASKS.md` - ordered implementation queue for the Yún Rev2 web-controlled
   stepper adaptation.
 - `RUNBOOK.md` - how to run the simulated supervisor now and real hardware later.
+- `DASHBOARD-CODE-MAP.md` - offline field-edit map from each visible dashboard
+  region to its HTML, CSS, JavaScript component, Python limits, and tests.
 - `TESTBENCH_CHECKLIST.md` - bench bring-up checks the simulator cannot validate.
 - `TESTBENCH_HANDOFF.md` - hardware facts inherited from the former
   embedded-dashboard implementation plus the headless transition.
@@ -90,7 +92,9 @@ networked_sensors/
   read_dxmr90_modbus.py           # stdlib Modbus TCP reader for Banner DXMR90-4k republished registers
   supervisor_core.py              # source schema, simulations, real ESP32/DXMR90 and USB Yún adapters, merge logic
   supervisor.py                   # no-hardware JSONL smoke CLI with healthy/stale/missing scenarios
-  dashboard.py                    # laptop dashboard with real/sim/off ESP32/DXMR90 and sim/USB/network/off stepper sources
+  dashboard.py                    # short dashboard CLI/bootstrap and compatibility surface
+  dashboard_app/                 # runtime, HTTP routes, and dependency-free local frontend modules
+  DASHBOARD-CODE-MAP.md           # field map for offline webpage edits
   recorder.py                     # Step-4 run directories, merged/source CSVs, metadata, summary, export CSV
   test_stepper_control.py         # simulated motion plus USB parser/pseudo-terminal contract tests
   protocol_map.py                 # generated PROTOCOL.md graph/table checker

@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flow Management Supervisor</title>
+  <link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="status-strip" aria-live="polite">
+    <span class="pill"><span id="streamDot" class="dot warn"></span><span id="streamStatus">Connecting</span></span>
+    <span class="pill"><span id="espDot" class="dot warn"></span><span id="espStatus">ESP32</span></span>
+    <span class="pill"><span id="dxDot" class="dot warn"></span><span id="dxStatus">DXMR90</span></span>
+    <span class="pill"><span id="stepperDot" class="dot warn"></span><span id="stepperStatus">Stepper</span></span>
+    <span class="pill"><span id="runDot" class="dot"></span><span id="runStatus">Idle</span></span>
+    <span class="pill clock-pill"><strong id="clockText" class="clock-text">No sample yet</strong></span>
+  </div>
+</header>
+
+<main>
+  <section class="toolbar" aria-label="Run state">
+    <div class="toolbar-actions run-actions">
+      <button id="startRun" class="primary" type="button">Start</button>
+      <button id="stopRun" class="stop" type="button">Stop</button>
+      <button id="exportRun" type="button">Export</button>
+    </div>
+    <div class="emergency-actions" aria-label="Stepper emergency stop">
+      <button id="emergencyStop" class="emergency-stop" type="button"
+        title="Stops step pulses through the dashboard, USB, and Yún firmware; not a hardwired safety circuit">E-STOP</button>
+      <button id="emergencyReset" class="emergency-reset" type="button" title="Reset E-STOP">Reset</button>
+      <span id="emergencyState" class="emergency-state" aria-live="assertive">E-STOP status unknown</span>
+    </div>
+    <div class="toolbar-actions solenoid-actions">
+      <button id="sol0" class="solenoid" type="button" aria-keyshortcuts="1">Solenoid 1 <kbd class="shortcut-key" aria-hidden="true">1</kbd></button>
+      <button id="sol1" class="solenoid" type="button" aria-keyshortcuts="2">Solenoid 2 <kbd class="shortcut-key" aria-hidden="true">2</kbd></button>
+      <button id="sol2" class="solenoid" type="button" aria-keyshortcuts="3">Solenoid 3 <kbd class="shortcut-key" aria-hidden="true">3</kbd></button>
+      <button id="sol3" class="solenoid" type="button" aria-keyshortcuts="4">Solenoid 4 <kbd class="shortcut-key" aria-hidden="true">4</kbd></button>
+    </div>
+  </section>
+
+  <section class="metric-grid" aria-label="Live values">
+    <article class="metric">
+      <label>ESP32 Pressure</label>
+      <div class="metric-values">
+        <div><span class="channel">P1</span><span><span id="mEspP1" class="value">--</span><span class="unit"> bar</span></span></div>
+        <div><span class="channel">P2</span><span><span id="mEspP2" class="value">--</span><span class="unit"> bar</span></span></div>
+        <div><span class="channel">P3</span><span><span id="mEspP3" class="value">--</span><span class="unit"> bar</span></span></div>
+      </div>
+    </article>
+    <article class="metric"><label>SICK Pressure (max)</label><div><span id="mSickPressure" class="value">--</span><span class="unit"> bar</span></div></article>
+    <article class="metric"><label>Open-Line Air Flow</label><div><span id="mOpenFlow" class="value">--</span><span class="unit"> g/min</span></div></article>
+    <article class="metric"><label>SICK Flow · Solenoid 4</label><div><span id="mSickFlow" class="value">--</span><span class="unit"> g/min</span></div></article>
+    <article class="metric"><label>Heartbeat</label><div><span id="mHeartbeat" class="value">--</span><span class="unit"> count</span></div></article>
+  </section>
+
+  <section class="plot-grid" aria-label="Plots">
+    <article class="plot-panel">
+      <div class="plot-head">
+        <h2>Pressure (bar)</h2>
+        <div class="legend">
+          <span style="color: var(--chart-blue)"><i class="swatch"></i>ESP32 1</span>
+          <span style="color: var(--chart-green)"><i class="swatch"></i>ESP32 2</span>
+          <span style="color: var(--chart-amber)"><i class="swatch"></i>ESP32 3</span>
+          <span style="color: var(--chart-red)"><i class="swatch"></i>SICK 1</span>
+          <span style="color: var(--chart-cyan)"><i class="swatch"></i>SICK 2</span>
+        </div>
+      </div>
+      <canvas id="pressureChart" width="900" height="320"></canvas>
+    </article>
+    <article class="plot-panel">
+      <div class="plot-head">
+        <h2>ESP32 Mass Flow (g/min)</h2>
+        <div class="legend">
+          <span style="color: var(--chart-blue)"><i class="swatch"></i>Line 1</span>
+          <span style="color: var(--chart-green)"><i class="swatch"></i>Line 2</span>
+          <span style="color: var(--chart-amber)"><i class="swatch"></i>Line 3</span>
+          <span style="color: var(--chart-violet)"><i class="swatch"></i>Open SUM</span>
+        </div>
+      </div>
+      <canvas id="espFlowChart" width="900" height="320"></canvas>
+    </article>
+    <article class="plot-panel">
+      <div class="plot-head">
+        <h2>SICK Mass Flow (g/min)</h2>
+        <div class="legend">
+          <span style="color: var(--chart-red)"><i class="swatch"></i>Sensor 1</span>
+          <span style="color: var(--chart-cyan)"><i class="swatch"></i>Sensor 2</span>
+          <span style="color: var(--chart-violet)"><i class="swatch"></i>Open SUM</span>
+        </div>
+      </div>
+      <canvas id="sickFlowChart" width="900" height="320"></canvas>
+    </article>
+  </section>
+
+  <section class="lower-grid">
+    <article class="control-panel stepper-panel">
+      <div class="panel-head"><h2>Yún Stepper Motion</h2><span class="pill" id="stepperState">Unknown</span></div>
+      <div class="stepper-layout">
+        <section id="stepperPistonVisual" class="piston-visual is-unavailable"
+          aria-label="Read-only piston head position measured by the DRO">
+          <div class="piston-readout">
+            <header class="piston-visual-header">
+              <div>
+                <span class="piston-eyebrow">DRO position</span>
+                <strong id="stepperDroPosition" class="piston-position">--</strong>
+              </div>
+              <span id="stepperDroState" class="piston-signal">Waiting for data</span>
+            </header>
+
+            <div class="piston-live-strip">
+              <div>
+                <span>Boot travel</span>
+                <strong id="stepperDroDisplacement">--</strong>
+              </div>
+              <div>
+                <span>Direction</span>
+                <strong id="stepperDroDirection">Waiting</strong>
+              </div>
+            </div>
+            <p id="stepperDroRange" class="piston-range-note">
+              DRO range: 0–152.4 mm · read-only display.
+            </p>
+          </div>
+
+          <div class="piston-stage" aria-hidden="true">
+            <div class="piston-end-label piston-end-start">0 mm</div>
+            <div class="piston-end-label piston-end-finish">152.4 mm</div>
+            <div class="piston-axis">
+              <div class="piston-rod"></div>
+              <div class="piston-head"><span>HEAD</span></div>
+              <div class="piston-origin"></div>
+            </div>
+            <div class="piston-ruler"></div>
+          </div>
+        </section>
+
+        <div class="stepper-console">
+          <form id="stepperForm" class="stepper-control-form">
+            <div class="form-grid">
+              <fieldset class="mode-options">
+                <legend>Control mode</legend>
+                <label class="radio-option"><input id="stepperModeLocal" name="stepper_control_mode" type="radio" value="local_velocity" checked>Local Velocity</label>
+                <label class="radio-option"><input id="stepperModeWeb" name="stepper_control_mode" type="radio" value="web_position">Web Position</label>
+              </fieldset>
+              <label id="stepperDistanceField" hidden>Distance (mm)<input id="stepperDistance" name="distance_mm" type="number" required disabled></label>
+              <label><span id="stepperSpeedLabel">Speed (mm/s)</span><input id="stepperSpeed" name="speed_mm_s" type="number" required></label>
+            </div>
+            <div class="form-actions">
+              <button id="stepperMove" class="primary" type="submit" aria-keyshortcuts="Space" hidden>Move <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
+              <button id="stepperHome" type="button" hidden>Home to D8</button>
+              <button id="stepperStop" class="stop" type="button" aria-keyshortcuts="Space" hidden>Stop <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
+              <button id="stepperApplySpeed" type="button">Apply Local Velocity Speed</button>
+              <span class="pill" id="stepperMessage" aria-live="polite">Simulation only</span>
+            </div>
+          </form>
+
+          <section class="source-row stepper-interlocks">
+            <header><h3>Interlocks</h3></header>
+            <dl>
+              <div class="interlock-item"><dt title="Local enable input">Enable (D4)</dt><dd id="stepperLocal">--</dd></div>
+              <div class="interlock-item"><dt id="stepperD5Label" title="Manual or authorized travel direction">Direction (D5)</dt><dd id="stepperManualDirection">--</dd></div>
+              <div class="interlock-item"><dt title="Driver enable output">Driver (D9)</dt><dd id="stepperDriverOutput">--</dd></div>
+              <div class="interlock-item"><dt title="Positive travel limit">+ Limit (D6)</dt><dd id="stepperPositiveLimit">--</dd></div>
+              <div class="interlock-item"><dt title="Negative travel limit">− Limit (D8)</dt><dd id="stepperNegativeLimit">--</dd></div>
+              <div class="interlock-item"><dt title="Final motion authorization decision">Decision</dt><dd id="stepperBlocked">--</dd></div>
+            </dl>
+          </section>
+
+        </div>
+      </div>
+    </article>
+
+    <article class="metadata-panel">
+      <div class="panel-head"><h2>Test Metadata</h2><span class="pill" id="metadataStatus">Unsaved</span></div>
+      <form id="metadataForm">
+        <div class="form-grid">
+          <label>Sample number<input name="sample_number" autocomplete="off"></label>
+          <label>Sub number<input name="sub_number" autocomplete="off"></label>
+          <label>Dispenser<input name="dispenser" autocomplete="off"></label>
+          <label>Material<input name="material" autocomplete="off"></label>
+          <label>Powder flow rate<input name="powder_flow_rate_g_per_min" autocomplete="off"></label>
+          <label>Description<input name="description" autocomplete="off"></label>
+          <label class="wide metadata-notes">Notes<textarea name="notes"></textarea></label>
+        </div>
+        <div class="form-actions">
+          <button class="primary" type="submit">Save Metadata</button>
+        </div>
+      </form>
+    </article>
+
+    <details class="source-panel source-drawer">
+      <summary class="source-drawer-summary"><span>Source details</span><span id="historyStatus">0 samples</span></summary>
+      <div class="source-body">
+        <details class="stepper-diagnostics">
+          <summary>Stepper diagnostics and motion telemetry</summary>
+          <label id="stepperCommandField" hidden>Command ID (optional)<input id="stepperCommandInput" name="command_id" form="stepperForm" maxlength="64" autocomplete="off" disabled></label>
+          <dl>
+            <dt>Source / owner</dt><dd id="stepperOwner">--</dd>
+            <dt>Control mode</dt><dd id="stepperModeStatus">--</dd>
+            <dt>Configured speed</dt><dd id="stepperConfiguredSpeed">--</dd>
+            <dt>Scheduled speed</dt><dd id="stepperEffectiveSpeed">--</dd>
+            <dt>Measured STEP output</dt><dd id="stepperMeasuredSpeed">--</dd>
+            <dt>Command</dt><dd id="stepperCommand">--</dd>
+            <dt>Fixed physical direction</dt><dd id="stepperDirectionStatus">--</dd>
+            <dt>STEP pulse engine</dt><dd id="stepperPulseEngine">--</dd>
+            <dt>Limit input filter</dt><dd id="stepperLimitFilter">--</dd>
+            <dt>DRO frames</dt><dd id="stepperDroFrames">--</dd>
+            <dt>USB status sequence</dt><dd id="stepperSequence">--</dd>
+            <dt>Transport</dt><dd id="stepperTransport">--</dd>
+          </dl>
+        </details>
+        <div class="source-grid">
+          <section class="source-row">
+            <header><h3>ESP32</h3><span class="pill"><span id="espRowDot" class="dot warn"></span><span id="espRowStatus">Unknown</span></span></header>
+            <dl>
+              <dt>Mode</dt><dd id="espMode">--</dd>
+              <dt>Age</dt><dd id="espAge">--</dd>
+              <dt>Pressure ADC</dt><dd id="espPressureAdc">--</dd>
+              <dt>Flow ADC</dt><dd id="espFlowAdc">--</dd>
+              <dt>Pressure</dt><dd id="espPressure">--</dd>
+              <dt>Flow</dt><dd id="espFlow">--</dd>
+              <dt>Transport</dt><dd id="espTransport">--</dd>
+            </dl>
+          </section>
+          <section class="source-row">
+            <header><h3>DXMR90</h3><span class="pill"><span id="dxRowDot" class="dot warn"></span><span id="dxRowStatus">Unknown</span></span></header>
+            <dl>
+              <dt>Mode</dt><dd id="dxMode">--</dd>
+              <dt>Age</dt><dd id="dxAge">--</dd>
+              <dt>Port 1</dt><dd id="dxPort1">--</dd>
+              <dt>Port 2</dt><dd id="dxPort2">--</dd>
+            </dl>
+          </section>
+        </div>
+      </div>
+    </details>
+
+  </section>
+</main>
+
+  <script type="module" src="/assets/app.js"></script>
+</body>
+</html>

@@ -13,16 +13,31 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from networked_sensors.dashboard import DashboardRuntime, INDEX_HTML, parse_args
+from networked_sensors.dashboard import (
+    DashboardRuntime,
+    INDEX_HTML,
+    load_dashboard_asset,
+    parse_args,
+)
 from networked_sensors.supervisor_core import (
+    DEFAULT_STEPPER_HOME_SPEED_MM_S,
     DEFAULT_STEPPER_MAX_DISTANCE_MM,
     DEFAULT_STEPPER_MAX_SPEED_MM_S,
+    DEFAULT_STEPPER_MIN_SPEED_MM_S,
     NetworkStepperSource,
     SimulatedStepperSource,
     SourceMerger,
     UsbStepperSource,
     make_sources,
 )
+
+
+APP_JS = load_dashboard_asset("app.js")
+API_JS = load_dashboard_asset("api.js")
+DOM_JS = load_dashboard_asset("dom.js")
+STEPPER_JS = load_dashboard_asset("components/stepper.js")
+CONFIG_JS = load_dashboard_asset("config.js")
+DASHBOARD_CSS = load_dashboard_asset("dashboard.css")
 from networked_sensors.yun_stepper_bridge import (
     CommandRejected,
     SerialBridgeState,
@@ -279,7 +294,15 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertIn("input->rejectedGlitches < 255", qualifier_body)
         self.assertNotIn("delay(", qualifier_body)
         self.assertIn('\\"lx\\":%lu', firmware)
-        self.assertIn("const unsigned int STATUS_FRAME_SIZE = 288;", firmware)
+        self.assertIn("const unsigned int STATUS_FRAME_SIZE = 384;", firmware)
+        self.assertIn("const int PIN_DRO_CLOCK = 10;", firmware)
+        self.assertIn("const int PIN_DRO_DATA = 11;", firmware)
+        self.assertIn("ISR(PCINT0_vect)", firmware)
+        self.assertIn("PCMSK0 |= _BV(PCINT6);", firmware)
+        self.assertIn("if (portB & _BV(PB6)) return;", firmware)
+        self.assertIn("droNibble(frame, 11) != 2", firmware)
+        self.assertIn("droNibble(frame, 12) != 0", firmware)
+        self.assertIn('\\"dc\\":1,\\"df\\":%d', firmware)
         stop_body = firmware.split("void stopStepperImmediately()", 1)[1].split(
             "void abortWebMotion", 1
         )[0]
@@ -346,11 +369,42 @@ class UsbStepperSourceTests(unittest.TestCase):
             '{"v":1,"t":"s","q":4294967295,"d4":1,"d5":1,'
             '"d6":1,"d8":1,"lx":262143,"lp":1,"ln":1,"b":1,'
             '"r":"negative_limit","sps":-2147483648,"csps":2520,'
-            '"aps":2147483647,"ds":1,"en":1,"ut":1,"m":1,"h":1,"a":1,'
+            '"aps":2147483647,"ds":1,"en":1,"ut":1,"dc":1,"df":1,'
+            '"dr":-2147483648,"dd":-2147483648,"da":2147483647,'
+            '"dq":4294967295,"dx":65535,"m":1,"h":1,"a":1,'
             '"e":1,"mv":1,"st":9,"p":-2147483648,"g":-2147483648,'
             '"c":65535,"o":2}'
         )
-        self.assertLessEqual(len(frame) + 2, 288)
+        self.assertLessEqual(len(frame) + 2, 384)
+
+    def test_decodes_fresh_read_only_dro_telemetry(self) -> None:
+        line = self.FILTERED_RAW_D6_GLITCH[:-1] + (
+            ',"dc":1,"df":1,"dr":10660,"dd":-125,"da":17,'
+            '"dq":1234,"dx":513}'
+        )
+        status = UsbStepperSource.decode_status_line(line)
+        self.assertTrue(status["stepper_dro_capable"])
+        self.assertTrue(status["stepper_dro_fresh"])
+        self.assertEqual(status["stepper_dro_position_mm"], 106.60)
+        self.assertEqual(status["stepper_dro_displacement_mm"], -1.25)
+        self.assertEqual(status["stepper_dro_sample_age_ms"], 17)
+        self.assertEqual(status["stepper_dro_valid_frame_count"], 1234)
+        self.assertEqual(status["stepper_dro_rejected_frame_count"], 2)
+        self.assertEqual(status["stepper_dro_dropped_frame_count"], 1)
+        # DRO telemetry is deliberately not promoted into the existing
+        # open-loop motion counter or any motion-authorization field.
+        self.assertIsNone(status["stepper_position_mm"])
+        self.assertFalse(status["stepper_blocked"])
+
+    def test_rejects_partial_or_impossible_dro_status(self) -> None:
+        partial = self.FILTERED_RAW_D6_GLITCH[:-1] + ',"dc":1}'
+        impossible = self.FILTERED_RAW_D6_GLITCH[:-1] + (
+            ',"dc":1,"df":1,"dr":0,"dd":0,"da":-1,"dq":0,"dx":0}'
+        )
+        with self.assertRaisesRegex(ValueError, "DRO status fields"):
+            UsbStepperSource.decode_status_line(partial)
+        with self.assertRaisesRegex(ValueError, "before its first valid frame"):
+            UsbStepperSource.decode_status_line(impossible)
 
     def test_decodes_forward_blocked_by_positive_limit(self) -> None:
         status = UsbStepperSource.decode_status_line(self.FORWARD_BLOCKED)
@@ -520,7 +574,7 @@ class UsbStepperSourceTests(unittest.TestCase):
         source = UsbStepperSource()
         self.assertFalse(hasattr(source, "set_direction_mapping"))
         self.assertNotIn("stepperDirectionMapping", INDEX_HTML)
-        self.assertNotIn("/api/stepper/direction-mapping", INDEX_HTML)
+        self.assertNotIn("/api/stepper/direction-mapping", API_JS)
 
     def test_unsafe_legacy_mapping_rejects_motion_commands(self) -> None:
         master_fd, slave_fd = pty.openpty()
@@ -871,41 +925,106 @@ class NetworkStepperSourceTests(unittest.TestCase):
 
 
 class UsbStepperDashboardTests(unittest.TestCase):
+    def test_control_mode_uses_explicit_radio_choices(self) -> None:
+        self.assertIn('id="stepperModeLocal"', INDEX_HTML)
+        self.assertIn('value="local_velocity" checked', INDEX_HTML)
+        self.assertIn('id="stepperModeWeb"', INDEX_HTML)
+        self.assertIn('value="web_position"', INDEX_HTML)
+        self.assertEqual(INDEX_HTML.count('name="stepper_control_mode"'), 2)
+        self.assertNotIn('role="switch"', INDEX_HTML)
+        self.assertIn(
+            "const modeInputs = [els.stepperModeLocal, els.stepperModeWeb]",
+            STEPPER_JS,
+        )
+        self.assertIn("async function requestControlMode()", STEPPER_JS)
+
     def test_web_position_spacebar_uses_guarded_move_stop_actions(self) -> None:
         self.assertIn('id="stepperMove"', INDEX_HTML)
         self.assertIn('id="stepperStop"', INDEX_HTML)
         self.assertEqual(INDEX_HTML.count('aria-keyshortcuts="Space"'), 2)
-        self.assertIn('const spacePressed = event.code === "Space" || event.key === " ";', INDEX_HTML)
-        self.assertIn('latest?.stepper_control_mode === "web_position"', INDEX_HTML)
-        self.assertIn('const actionButton = moving ? els.stepperStop : els.stepperMove;', INDEX_HTML)
-        self.assertIn('if (!actionButton || actionButton.hidden || actionButton.disabled) return;', INDEX_HTML)
-        self.assertIn('void requestStepperMove()', INDEX_HTML)
-        self.assertIn('void requestStepperStop()', INDEX_HTML)
-        self.assertIn('["INPUT", "TEXTAREA", "SELECT"].includes(tagName)', INDEX_HTML)
-        self.assertIn('const activatingControl = ["BUTTON", "A"].includes(tagName);', INDEX_HTML)
-        self.assertIn('event.defaultPrevented || event.repeat', INDEX_HTML)
-        self.assertIn('event.ctrlKey || event.altKey || event.metaKey || event.shiftKey', INDEX_HTML)
-        self.assertIn('let stepperMotionRequestPending = false;', INDEX_HTML)
-        self.assertIn('stepperMotionRequestPending = "move";', INDEX_HTML)
-        self.assertIn('stepperMotionRequestPending = "stop";', INDEX_HTML)
+        self.assertIn('const spacePressed = event.code === "Space" || event.key === " ";', APP_JS)
+        self.assertIn('latest?.stepper_control_mode !== "web_position"', STEPPER_JS)
+        self.assertIn('const actionButton = moving ? els.stepperStop : els.stepperMove;', STEPPER_JS)
+        self.assertIn('if (!actionButton || actionButton.hidden || actionButton.disabled) return false;', STEPPER_JS)
+        self.assertIn('void requestMove()', STEPPER_JS)
+        self.assertIn('void requestStop()', STEPPER_JS)
+        self.assertIn('["INPUT", "TEXTAREA", "SELECT"].includes(tagName)', DOM_JS)
+        self.assertIn('const activatingControl = ["BUTTON", "A"].includes(tagName);', DOM_JS)
+        self.assertIn('event.defaultPrevented || event.repeat', DOM_JS)
+        self.assertIn('event.ctrlKey || event.altKey || event.metaKey || event.shiftKey', DOM_JS)
+        self.assertIn('let motionRequestPending = false;', STEPPER_JS)
+        self.assertIn('motionRequestPending = "move";', STEPPER_JS)
+        self.assertIn('motionRequestPending = "stop";', STEPPER_JS)
 
     def test_dashboard_separates_scheduled_and_measured_step_output(self) -> None:
         self.assertIn("Scheduled speed", INDEX_HTML)
         self.assertIn('id="stepperMeasuredSpeed"', INDEX_HTML)
-        self.assertIn("stepper_measured_pulse_rate_sps", INDEX_HTML)
-        self.assertIn("stepper_measured_speed_mm_s", INDEX_HTML)
+        self.assertIn("stepper_measured_pulse_rate_sps", STEPPER_JS)
+        self.assertIn("stepper_measured_speed_mm_s", STEPPER_JS)
         self.assertIn('id="stepperPulseEngine"', INDEX_HTML)
-        self.assertIn("stepper_unified_timer_capable", INDEX_HTML)
+        self.assertIn("stepper_unified_timer_capable", STEPPER_JS)
         self.assertIn('id="stepperLimitFilter"', INDEX_HTML)
-        self.assertIn("stepper_limit_qualification_ms", INDEX_HTML)
-        self.assertIn("stepper_positive_limit_glitch_count", INDEX_HTML)
-        self.assertIn("stepper_negative_limit_glitch_count", INDEX_HTML)
-        self.assertIn("/ raw ${latest.stepper_d6_raw", INDEX_HTML)
+        self.assertIn("stepper_limit_qualification_ms", STEPPER_JS)
+        self.assertIn("stepper_positive_limit_glitch_count", STEPPER_JS)
+        self.assertIn("stepper_negative_limit_glitch_count", STEPPER_JS)
+        self.assertIn("/ raw ${latest.stepper_d6_raw", STEPPER_JS)
+        self.assertIn(
+            'aria-label="Read-only piston head position measured by the DRO"',
+            INDEX_HTML,
+        )
+        self.assertIn("read-only display", INDEX_HTML)
+        self.assertIn('id="stepperDroPosition"', INDEX_HTML)
+        self.assertIn('id="stepperDroDisplacement"', INDEX_HTML)
+        self.assertIn("stepper_dro_fresh", STEPPER_JS)
+        self.assertIn("stepper_dro_valid_frame_count", STEPPER_JS)
+
+    def test_dashboard_promotes_live_dro_piston_visual_and_compacts_readouts(self) -> None:
+        self.assertIn('class="control-panel stepper-panel"', INDEX_HTML)
+        self.assertIn('class="stepper-layout"', INDEX_HTML)
+        self.assertIn('id="stepperPistonVisual"', INDEX_HTML)
+        self.assertIn('id="stepperDroDirection"', INDEX_HTML)
+        self.assertIn('class="piston-readout"', INDEX_HTML)
+        self.assertIn('class="stepper-console"', INDEX_HTML)
+        self.assertIn('class="source-row stepper-interlocks"', INDEX_HTML)
+        self.assertNotIn("<header><h3>Motion</h3></header>", INDEX_HTML)
+        self.assertIn(
+            "<summary>Stepper diagnostics and motion telemetry</summary>",
+            INDEX_HTML,
+        )
+        self.assertLess(
+            INDEX_HTML.index('<details class="source-panel source-drawer">'),
+            INDEX_HTML.index("<summary>Stepper diagnostics and motion telemetry</summary>"),
+        )
+        self.assertIn('<div class="interlock-item"><dt title="Local enable input">Enable (D4)</dt>', INDEX_HTML)
+        self.assertIn('<div class="interlock-item"><dt title="Positive travel limit">+ Limit (D6)</dt>', INDEX_HTML)
+        self.assertLess(
+            INDEX_HTML.index('id="stepperPistonVisual"'),
+            INDEX_HTML.index('class="stepper-console"'),
+        )
+        self.assertIn(
+            "droVisualRange: Object.freeze({minMm: 0, maxMm: 152.4})",
+            CONFIG_JS,
+        )
+        self.assertIn('style.setProperty(\n        "--piston-position"', STEPPER_JS)
+        self.assertIn('classList.toggle("is-stale", hasPosition && !fresh)', STEPPER_JS)
+        self.assertIn("!hasPosition || !hasTrustworthyVisualPosition", STEPPER_JS)
+        self.assertIn('classList.toggle("is-out-of-range", outOfRange)', STEPPER_JS)
+        self.assertIn('if (fresh) {', STEPPER_JS)
+        self.assertIn(".stepper-layout", DASHBOARD_CSS)
+        self.assertIn(
+            ".stepper-layout {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));",
+            DASHBOARD_CSS,
+        )
+        self.assertIn(".piston-head", DASHBOARD_CSS)
+        self.assertIn("min-height: 500px", DASHBOARD_CSS)
+        self.assertIn("grid-template-rows: auto minmax(320px, 1fr)", DASHBOARD_CSS)
+        self.assertIn("bottom: var(--piston-position)", DASHBOARD_CSS)
+        self.assertIn("height: calc(var(--piston-position) - 4%)", DASHBOARD_CSS)
 
     def test_dashboard_exposes_and_latches_simulated_software_estop(self) -> None:
         self.assertIn('id="emergencyStop"', INDEX_HTML)
         self.assertIn('id="emergencyReset"', INDEX_HTML)
-        self.assertIn('/api/stepper/estop', INDEX_HTML)
+        self.assertIn('/api/stepper/estop', API_JS)
         runtime = DashboardRuntime(
             scenario="healthy",
             rate_hz=10.0,
@@ -926,6 +1045,19 @@ class UsbStepperDashboardTests(unittest.TestCase):
             dxmr90_word_order="high-low",
             dxmr90_data_path="direct",
             dxmr90_rate_hz=10.0,
+        )
+        config = runtime.dashboard_config()
+        self.assertEqual(config["history_limit"], 10)
+        self.assertEqual(config["solenoid_count"], 4)
+        self.assertEqual(
+            config["stepper"],
+            {
+                "max_distance_mm": DEFAULT_STEPPER_MAX_DISTANCE_MM,
+                "min_speed_mm_s": DEFAULT_STEPPER_MIN_SPEED_MM_S,
+                "max_speed_mm_s": DEFAULT_STEPPER_MAX_SPEED_MM_S,
+                "default_speed_mm_s": DEFAULT_STEPPER_HOME_SPEED_MM_S,
+                "home_speed_mm_s": DEFAULT_STEPPER_HOME_SPEED_MM_S,
+            },
         )
         stopped = runtime.emergency_stop_stepper()
         self.assertTrue(stopped["confirmed"])

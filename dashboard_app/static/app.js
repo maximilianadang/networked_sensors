@@ -1,0 +1,161 @@
+import {API, getJson} from "./api.js";
+import {drawAllCharts} from "./charts.js";
+import {UI_CONFIG} from "./config.js";
+import {elements, setDot, setText, shortcutTargetIsGuarded} from "./dom.js";
+import {renderMetrics} from "./components/metrics.js";
+import {createMetadataComponent} from "./components/metadata.js";
+import {renderSources, setEspTransportMessage} from "./components/sources.js";
+import {createStepperComponent} from "./components/stepper.js";
+import {createToolbarComponent} from "./components/toolbar.js";
+
+const streamEls = elements(["streamDot", "streamStatus"]);
+
+function setStreamStatus(label, state) {
+  setText(streamEls.streamStatus, label);
+  setDot(streamEls.streamDot, state);
+}
+
+async function startDashboard() {
+  const operationalConfig = await getJson(API.config);
+  const historyLimit = Math.min(
+    UI_CONFIG.historyLimit,
+    operationalConfig.history_limit
+  );
+  const state = {
+    latest: null,
+    run: {},
+    history: []
+  };
+  let pollTimer = null;
+  let pollRequestPending = false;
+  let toolbar;
+  let stepper;
+
+  function renderAll() {
+    toolbar.renderRun(state.run);
+    if (!state.latest) return;
+    toolbar.renderSample(state.latest);
+    renderMetrics(state.latest);
+    renderSources(state.latest, state.history.length);
+    stepper.render(state.latest);
+    drawAllCharts(state.history);
+  }
+
+  function applySample(sample, append = true) {
+    state.latest = sample;
+    if (append) {
+      state.history.push(sample);
+      if (state.history.length > historyLimit) state.history.shift();
+    }
+    renderAll();
+  }
+
+  function setRunState(run) {
+    state.run = run || {};
+    toolbar.renderRun(state.run);
+  }
+
+  const metadata = createMetadataComponent();
+  toolbar = createToolbarComponent({
+    getState: () => state,
+    applySample,
+    setRunState,
+    setEspTransportMessage,
+    solenoidCount: operationalConfig.solenoid_count
+  });
+  stepper = createStepperComponent({
+    getLatest: () => state.latest,
+    applySample,
+    limits: {
+      ...operationalConfig.stepper,
+      min_distance_mm: UI_CONFIG.stepperInputs.minDistanceMm
+    }
+  });
+
+  function applyState(payload) {
+    if (payload.run) state.run = payload.run;
+    if (payload.sample) applySample(payload.sample, false);
+    if (payload.metadata) metadata.fill(payload.metadata);
+    toolbar.renderRun(state.run);
+  }
+
+  async function hydrate() {
+    const historyPayload = await getJson(`${API.history}?limit=${historyLimit}`);
+    state.history = historyPayload.history || [];
+    applyState(await getJson(API.state));
+  }
+
+  function startPollingFallback() {
+    if (pollTimer) return;
+    pollTimer = window.setInterval(async () => {
+      if (pollRequestPending) return;
+      pollRequestPending = true;
+      try {
+        const payload = await getJson(API.latest);
+        if (payload.run) state.run = payload.run;
+        if (payload.sample) applySample(payload.sample);
+        else toolbar.renderRun(state.run);
+        setStreamStatus("Polling", "warn");
+      } catch (error) {
+        setStreamStatus("Offline", "bad");
+      } finally {
+        pollRequestPending = false;
+      }
+    }, UI_CONFIG.pollingIntervalMs);
+  }
+
+  function stopPollingFallback() {
+    if (!pollTimer) return;
+    window.clearInterval(pollTimer);
+    pollTimer = null;
+  }
+
+  function connectEvents() {
+    if (!window.EventSource) {
+      startPollingFallback();
+      return;
+    }
+    const events = new EventSource(API.events);
+    events.addEventListener("open", () => {
+      stopPollingFallback();
+      setStreamStatus("Live", "ok");
+    });
+    events.addEventListener("sample", event => {
+      setStreamStatus("Live", "ok");
+      applySample(JSON.parse(event.data));
+    });
+    events.addEventListener("state", event => {
+      setRunState(JSON.parse(event.data));
+    });
+    events.addEventListener("error", () => {
+      setStreamStatus("Reconnecting", "warn");
+      startPollingFallback();
+    });
+  }
+
+  document.addEventListener("keydown", event => {
+    if (shortcutTargetIsGuarded(event)) return;
+
+    const spacePressed = event.code === "Space" || event.key === " ";
+    if (spacePressed) {
+      if (!stepper.handleSpaceShortcut()) return;
+      event.preventDefault();
+      return;
+    }
+
+    const index = Number(event.key) - 1;
+    if (!Number.isInteger(index) ||
+        index < 0 || index >= operationalConfig.solenoid_count) return;
+    event.preventDefault();
+    void toolbar.toggleSolenoid(index);
+  });
+
+  window.addEventListener("resize", () => drawAllCharts(state.history));
+  await hydrate();
+  connectEvents();
+}
+
+await startDashboard().catch(error => {
+  console.error("Dashboard startup failed", error);
+  setStreamStatus("Offline", "bad");
+});

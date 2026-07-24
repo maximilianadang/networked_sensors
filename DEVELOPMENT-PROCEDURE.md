@@ -1193,3 +1193,92 @@ finite pulse counts and ramp behavior. All 42 stepper tests and the complete
 Yún target without an external library at 20,222 bytes/70% flash and 1,457
 bytes/56% RAM. Upload, physical cruise-rate comparison, exact finite travel,
 both directional endpoint retreats, and Home remain hardware acceptance checks.
+
+## Step 7A - make the dashboard code mirror the operator page
+
+**Direction given:** make the website easy to locate and edit in the field,
+including without internet access, while retaining the approved operator page
+and all command/safety behavior.
+
+**READ:** `dashboard.py` was 2,859 lines. Its 1,654-line `INDEX_HTML` combined
+584 lines of CSS, 182 lines of page markup, and 854 lines of JavaScript with a
+page-wide `render()` function. The same file also held a roughly 720-line
+runtime, HTTP routing, and CLI setup. Stepper distance/speed/Home values and the
+solenoid count were repeated between HTML, JavaScript, and Python. UI tests
+referenced the embedded string 107 times. The complete pre-refactor baseline
+was 57 passing desktop tests.
+
+**INFER:** the lowest-friction offline design is still plain HTML, CSS, ES
+modules, and the stdlib Python server. Visible page regions should have named
+component modules; shared sample flow belongs in a small application entrypoint;
+the three plots should share one declarative series configuration and canvas
+renderer. Python must remain authoritative for operational limits, with one
+additive read-only configuration endpoint. No frontend build system or package
+manager is useful for this field workflow.
+
+**DE-RISK:** static files are served only from an explicit route allowlist and
+with `Cache-Control: no-store`. Existing endpoint shapes are unchanged.
+`dashboard.py` continues to export `DashboardRuntime`, `parse_args`, and the
+legacy `INDEX_HTML` view for import compatibility. E-STOP, D4/D5 authority,
+limit handling, fresh-device acknowledgements, serialized solenoid commands,
+SSE fallback, and export behavior retain focused tests. The extraction,
+component split, configuration centralization, Python split, and test rewrite
+were compiled/smoked in stages.
+
+**Executed:** `dashboard.py` is now a 288-line launcher. `dashboard_app/`
+contains separate runtime and HTTP modules plus local assets: semantic markup,
+screen-ordered CSS, shared API/config/DOM/chart modules, and toolbar, metrics,
+stepper, metadata, and sources components. `/api/config` supplies history,
+solenoid-count, and stepper limits from Python. `DASHBOARD-CODE-MAP.md` maps
+each visible region, constant family, endpoint, and test for offline field use.
+
+**Verified:** all 63 desktop tests pass, including a new localhost test for the
+page, allowlisted CSS/JavaScript assets, cache headers, and `/api/config`.
+Direct-script and `python -m` help paths compile, the generated protocol map is
+current, and the local browser requests every module without an internet
+resource. Hardware behavior was not exercised or changed by this refactor.
+
+### Step 7A operator-layout refinement
+
+**Direction given:** use the full browser width, make field labels and controls
+legible, keep the three graph panels equally sized, and keep the complete
+vertical-piston/stepper and Test Metadata panels visible side by side at 100%
+zoom without scrolling. Keep important interlock state in the stepper panel,
+but move secondary motion/source diagnostics out of the primary page footprint.
+
+**READ:** the centered maximum-width container, multi-row top controls, tall
+charts, and a separate source-health row consumed more space than the browser
+content viewport left after Firefox/Zen toolbar chrome. Later piston additions
+also displaced Test Metadata below the stepper panel. The motion summary
+repeated information already present in the piston readout, controls, and
+interlocks.
+
+**INFER:** the primary desktop page should be treated as four height-budgeted
+rows inside the actual CSS viewport, not the outer browser-window dimensions.
+The final row should stay 50/50 across the page. Inside its left half, the
+vertical piston belongs in the left half and the mode, motion controls, and
+condensed interlocks belong in the right half. Detailed telemetry is still
+useful, but it does not need permanent page height.
+
+**DE-RISK:** the compact layout is limited to content viewports at least 1121 px
+wide and 900 px tall. Smaller viewports retain normal responsive document flow.
+The Source details drawer preserves full stepper/source diagnostics and the
+optional command ID in a bounded, internally scrolling overlay. No API,
+controller limit, firmware guard, E-STOP behavior, or recorded field changed.
+
+**Executed:** removed the title/subtitle block; expanded the six status pills
+and put a compact local sample timestamp in the status strip; made Start, Stop,
+Export, Solenoid 1-4, and the centered E-STOP group fill one control row; and
+kept the live metric row above three equal-width plots. The metric row now shows
+all three ESP32 pressures, maximum parallel-SICK pressure, Solenoid 1-3-gated
+ESP32 open-line mass-flow SUM, Solenoid 4-gated SICK mass-flow SUM, and
+heartbeat. Each flow plot always includes its applicable open-line SUM; there
+is no SUM checkbox. The final row contains the vertical piston and compact
+mode/interlock console on the left and Test Metadata on the right.
+
+**Verified:** at a 1920 x 1200 Firefox window with an 1114 px-tall content
+viewport, `document.documentElement.scrollHeight` equals `window.innerHeight`,
+both lower panels end inside the viewport, and no page scrollbar is present.
+The chart canvases remain equal width and 276 px tall. Both Local Velocity and
+Web Position simulator states were checked, and the complete 63-test desktop
+suite, Python compilation, and protocol-map drift check pass.

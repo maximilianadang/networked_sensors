@@ -55,10 +55,11 @@ flowchart TD
     end
 
     subgraph YUNLOCAL["Standalone Yún stepper bring-up"]
-        YUNSRC["limit_switch_palas.ino<br/>D2-D6 + D8 + D9"]
+        YUNSRC["limit_switch_palas.ino<br/>D2-D6 + D8-D11"]
         AVRCLI["arduino-cli<br/>arduino:avr:yun"]
         YUNFW["Yún ATmega32U4<br/>unified Timer1 Local / Web / Home"]
         LIMITS["D6 positive / D8 negative<br/>5 ms qualified magnetic limits<br/>raw-edge counters"]
+        DRO["AbsoluteDRO Plus<br/>D10 clock + D11 data<br/>read-only 52-bit position"]
         DRIVER["DM542T<br/>STEP / DIR / ENA-"]
         LIMITSER["9600-baud compact JSON status<br/>+ V1 S/M/H/G/X/E1/E0 commands"]
         USBADAPTER["UsbStepperSource<br/>mode + D8 seek + move/Stop + software E-STOP"]
@@ -69,6 +70,7 @@ flowchart TD
         YUNSRC --> AVRCLI
         AVRCLI --> YUNFW
         LIMITS --> YUNFW
+        DRO --> YUNFW
         YUNFW --> DRIVER
         YUNFW --> LIMITSER
         LIMITSER <--> USBADAPTER
@@ -105,8 +107,8 @@ flowchart TD
 
     subgraph STEP3["Step 3 local dashboard/API"]
         DASHCLI["dashboard.py<br/>localhost server"]
-        DASHHTML["/<br/>dashboard HTML"]
-        DASHAPI["/api/state latest history<br/>100 ms fallback while SSE is down"]
+        DASHHTML["/<br/>local HTML/CSS/ES modules"]
+        DASHAPI["/api/config state latest history<br/>100 ms fallback while SSE is down"]
         DASHSSE["/api/events<br/>SSE samples"]
         DASHCTRL["/api/run metadata solenoid stepper<br/>recordings export"]
         SRCSEL["--esp32-source / --esp32-url / --esp32-timeout<br/>--dxmr90-source<br/>--stepper-source sim|usb|network|off<br/>--stepper-port / --stepper-baud<br/>--stepper-url / --stepper-timeout"]
@@ -173,7 +175,7 @@ flowchart TD
 | `read_dxmr90_modbus` | `networked_sensors/read_dxmr90_modbus.py` | exists | DXMR90 Modbus TCP registers | table/json/csv rows | `--host` selects device; `--format json` supports programmatic use |
 | `Flow_management_unit_sch1` | `networked_sensors/Flow_management_unit_sch1.ino` | four-output headless v3 field-WLAN firmware is compiled and hash-verified on the physical board; field-LAN stream smoke pending | independently optional ADS1115 analog channels + four active-low relays on GPIO 5/6/9/10 | DHCP client at `testbench.local`, 10 Hz v3 SSE with per-ADC health and null unavailable families, immediate four-state solenoid events, toggle indices 0–3, and JSON service descriptor; no UI/recording | flash to `esp32:esp32:adafruit_feather_esp32s3_nopsram`; run laptop `dashboard.py` as the webpage; no ADC is a Wi-Fi/control startup gate |
 | archived ESP32 dashboard | `networked_sensors/legacy/Flow_management_unit_sch1/Flow_management_unit_sch1.ino` | preserved reference firmware | ADS1115 analog channels + browser commands | former ESP32 HTML, partial unversioned SSE, and RAM CSV | not compatible with strict `RealEsp32Source`; flash only for deliberate legacy investigation |
-| `limit_switch_palas` | `networked_sensors/limit_switch_palas.ino` | unified-timer revision compiles at 20,222 bytes/70% flash and 1,457 bytes/56% RAM; upload and physical endpoint/timing verification remain pending | D4, D5, physical D6/D8, D9-to-DM542T-ENA-, USB or Linux-relayed `V1 S25..2520`/`V1 M`, armed `V1 H`/relative `V1 G`, Web Position `V1 X`, and mode-independent latched `V1 E1` with D4-off `V1 E0` | one Timer1 pulse engine for Local Velocity, relative Web Position, and D8 Home; exact finite target stop in the ISR; pulse-boundary speed updates; fixed non-blocking acceleration/deceleration; compact `ut:1` capability; fixed Normal physical direction; non-blocking 5 ms D6/D8 assertion qualification with raw levels and saturating rejected-edge counters; centralized endpoint interlocks with stale-opposite-latch correction; 200 ms driver-enable wake-up; driver disabled whenever stopped/blocked/E-stopped; immediate abort; software E-STOP; non-blocking Serial1 status/acks; exclusive USB/network mutation ownership; and measured emitted-pulse rate; 0.00396875 mm/PUL assumes photographed DM542T SW5-SW8 all ON; no absolute-position safety gate or safety-rated energy isolation | compile/upload as `arduino:avr:yun`; no external Arduino library is required; because the repository file is not in an Arduino-named sketch directory, stage it in a matching temporary sketch directory first |
+| `limit_switch_palas` | `networked_sensors/limit_switch_palas.ino` | T4G read-only DRO revision compiles at 21,228 bytes/74% flash and 1,653 bytes/64% RAM; verified upload and stationary live decode pass; known-distance/sign/stale/reconnect and physical motion-timing checks remain | D4, D5, physical D6/D8, D9-to-DM542T-ENA-, level-shifted AbsoluteDRO Plus D10 clock/D11 data, USB or Linux-relayed `V1 S25..2520`/`V1 M`, armed `V1 H`/relative `V1 G`, Web Position `V1 X`, and mode-independent latched `V1 E1` with D4-off `V1 E0` | one Timer1 pulse engine for Local Velocity, relative Web Position, and D8 Home; exact finite target stop in the ISR; pulse-boundary speed updates; fixed non-blocking acceleration/deceleration; compact `ut:1` capability; fixed Normal physical direction; non-blocking 5 ms D6/D8 assertion qualification with raw levels and saturating rejected-edge counters; D10 PCINT6 falling-edge capture and strict 52-bit DRO validation; read-only position/displacement/freshness/frame telemetry that never participates in motion; centralized endpoint interlocks with stale-opposite-latch correction; 200 ms driver-enable wake-up; driver disabled whenever stopped/blocked/E-stopped; immediate abort; software E-STOP; non-blocking Serial1 status/acks; exclusive USB/network mutation ownership; and measured emitted-pulse rate; 0.00396875 mm/PUL assumes photographed DM542T SW5-SW8 all ON; no absolute-position safety gate or safety-rated energy isolation | compile/upload as `arduino:avr:yun`; no external Arduino library is required; because the repository file is not in an Arduino-named sketch directory, stage it in a matching temporary sketch directory first |
 | `yun_stepper_bridge` | `networked_sensors/yun_stepper_bridge.py` | Python 2/3 loopback plus earlier physical health, stopped status, rejection, and boot-start pass; current no-`V1 D` repository copy must be redeployed before LAN motion testing | compact ATmega status plus exact validated `V1` command lines on `/dev/ttyATH0` | trusted-LAN `GET /v1/status`, `GET /v1/health`, and `POST /v1/command` on port 8080 | init wrapper temporarily disables LEDEYun `askconsole` while running and restores it on stop; provisioner installs and enables it |
 | `YunSerialTerminal` | retired official Bridge library example | temporary maintenance path, verified | Yún USB CDC plus AR9331 UART console; DM542T power must be off | interactive OpenWrt console for non-secret network inspection/configuration | compile/upload as `arduino:avr:yun`, monitor at 115200 baud, send `~~`; restore `limit_switch_palas` immediately after maintenance |
 
@@ -184,7 +186,7 @@ flowchart TD
 | ESP32 simulated | `SimulatedEsp32Source` | exists | 10 Hz | pressure, flow, sensor volts, solenoid states, combined pressure/flow; dashboard can toggle simulated solenoids | `esp32_mode`, `esp32_connected`, `esp32_age_ms`, `esp32_transport_error` |
 | DXMR90 simulated | `SimulatedDxmr90Source` | exists | 1 Hz | core DXMR90 metric names from `read_dxmr90_modbus.py` with `dxmr90_` prefix | `dxmr90_mode`, `dxmr90_connected`, `dxmr90_age_ms` |
 | Yún stepper simulated | `SimulatedStepperSource` | exists | 10 Hz | local enable, state, relative pulse-count model, command ID, D6/D8 limits, and latched software E-STOP/reset | `stepper_mode`, `stepper_connected`, `stepper_age_ms` |
-| Yún stepper USB | `UsbStepperSource` | previous Timer1 Local Velocity firmware is uploaded; unified Local/Web/Home Timer1 image awaits upload; stopped `aps:0`, operator-confirmed Local Velocity motion, and desktop decode/dashboard tests pass | state changes, 10 Hz moving status, 1 Hz idle heartbeat; mode/speed, D8 seek/move/Stop, software E-STOP/reset, D9 state, `aps` pulse measurement, qualified limit state, raw D6/D8, rejected-edge counts, and optional `ut` unified-timer capability | dual control modes, D4/D5 authority, fixed physical direction, 5 ms qualified D6/D8 directional stops, configured cruise/scheduled ramp speed plus measured emitted pulses/s and converted mm/s, command/state/reason/capabilities, and explicit E-STOP latch; absolute position suppressed | same stepper health fields plus `stepper_transport_error`; `ut:1` means Local Velocity, Web Position, and Home share Timer1, while absent `ut` identifies legacy split scheduling; limit qualification is local and non-blocking; measured STEP output is electrical open-loop evidence, not DM542T acceptance or piston feedback; software stop is not safety-rated |
+| Yún stepper USB | `UsbStepperSource` | T4G unified-timer/read-only-DRO firmware is uploaded; stationary live decoding plus desktop decode/dashboard tests pass | state changes, 10 Hz moving status, 5 Hz fresh-DRO status, 1 Hz idle heartbeat; mode/speed, D8 seek/move/Stop, software E-STOP/reset, D9 state, `aps` pulse measurement, qualified limit state, raw D6/D8, rejected-edge counts, `ut` unified-timer capability, and grouped DRO telemetry | dual control modes, D4/D5 authority, fixed physical direction, 5 ms qualified D6/D8 directional stops, configured cruise/scheduled ramp speed plus measured emitted pulses/s and converted mm/s, command/state/reason/capabilities, explicit E-STOP latch, and read-only DRO freshness/absolute position/boot-reference displacement/frame diagnostics; open-loop command position remains suppressed | same stepper health fields plus `stepper_transport_error`; `ut:1` means Local Velocity, Web Position, and Home share Timer1; `dc:1` identifies the T4G decoder; limit qualification is local and non-blocking; neither measured STEP output nor DRO telemetry authorizes/corrects motion; software stop is not safety-rated |
 | Yún stepper network | `NetworkStepperSource` + Yún Linux UART bridge | background 10 Hz HTTP/status and guarded command adapter implemented; loopback contract plus physical stopped health/status/rejection and boot restart pass | 10 Hz | same calibrated command/status semantics as USB, fresh command confirmation, and firmware-reported exclusive USB/network ownership | same stepper health fields plus HTTP/UART errors |
 | ESP32 real | `RealEsp32Source` | healthy-v2 compatibility plus strict v3 adapter implemented; missing-ADC/four-output and delayed-command loopback tests, target compile, and verified flash pass; field latency retest pending | 10 Hz firmware stream even with either ADC absent; 10 Hz browser SSE or fallback | v3 requires `sample_ms`, boolean `p_adc_ok`/`f_adc_ok`, finite triplets when ready or null triplets when unavailable, four boolean `sol[]`, and serialized toggle POST indices 0–3 outside the merge lock; healthy complete v2 remains accepted | source health fields plus ADC readiness and reconnect/error detail; HTTP `.local` resolution is cached until a transport failure |
 | DXMR90 real | `RealDxmr90Source` | background adapter implemented, live-hardware verified, and blocked-read isolation/recovery tested | direct process data at 10 Hz default; configurable; republished fallback is about 1 Hz | values decoded from SICK windows `1002-1017` and `2002-2017`, including pressure in bar/psi, flow, and temperature | source-owned worker keeps Modbus timeout/error/staleness from blocking other sources; same DXMR90 health fields |
@@ -218,6 +220,11 @@ recorder: metadata, recent history, selected ESP32 solenoid state, and stepper
 state remain live operator state, while run start/stop creates durable files
 under `--record-dir`.
 
+The page is served as local, cache-disabled static assets under
+`dashboard_app/static`; it has no CDN, package download, or build step.
+`/api/config` supplies read-only controller limits to browser inputs so visible
+bounds and JavaScript validation cannot drift from Python command guards.
+
 Browser samples use SSE at 10 Hz. If SSE is unavailable, a guarded 100 ms
 `/api/latest` fallback starts and stops again when SSE reconnects. Solenoid
 commands are serialized outside the shared merge condition, provide immediate
@@ -230,7 +237,8 @@ commands suppress that global shortcut.
 
 | Endpoint | Method | Produces/consumes | Notes |
 | --- | --- | --- | --- |
-| `/` | GET | HTML/CSS/JS dashboard | light flow/pressure views plus source health, metadata, recording, solenoids, and positive stepper travel/speed controls with physical D5 direction; guarded Space starts/stops Web Position motion |
+| `/` | GET | HTML/CSS/JS dashboard | five-card summary: three individual ESP32 pressures in one card, maximum of the two parallel SICK pressures, ESP32 flow summed only across open Solenoid 1–3 lines, two-sensor SICK flow gated by Solenoid 4, and heartbeat; three equal-width plots show all pressure lines, individual ESP32 flows plus an always-visible open-line SUM, and individual SICK flows plus an always-visible Solenoid-4-gated SUM; also source health, metadata, recording, solenoids, and positive stepper travel/speed controls with physical D5 direction; guarded Space starts/stops Web Position motion |
+| `/api/config` | GET | history capacity, solenoid count, and read-only stepper distance/speed/home limits | page bootstrap; values originate in Python and populate browser attributes/validation |
 | `/api/state` | GET | latest sample, run config/state, metadata, history size | page bootstrap |
 | `/api/latest` | GET | latest sample and run state | non-overlapping 100 ms browser fallback while SSE is unavailable, plus smoke checks |
 | `/api/history?limit=N` | GET | recent merged samples | bounded in-memory history |
@@ -238,7 +246,7 @@ commands suppress that global shortcut.
 | `/api/run/start` / `/api/run/stop` | POST | recording flag, timestamps, run artifact metadata | start opens a run directory; stop finalizes metadata, summary, and export CSV |
 | `/api/metadata` | POST | in-memory metadata object | accepts JSON object with known metadata keys |
 | `/api/solenoid/toggle?n=0..3` | POST | selected ESP32 solenoid state and latest sample | simulation toggles locally; real mode serializes one ESP32 POST outside the merge lock only while its stream is live; buttons and guarded keyboard keys 1-4 share this action; editable fields, repeats, modifiers, disabled controls, and pending channels suppress shortcuts; index 3 maps to GPIO 10; immediate `sol` events and v3 readings update state |
-| `/api/stepper/status` | GET | stable stepper health, mode, D4/D5, D6/D8 raw/qualified/latched state, rejected input-edge counters, owner, configured/scheduled speed, measured emitted STEP pulses/s and converted mm/s, unified-timer capability, and command state | compact `lx`, `aps`, and `ut` are optional for older firmware; `ut:1` identifies the one-engine Local/Web/Home image and absent `ut` identifies legacy split scheduling; `lx` packs qualified D6/D8 plus saturating diagnostic-only counters and never commands a safety decision; USB position/target/remaining and software-envelope fields are null; legacy homed flag is not a Move guard |
+| `/api/stepper/status` | GET | stable stepper health, mode, D4/D5, D6/D8 raw/qualified/latched state, rejected input-edge counters, owner, configured/scheduled speed, measured emitted STEP pulses/s and converted mm/s, unified-timer capability, read-only DRO freshness/absolute position/boot-reference displacement/frame diagnostics, and command state | compact `lx`, `aps`, `ut`, and the grouped `dc/df/dr/dd/da/dq/dx` DRO fields are optional for older firmware; `ut:1` identifies the one-engine Local/Web/Home image and absent `ut` identifies legacy split scheduling; `lx` packs qualified D6/D8 plus saturating diagnostic-only counters; `dr/dd` use signed 0.01 mm integers and `dx` packs rejected/dropped frame counts; DRO telemetry never commands a motion decision; USB open-loop position/target/remaining and software-envelope fields remain null; legacy homed flag is not a Move guard |
 | `/api/stepper/control-mode` | POST | strict boolean `web_position` | mode changes only while D4 is OFF and motion is stopped; boot/default is Local Velocity |
 | `/api/stepper/home` | POST | no body fields | optional D8-limit seek; Web Position only, D4 armed, D5 Reverse, fixed 1.5 mm/s; not a Move prerequisite |
 | `/api/stepper/move` | POST | positive relative travel `distance_mm` up to 137.18 mm, positive `speed_mm_s`, optional `command_id` | simulation, USB, and network; button and guarded idle Space share this action; supervisor snapshots D5 and resolves a signed internal delta; adapter/firmware re-check D5; fixed 5 mm/s² acceleration, D4 arm, and directional D6/D8 stops; no absolute-position envelope |
@@ -298,7 +306,11 @@ Required Step-1 fields:
   pressure/flow sensor voltage fields
 - `esp32_sol1..esp32_sol4`
 - `esp32_p_combined_bar`, `esp32_f_combined_gmin`
+- `esp32_open_flow_gmin`, summed from ESP32 flow channels whose matching
+  Solenoid 1–3 state is open
 - `dxmr90_heartbeat` and selected core DXMR90 metrics
+- `dxmr90_open_total_mass_flow_g_min`, equal to the two-sensor SICK total only
+  while Solenoid 4 is open
 - `dxmr90_port1_pressure_bar`, `dxmr90_port2_pressure_bar`, and the matching
   pressure delta for unit-consistent charting
 - `stepper_state`, local enable, speed, command ID, D4/D5 raw/manual state,
@@ -306,17 +318,19 @@ Required Step-1 fields:
   blocked reason, control mode, post-boot
   D4-off arm state, D5-selected physical direction, fixed-direction safety,
   move/D8-seek/mode/speed capabilities, D9/ENA driver-output state, owner,
-  status sequence, and transport error. USB absolute position/target/remaining
-  and travel-envelope fields are null; the legacy homed flag is not used for
-  motion authorization.
+  status sequence, transport error, and optional read-only DRO capability,
+  freshness, position, boot-reference displacement, age, and frame counts. USB
+  open-loop command position/target/remaining and travel-envelope fields are
+  null; DRO fields remain separate and diagnostic-only, and the legacy homed
+  flag is not used for motion authorization.
 
 ## 7. Artifacts
 
 | Artifact | Producer | Status | Contents | Notes |
 | --- | --- | --- | --- | --- |
 | merged JSONL stdout | `supervisor.py` | exists | one JSON object per merged sample | Step-1/2 smoke artifact |
-| localhost/LAN dashboard/API | `dashboard.py` | exists | live HTML, JSON endpoints, SSE stream | shared simulation, USB, and Yún-network operator surface |
-| in-memory dashboard state | `dashboard.py` | exists | recent history, current metadata, recording flag, simulated solenoids | live UI state |
+| localhost/LAN dashboard/API | `dashboard.py` + `dashboard_app/` | exists | local HTML/CSS/ES modules, JSON endpoints, SSE stream | offline-capable shared simulation, USB, and Yún-network operator surface |
+| in-memory dashboard state | `dashboard_app/runtime.py` | exists | recent history, current metadata, recording flag, simulated solenoids | live UI state |
 | recording directory | `dashboard.py --record-dir` + `recorder.py` | exists | one subdirectory per run | defaults to `networked_sensors/recordings` |
 | merged CSV | `recorder.py` | exists | `merged_samples.csv` with run elapsed, merged values, source mode/health/age fields | primary analysis table |
 | source CSVs | `recorder.py` | exists | `esp32_raw.csv`, `dxmr90_raw.csv`, `stepper_raw.csv` with fresh source updates | stepper command/status shares the same run timeline as flow data |
@@ -334,13 +348,14 @@ Required Step-1 fields:
 | source simulation smoke | `python3 networked_sensors/supervisor.py --samples 12` | healthy simulated ESP32 + DXMR90 merge, modes, connected flags, age fields | No |
 | stale simulation smoke | `python3 networked_sensors/supervisor.py --scenario dxmr90_stale --samples 45 --drop-after-s 1 --stale-after-s 1` | held values age out and `dxmr90_connected` flips false | No |
 | missing simulation smoke | `python3 networked_sensors/supervisor.py --scenario dxmr90_missing --samples 3` | expected DXMR90 keys are present with null values and disconnected status | No |
-| stepper unit tests | `python3 -m unittest -v networked_sensors.test_stepper_control` | both physical endpoint directions, 5 ms qualified-versus-raw limit decoding, rejected-edge counters, compact frame bound, immutable Normal calibration, legacy-inversion refusal, D9 driver-disable status, one Timer1 owner for Local/Web/Home, exact finite targets, ramp profile, timer quantization, `ut` decode/dashboard visibility, validation, guarded Space Move/Stop, dashboard runtime, latched software E-STOP/reset, USB/network transport behavior, and stable merged shape | No; 42 tests passed |
+| stepper unit tests | `python3 -m unittest -v networked_sensors.test_stepper_control` | both physical endpoint directions, 5 ms qualified-versus-raw limit decoding, rejected-edge counters, compact frame bound, immutable Normal calibration, legacy-inversion refusal, D9 driver-disable status, one Timer1 owner for Local/Web/Home, exact finite targets, ramp profile, timer quantization, `ut` decode/dashboard visibility, grouped DRO telemetry validation/dashboard visibility, guarded Space Move/Stop, dashboard runtime, latched software E-STOP/reset, USB/network transport behavior, and stable merged shape | No; 45 tests passed |
 | USB status/control transport | the same unit-test command, including a pseudo-terminal | compact firmware JSON expands into the stable schema; exact speed/motion/E-STOP bytes and D4-off reset guard pass; missing USB is disconnected rather than fatal | No |
 | Yún T4B compile/upload | temporary official Arduino CLI 1.5.1, AVR core 1.8.8, AccelStepper 1.64.0; compile and verified upload for `arduino:avr:yun` | compact status plus manual-speed command use 48% flash and 18% RAM; live D4-off 3.0 mm/s setpoint echo passes with zero effective motion | Yún over USB for upload/live echo; passed |
 | Yún T4C compile/upload | same official temporary toolchain, compile and verified upload for `arduino:avr:yun` | direction mapping/status plus speed use 49% flash and 18% RAM; live Normal mapping/capability pass with D4 OFF and zero motion | Yún over USB for upload/live status; passed |
 | Yún fixed-direction/Timer1 compile and upload | same official temporary toolchain, compile/upload for `arduino:avr:yun` | runtime inversion is absent; D6/D8 use centralized physical-direction interlocks with stale-latch correction; D9 controls common-anode ENA- with a 200 ms wake-up; Timer1 owns Local Velocity pulses; target uses 22,620 bytes/78% flash and 1,453 bytes/56% RAM | Yún over USB; compile/upload and operator-confirmed Local Velocity run pass; exact two-endpoint D9 retreat matrix and Web Position timing pending |
 | Yún qualified-limit compile | Arduino CLI 1.4.0, AVR core 1.8.8, AccelStepper 1.64.0; compile for `arduino:avr:yun` | non-blocking 5 ms D6/D8 assertion qualification, compact `lx`, 288-byte checked frame, and Timer1 motion use 22,692 bytes/79% flash and 1,509 bytes/58% RAM | No; compile passed, upload and physical endpoint/rejected-edge matrix pending |
 | Yún unified-timer compile | Arduino CLI 1.4.0 and AVR core 1.8.8; compile for `arduino:avr:yun`; no external Arduino library | one Timer1 pulse engine owns Local Velocity, Web Position, and Home; the ISR stops exact finite targets and applies pending speed at pulse boundaries; compact `ut:1`; 20,222 bytes/70% flash and 1,457 bytes/56% RAM | No; compile passed, upload and physical speed/endpoint matrix pending |
+| Yún T4G DRO compile/upload | Arduino CLI 1.4.0 and AVR core 1.8.8; compile and verified upload for `arduino:avr:yun`; no external Arduino library | D10 PCINT6 falling-edge capture, 52-bit BCD validation, stale detection, 384-byte checked compact frame, and read-only dashboard telemetry fit at 21,228 bytes/74% flash and 1,653 bytes/64% global RAM; live position moved from 141.79 mm to 144.50 mm with +2.71 mm displacement, fresh advancing frames, one initial reject, and zero drops | Yún plus level-shifted AbsoluteDRO Plus; compile/upload/stationary and manual-change decode passed with no stepper connected; known-distance/sign/return/stale/reconnect checks pending |
 | Yún T5 compile | same official temporary toolchain, compile for `arduino:avr:yun` | limit-switch-only dual-mode firmware, boot disarm, optional D8 seek, relative move, Stop, and fixed acceleration fit at 63% flash and 27% global RAM | No; passed |
 | Yún T5 upload/stopped live status | verified upload plus USB-backed localhost status probe | Local Velocity, D4 OFF, D5 Forward, D6/D8 clear, boot armed, absolute position fields null, and zero effective speed | Yún over USB; passed without issuing motion |
 | Yún T5 transport tests | `python3 -m unittest -v networked_sensors.test_stepper_control` | mode/D8-seek/move/Stop wire bytes, unreferenced move acceptance, positive magnitude plus D5 Reverse resolving to a negative delta, status decoding, runtime acknowledgement, D5/limit guards, and simulation pass | No; 22 tests passed |
@@ -353,7 +368,7 @@ Required Step-1 fields:
 | dashboard/API smoke | `python3 networked_sensors/dashboard.py --host 127.0.0.1 --port 8000` plus localhost GET/POST/SSE probes | local UI and API render live samples, stale/missing source state, metadata, run state, and simulated solenoid controls | No |
 | recording/export smoke | `python3 networked_sensors/dashboard.py --record-dir /tmp/flow-dashboard-recordings` plus localhost start/stop/export probes | start/stop writes merged/source CSV, metadata JSON, summary JSON, export CSV, and download endpoints serve them | No |
 | no-quorum/source-independence contract | `python3 -m unittest -v networked_sensors.test_source_independence` | a deliberately blocked DXMR90 Modbus read does not delay advancing ESP32 merged samples; DXMR90 values publish after recovery | No; 1 deterministic test passed |
-| ESP32/dashboard contract | `python3 -m unittest -v networked_sensors.test_real_esp32` | primary/legacy layout, healthy v2, strict v3 health/null consistency, missing-ADC live transport, cached mDNS address, guarded keys 1-4, non-navigating export download, light-theme canvas/control coverage, delayed-POST 10 Hz merge responsiveness, 100 ms fallback, GPIO 10/fourth button, background `/events`, and dashboard states pass | No; 11 loopback/layout tests passed |
+| ESP32/dashboard contract | `python3 -m unittest -v networked_sensors.test_real_esp32` | primary/legacy layout, healthy v2, strict v3 health/null consistency, missing-ADC live transport, cached mDNS address, guarded keys 1-4, non-navigating export download, five-card channel/open-line summary, merged open-solenoid sum behavior, light-theme canvas/control coverage, equal three-panel pressure/flow layout with always-visible open-line flow sums, delayed-POST 10 Hz merge responsiveness, 100 ms fallback, GPIO 10/fourth button, background `/events`, and dashboard states pass | No; 14 loopback/layout tests passed |
 | ESP32 headless compile/upload | Arduino CLI/core/libraries, `esp32:esp32:adafruit_feather_esp32s3_nopsram` | nullable-sensor/four-output primary firmware compiles at 1,095,853 bytes/52% flash and 80,956 bytes/24% global RAM without HTML or `/test/*`; physical upload hashes verify | ESP32 USB for upload; passed |
 | ESP32 physical smoke | dashboard with `--esp32-source real --esp32-url URL` | sustained stream, plausible readings, safe real solenoid toggle, and recorded rows | ESP32 network |
 | SICK/DXMR90 adapter smoke | dashboard `--dxmr90-source real --dxmr90-data-path direct --dxmr90-rate-hz 10` plus API/history probe | both direct SICK process windows decode, fresh source rows sustain 10 Hz, and selected metrics reach the browser | SICK/DXMR90 network |

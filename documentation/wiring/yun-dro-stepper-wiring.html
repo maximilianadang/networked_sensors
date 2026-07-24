@@ -18,6 +18,7 @@
       --dir: #cf9800;
       --enable: #008b92;
       --switch: #65717a;
+      --nc: #8a9298;
       --v24: #e27580;
       --motor: #8b552e;
     }
@@ -116,6 +117,7 @@
     .dir { color: var(--dir); }
     .enable { color: var(--enable); }
     .switch { color: var(--switch); }
+    .nc { color: var(--nc); }
     .v24 { color: var(--v24); }
     .motor { color: var(--motor); }
 
@@ -128,10 +130,25 @@
 
     .white-photo { mix-blend-mode: multiply; }
 
-    .dro      { left: 30px;   top: 135px; width: 700px; height: 700px; }
-    .cable    { left: 670px;  top: 105px; width: 450px; height: 450px; }
-    .adapter  { left: 1115px; top: 330px; width: 270px; height: 285px; }
-    .shifter  { left: 1440px; top: 315px; width: 360px; height: 360px; }
+    .dro      { left: 30px;   top: 135px; width: 630px; height: 630px; }
+    .reader-board {
+      left: 600px;
+      top: 180px;
+      width: 480px;
+      height: 280px;
+      border: 3px solid #2d3235;
+      background: #fff;
+      box-shadow: 0 2px 8px rgba(0,0,0,.16);
+    }
+    .adapter  {
+      left: 1080px;
+      top: 310px;
+      width: 400px;
+      height: 300px;
+      object-fit: cover;
+      object-position: center bottom;
+    }
+    .shifter  { left: 1500px; top: 315px; width: 360px; height: 360px; }
     .yun      { left: 1880px; top: 220px; width: 760px; height: 760px; }
     .driver   { left: 1020px; top: 770px; width: 650px; height: 650px; }
 
@@ -157,11 +174,73 @@
     }
 
     .dro-label     { left: 56px;   top: 190px; }
-    .cable-label   { left: 705px;  top: 565px; text-align: center; }
-    .adapter-label { left: 1100px; top: 276px; }
-    .shift-label   { left: 1432px; top: 276px; }
+    .reader-label  { left: 600px;  top: 145px; }
+    .adapter-label {
+      left: 1130px;
+      top: 270px;
+      width: 300px;
+      text-align: center;
+      white-space: normal;
+    }
+    .shift-label   { left: 1492px; top: 276px; }
     .yun-label     { left: 2045px; top: 274px; }
     .driver-label  { left: 1018px; top: 733px; }
+
+    .surgery-caption,
+    .breakout-caption,
+    .plug-label {
+      position: absolute;
+      z-index: 16;
+      padding: 6px 9px;
+      border: 2px solid #c8cccf;
+      background: rgba(255,255,255,.98);
+      color: #33383c;
+      font-size: 15px;
+      line-height: 1.28;
+      font-weight: 800;
+      letter-spacing: .2px;
+    }
+
+    .surgery-caption {
+      left: 600px;
+      top: 468px;
+      width: 480px;
+    }
+
+    .surgery-caption strong { color: #111; }
+
+    .plug-label {
+      left: 760px;
+      top: 546px;
+      width: 290px;
+      text-align: center;
+    }
+
+    .breakout-caption {
+      left: 1078px;
+      top: 625px;
+      width: 402px;
+      text-align: center;
+      font-size: 17px;
+    }
+
+    .terminal-order {
+      display: inline-flex;
+      margin-top: 4px;
+      gap: 10px;
+      font-size: 19px;
+      letter-spacing: .4px;
+    }
+
+    .terminal-order span {
+      display: inline-grid;
+      min-width: 42px;
+      height: 29px;
+      place-items: center;
+      border: 2px solid currentColor;
+      border-radius: 3px;
+      background: #fff;
+    }
 
     .connection-labels {
       position: absolute;
@@ -296,8 +375,15 @@
     .wire-dir { stroke: var(--dir); }
     .wire-enable { stroke: var(--enable); }
     .wire-switch { stroke: var(--switch); }
+    .wire-nc { stroke: var(--nc); }
     .wire-v24 { stroke: var(--v24); }
     .wire-motor { stroke: var(--motor); }
+
+    .surgery-wire {
+      stroke: var(--gnd);
+      stroke-width: 6;
+      stroke-dasharray: 10 7;
+    }
 
     .landing {
       stroke: #fff;
@@ -362,7 +448,7 @@
   <main class="sheet">
     <header class="title">
       <h1>ARDUINO YÚN CLOSED-LOOP AXIS</h1>
-      <p>PHYSICAL WIRING LAYOUT · ONE iGAGING ABSOLUTEDRO PLUS AXIS</p>
+      <p>POST-SURGERY PHYSICAL WIRING · ONE iGAGING ABSOLUTEDRO PLUS AXIS</p>
     </header>
 
     <section class="key" aria-label="Wire color key">
@@ -377,29 +463,49 @@
         <span class="dir">DIR</span>
         <span class="enable">ENA</span>
         <span class="switch">SWITCH</span>
+        <span class="nc">UNUSED</span>
         <span class="v24">24V</span>
         <span class="motor">MOTOR</span>
       </div>
     </section>
 
     <img class="hardware white-photo dro" src="assets/igaging-single-axis.jpg" alt="iGaging AbsoluteDRO Plus scale and readout">
-    <img class="hardware white-photo cable" src="assets/micro-usb-mm-cable.jpg" alt="Micro USB male to male cable">
-    <img class="hardware adapter" src="assets/adafruit-3970-cutout-trimmed.png" alt="Adafruit Micro USB terminal adapter with A through E terminals">
+    <img class="hardware reader-board" src="assets/absolute-dro-reader-head.jpg" alt="Opened iGaging AbsoluteDRO Plus reader-head PCB with labeled REQ test point">
+    <img class="hardware white-photo adapter" src="assets/micro-usb-female-terminal-cable.webp" alt="Existing Micro USB female breakout cable with five-position terminal block">
     <img class="hardware white-photo shifter" src="assets/sparkfun-bob-12009.jpg" alt="SparkFun BOB-12009 bidirectional logic level converter">
     <img class="hardware white-photo yun" src="assets/arduino-yun-rev2-photo.jpg" alt="Arduino Yún Rev2">
     <img class="hardware white-photo driver" src="assets/dm542t.jpg" alt="StepperOnline DM542T stepper driver">
 
-    <div class="hw-label dro-label">iGAGING ABSOLUTEDRO PLUS<small>Micro-B data port on readout</small></div>
-    <div class="hw-label cable-label">MICRO-B MALE ↔ MALE CABLE<small>5 conductors</small></div>
-    <div class="hw-label adapter-label">MICRO-B BREAKOUT<small>Adafruit 3970 · cable plugs into top</small></div>
+    <div class="hw-label dro-label">iGAGING ABSOLUTEDRO PLUS<small>Captive Micro-B male lead from reader head</small></div>
+    <div class="hw-label reader-label">OPENED READER HEAD<small>One-time internal REQ → GND jumper</small></div>
+    <div class="hw-label adapter-label">FEMALE BREAKOUT CABLE<small>Existing S + D− D+ − terminal cable</small></div>
     <div class="hw-label shift-label">LOGIC LEVEL SHIFTER<small>SparkFun BOB-12009 · LV 3.3 V · HV 5 V</small></div>
     <div class="hw-label yun-label">ARDUINO YÚN REV2</div>
     <div class="hw-label driver-label">DM542T<small>5 V logic · common-anode inputs</small></div>
 
+    <div class="surgery-caption">
+      <strong>SOLDER INSIDE READER HEAD:</strong> REQ → verified PCB GND.
+      Confirm the chosen GND point measures &lt;2 Ω to the breakout <strong>−</strong> terminal before soldering.
+    </div>
+
+    <div class="plug-label">DRO CAPTIVE MICRO-B MALE<br>PLUGS DIRECTLY INTO FEMALE SOCKET</div>
+
+    <div class="breakout-caption">
+      TERMINAL ORDER ON YOUR CABLE
+      <div class="terminal-order" aria-label="Female breakout terminal order S, plus, D minus, D plus, minus">
+        <span class="nc">S</span>
+        <span class="v33">+</span>
+        <span class="clock">D−</span>
+        <span class="data">D+</span>
+        <span class="gnd">−</span>
+      </div>
+    </div>
+
     <section class="connection-labels" aria-label="Terminal assignments">
-      <h3>TERMINAL LABELS</h3>
-      <p><b>ADAPTER</b> <span class="v33">A = 3.3V</span> · <span class="clock">B = CLOCK</span> · <span class="data">C = DATA</span> · D + E = GND</p>
-      <p><b>LOW SIDE</b> <span class="clock">B → LV1</span> · <span class="data">C → LV2</span> · <span class="v33">A → LV</span> · D + E → GND</p>
+      <h3>POST-SURGERY TERMINAL LABELS</h3>
+      <p><b>DRO HEAD</b> REQ → verified GND pad · permanent internal jumper</p>
+      <p><b>BREAKOUT</b> <span class="nc">S = UNUSED</span> · <span class="v33">+ = 3.3V</span> · <span class="clock">D− = CLOCK</span> · <span class="data">D+ = DATA</span> · − = GND</p>
+      <p><b>LOW SIDE</b> <span class="clock">D− → LV1</span> · <span class="data">D+ → LV2</span> · <span class="v33">+ → LV</span> · − → GND</p>
       <p><b>HIGH SIDE</b> <span class="clock">HV1 → YÚN D10</span> · <span class="data">HV2 → YÚN D11</span> · <span class="v5">HV → 5V</span> · GND → GND</p>
       <p><b>DRIVER</b> <span class="step">D3 → PUL−</span> · <span class="dir">D2 → DIR−</span> · <span class="enable">D9 → ENA−</span> · <span class="v5">5V → PUL+/DIR+/ENA+</span></p>
     </section>
@@ -436,22 +542,24 @@
         </filter>
       </defs>
 
-      <!-- The two photographed Micro-B plugs: readout to cable, cable to adapter. -->
-      <path class="wire cable-wire" d="M590 373 H686 V456 H720" />
-      <path class="wire cable-wire" d="M1008 474 H1060 V362 H1249 V338" />
+      <!-- One-time reader-head surgery: solder REQ to a meter-verified PCB ground point. -->
+      <path class="wire surgery-wire" d="M949 378 C988 383 986 404 945 409" />
 
-      <!-- AbsoluteDRO adapter A-E to the 3.3 V side of the level shifter. -->
-      <path class="wire wire-v33" d="M1149 585 V688 H1671 V539 H1810 V831 H2267" />
-      <path class="wire wire-clock" d="M1201 585 V708 H1603 V570" />
-      <path class="wire wire-data" d="M1250 585 V728 H1634 V553" />
+      <!-- The DRO's captive Micro-B male lead plugs directly into the existing female cable. -->
+      <path class="wire cable-wire" d="M590 373 H665 V540 H1375 V536 H1405" />
+
+      <!-- Existing female breakout: S is unused; +, D-, D+, and - feed the interface. -->
+      <path class="wire wire-v33" d="M1166 487 V560 H1731 V539 H1810 V831 H2267" />
+      <path class="wire wire-clock" d="M1180 487 V580 H1663 V570" />
+      <path class="wire wire-data" d="M1194 487 V600 H1694 V553" />
 
       <!-- 5 V side: CLOCK/DATA into D10/D11. -->
-      <path class="wire wire-clock" d="M1534 507 V250 H2232 V402" />
-      <path class="wire wire-data" d="M1563 490 V270 H2207 V402" />
+      <path class="wire wire-clock" d="M1594 507 V250 H2232 V402" />
+      <path class="wire wire-data" d="M1623 490 V270 H2207 V402" />
 
       <!-- Shifter rails to the Yún power header. -->
-      <path class="wire wire-v5" d="M1595 472 H1788 V851 H2291 V831 M2291 831 V895 H1735 V905 H1502 M1735 905 V955 H1502 M1735 955 V1006 H1502" />
-      <path class="wire wire-gnd" d="M1300 585 V748 H1699 V523 H1766 M1352 585 V768 H1415 M1415 748 V788 H1766 M1625 455 H1766 V871 H2317 V831 M2317 831 V930 H2160 V1213 H2192" />
+      <path class="wire wire-v5" d="M1655 472 H1848 V851 H2291 V831 M2291 831 V895 H1735 V905 H1502 M1735 905 V955 H1502 M1735 955 V1006 H1502" />
+      <path class="wire wire-gnd" d="M1207 487 V615 H1450 V748 H1759 V523 M1685 455 H1826 V871 H2317 V831 M2317 831 V930 H2160 V1213 H2192" />
 
       <!-- Existing common-anode stepper interface: D3/D2/D9 and Yún 5 V. -->
       <path class="wire wire-step" d="M2419 402 V440 H1835 V930 H1502" />
@@ -474,19 +582,21 @@
 
       <!-- Visible landing markers sit on the photographed screws/pads/headers. -->
       <g>
-        <circle class="landing" cx="1149" cy="585" r="7" fill="var(--v33)" />
-        <circle class="landing" cx="1201" cy="585" r="7" fill="var(--clock)" />
-        <circle class="landing" cx="1250" cy="585" r="7" fill="var(--data)" />
-        <circle class="landing" cx="1300" cy="585" r="7" fill="var(--gnd)" />
-        <circle class="landing" cx="1352" cy="585" r="7" fill="var(--gnd)" />
-        <circle class="landing" cx="1603" cy="570" r="6" fill="var(--clock)" />
-        <circle class="landing" cx="1634" cy="553" r="6" fill="var(--data)" />
-        <circle class="landing" cx="1671" cy="539" r="6" fill="var(--v33)" />
-        <circle class="landing" cx="1699" cy="523" r="6" fill="var(--gnd)" />
-        <circle class="landing" cx="1534" cy="507" r="6" fill="var(--clock)" />
-        <circle class="landing" cx="1563" cy="490" r="6" fill="var(--data)" />
-        <circle class="landing" cx="1595" cy="472" r="6" fill="var(--v5)" />
-        <circle class="landing" cx="1625" cy="455" r="6" fill="var(--gnd)" />
+        <circle class="landing" cx="949" cy="378" r="8" fill="#ffd43b" />
+        <circle class="landing" cx="945" cy="409" r="8" fill="var(--gnd)" />
+        <circle class="landing" cx="1152" cy="487" r="6" fill="var(--nc)" />
+        <circle class="landing" cx="1166" cy="487" r="6" fill="var(--v33)" />
+        <circle class="landing" cx="1180" cy="487" r="6" fill="var(--clock)" />
+        <circle class="landing" cx="1194" cy="487" r="6" fill="var(--data)" />
+        <circle class="landing" cx="1207" cy="487" r="6" fill="var(--gnd)" />
+        <circle class="landing" cx="1663" cy="570" r="6" fill="var(--clock)" />
+        <circle class="landing" cx="1694" cy="553" r="6" fill="var(--data)" />
+        <circle class="landing" cx="1731" cy="539" r="6" fill="var(--v33)" />
+        <circle class="landing" cx="1759" cy="523" r="6" fill="var(--gnd)" />
+        <circle class="landing" cx="1594" cy="507" r="6" fill="var(--clock)" />
+        <circle class="landing" cx="1623" cy="490" r="6" fill="var(--data)" />
+        <circle class="landing" cx="1655" cy="472" r="6" fill="var(--v5)" />
+        <circle class="landing" cx="1685" cy="455" r="6" fill="var(--gnd)" />
         <circle class="landing" cx="2207" cy="402" r="6" fill="var(--data)" />
         <circle class="landing" cx="2232" cy="402" r="6" fill="var(--clock)" />
         <circle class="landing" cx="2257" cy="402" r="6" fill="var(--enable)" />
@@ -530,10 +640,10 @@
     </section>
 
     <section class="notes">
-      <strong>Wire the DRO only with all power removed.</strong> This Micro-B connection carries the scale’s 3.3 V clock/data protocol; it is not a USB host connection. Configure D10 and D11 as <strong>INPUT</strong> with no internal pull-ups. Keep both physical limit switches active—the DRO is position feedback, not a safety device. D9/ENA does not isolate the 24 V supply. <strong>Power the Yún from regulated 5 V; VIN is 5 V maximum.</strong>
+      <strong>Perform the REQ → GND surgery and all wiring with every supply removed.</strong> After surgery, the DRO’s captive male plugs directly into the existing female cable—no 3970, 3972, or male-to-male cable is used. Leave <strong>S disconnected</strong>. This is a 3.3 V clock/data connection, not USB. Configure D10 and D11 as <strong>INPUT</strong> with no internal pull-ups. Keep both physical limit switches active—the DRO is position feedback, not a safety device. <strong>Power the Yún from regulated 5 V; VIN is 5 V maximum.</strong>
     </section>
 
-    <div class="source-line">Terminal mapping: TouchDRO AbsoluteDRO Plus · Adafruit 3970 · SparkFun BOB-12009 · DM542T V4.0</div>
+    <div class="source-line">Pin mapping/reference PCB: TouchDRO AbsoluteDRO Plus · SparkFun BOB-12009 · DM542T V4.0</div>
   </main>
 </body>
 </html>

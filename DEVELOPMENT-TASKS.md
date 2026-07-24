@@ -45,8 +45,9 @@ data acquisition and operator workflow:
     endpoints.
   - [x] Include cards, plots, metadata form, run state, and simulated solenoid
     controls.
-  - [x] Place the full-width Yún Stepper Motion panel above the secondary Test
-    Metadata and Sources row in both visual and keyboard-navigation order.
+  - [x] Keep the Yún Stepper Motion and Test Metadata panels side by side on
+    desktop, with Sources full-width below them. Split the stepper panel between
+    the vertical piston instrument and its consolidated controls/interlocks.
   - [x] Verification: localhost HTML/API/SSE smoke in simulation mode.
 - [x] **Step 4 - recorder/exporter.**
   - [x] Write source-scoped fresh update logs and merged CSV to disk.
@@ -268,6 +269,73 @@ data acquisition and operator workflow:
     issued during deployment.
   - [ ] Verify sustained v3 telemetry from the field-LAN laptop, then perform
     one deliberately safe solenoid toggle through the laptop dashboard.
+- [x] **Step 7A - make the dashboard code mirror the operator page.**
+  - Refactor for field maintainability without changing the page's appearance,
+    data schema, existing HTTP API contracts, control behavior, recording
+    behavior, or hardware safety rules. Complete this before the full bench
+    handoff in Step 8. One additive read-only `/api/config` endpoint is allowed
+    to keep browser inputs synchronized with Python command limits.
+  - Preserve the current no-framework, no-CDN, offline-capable design. Running
+    the dashboard must not require Node, a bundler, generated frontend assets,
+    or any dependency beyond the existing Python application.
+  - First capture a behavior baseline: inventory every endpoint and keyboard
+    shortcut, save representative healthy/stale/missing simulator states, and
+    record desktop, laptop, and narrow-screen visual smoke expectations.
+  - Move the embedded `INDEX_HTML` document out of `dashboard.py`. Keep
+    `dashboard.py` as the short CLI/bootstrap and compatibility surface; put
+    runtime state, API handlers, and explicitly allowlisted assets under
+    `dashboard_app/`.
+  - Give the frontend a small, obvious top-level structure: one HTML document,
+    one shared stylesheet, an application/state entrypoint, shared API/chart/
+    formatting helpers, one declarative module for the three-chart row, and
+    component modules named after the visible page regions: toolbar/run
+    controls, metric grid, stepper/piston, test metadata, and sources.
+  - Make each component module own its DOM lookup, rendering, and event wiring.
+    Keep cross-component state flow in the application entrypoint; do not
+    recreate the current page-wide `render()` function in a different file.
+  - Organize CSS in the same visual order as the page, with labelled base,
+    layout, shared-control, and component sections. Keep theme tokens and
+    responsive breakpoints in one documented location.
+  - Establish one source of truth for operational values. Backend and safety
+    limits stay in Python (preferably `supervisor_core.py`) and are delivered to
+    the page as read-only configuration; HTML input attributes and JavaScript
+    validation must derive from that configuration. Presentation-only values,
+    such as chart history length, precision, units, colors, and series labels,
+    belong in one clearly named frontend configuration module.
+  - Remove unexplained numeric and field-name literals from component code.
+    Document the distinction between editable display configuration and
+    controller-enforced safety limits so a field edit cannot silently weaken a
+    backend guard.
+  - Replace tests that inspect substrings of one giant `INDEX_HTML` constant
+    with asset, served-page, endpoint, configuration, and behavior assertions.
+    Retain focused tests for keyboard guards, pending-command behavior,
+    solenoid-to-flow mapping, open-line sums, E-STOP, and stepper interlocks.
+  - Add `DASHBOARD-CODE-MAP.md` as a short field guide mapping every visible
+    panel to its HTML, CSS, component module, backend fields/endpoints, editable
+    constants, and relevant tests. Link it from `CLAUDE.md`.
+  - Migrate in reviewable stages: extract static assets; separate shared
+    helpers/state; split visible components; centralize configuration; replace
+    brittle tests and add the field map. Run the full suite after each stage.
+  - Verification: `python3 -m unittest discover -s networked_sensors -v` from
+    the repository parent, `python3 protocol_map.py --check`, a localhost
+    HTML/CSS/JavaScript/API/SSE smoke, and browser smoke at the three recorded
+    viewport sizes in healthy, stale, and missing-source modes.
+  - **Gate:** a maintainer unfamiliar with the code can use the field map to
+    locate a panel, change a label or presentation constant in one place, add a
+    metric or chart series without editing unrelated components, and identify
+    the authoritative backend location for an operational limit. The visual
+    dashboard and all existing operator controls behave as they did before the
+    refactor.
+  - **Completed:** `dashboard.py` is 288 lines; the runtime, HTTP layer, local
+    assets, shared helpers, and visual components are separated under
+    `dashboard_app/`. Operational browser limits come from `/api/config`, the
+    offline field guide is `DASHBOARD-CODE-MAP.md`, and all 63 desktop tests
+    pass. The desktop operator view uses the full viewport without page
+    scrolling: full-width status and control rows, five live metrics, three
+    equal-width charts, and a final 50/50 row containing the consolidated
+    vertical-piston/stepper panel and Test Metadata. Secondary source and
+    motion telemetry remains available in the Source details drawer without
+    consuming primary dashboard height.
 - [ ] **Step 8 - full bench handoff.**
   - Run simulator, ESP32-only, DXMR90-only, and full hardware verification tiers.
   - Update `RUNBOOK.md`, `PROTOCOL.md`, and `TESTBENCH_CHECKLIST.md` with the

@@ -11,9 +11,33 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
+from urllib.request import urlopen
 
-from networked_sensors.dashboard import DashboardRuntime, INDEX_HTML, parse_args
-from networked_sensors.supervisor_core import RealEsp32Source, SourceMerger
+from networked_sensors.dashboard import (
+    DashboardRuntime,
+    DashboardServer,
+    INDEX_HTML,
+    build_handler,
+    load_dashboard_asset,
+    parse_args,
+)
+from networked_sensors.supervisor_core import (
+    RealEsp32Source,
+    SimulatedDxmr90Source,
+    SimulatedEsp32Source,
+    SourceMerger,
+)
+
+
+DASHBOARD_CSS = load_dashboard_asset("dashboard.css")
+APP_JS = load_dashboard_asset("app.js")
+API_JS = load_dashboard_asset("api.js")
+CHARTS_JS = load_dashboard_asset("charts.js")
+CONFIG_JS = load_dashboard_asset("config.js")
+DOM_JS = load_dashboard_asset("dom.js")
+METRICS_JS = load_dashboard_asset("components/metrics.js")
+SOURCES_JS = load_dashboard_asset("components/sources.js")
+TOOLBAR_JS = load_dashboard_asset("components/toolbar.js")
 
 
 class Esp32FirmwareLayoutTests(unittest.TestCase):
@@ -41,51 +65,244 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertIn("const char HTML[]", legacy)
         self.assertIn('"text/html"', legacy)
         self.assertIn('id="sol3"', INDEX_HTML)
-        self.assertIn("const solenoidCount = 4", INDEX_HTML)
         self.assertIn('id="espPressureAdc"', INDEX_HTML)
         self.assertIn('id="espFlowAdc"', INDEX_HTML)
-        self.assertIn('mode === "off"', INDEX_HTML)
-        self.assertIn("realAndLive", INDEX_HTML)
-        self.assertIn("const pendingSolenoids = new Set()", INDEX_HTML)
-        self.assertIn("function stopPollingFallback()", INDEX_HTML)
-        self.assertIn("}, 100);", INDEX_HTML)
+        self.assertIn('mode === "off"', SOURCES_JS)
+        self.assertIn("realAndLive", TOOLBAR_JS)
+        self.assertIn("const pendingSolenoids = new Set()", TOOLBAR_JS)
+        self.assertIn("function stopPollingFallback()", APP_JS)
+        self.assertIn("pollingIntervalMs: 100", CONFIG_JS)
 
     def test_dashboard_solenoid_keyboard_shortcuts_are_guarded(self) -> None:
         for key in range(1, 5):
             self.assertIn(f'aria-keyshortcuts="{key}"', INDEX_HTML)
-        self.assertIn('document.addEventListener("keydown", event => {', INDEX_HTML)
-        self.assertIn('async function toggleSolenoid(index)', INDEX_HTML)
-        self.assertIn('void toggleSolenoid(index)', INDEX_HTML)
-        self.assertIn('target.isContentEditable', INDEX_HTML)
-        self.assertIn('["INPUT", "TEXTAREA", "SELECT"]', INDEX_HTML)
-        self.assertIn('event.defaultPrevented || event.repeat', INDEX_HTML)
-        self.assertIn('event.ctrlKey || event.altKey || event.metaKey', INDEX_HTML)
-        self.assertIn('if (!button || button.disabled) return;', INDEX_HTML)
+        self.assertIn('document.addEventListener("keydown", event => {', APP_JS)
+        self.assertIn('async function toggleSolenoid(index)', TOOLBAR_JS)
+        self.assertIn('void toolbar.toggleSolenoid(index)', APP_JS)
+        self.assertIn('target.isContentEditable', DOM_JS)
+        self.assertIn('["INPUT", "TEXTAREA", "SELECT"]', DOM_JS)
+        self.assertIn('event.defaultPrevented || event.repeat', DOM_JS)
+        self.assertIn('event.ctrlKey || event.altKey || event.metaKey', DOM_JS)
+        self.assertIn('if (!button || button.disabled', TOOLBAR_JS)
 
     def test_dashboard_export_download_does_not_navigate_live_page(self) -> None:
-        self.assertNotIn('window.location.href = "/api/export/latest"', INDEX_HTML)
-        self.assertIn('const link = document.createElement("a")', INDEX_HTML)
-        self.assertIn('link.href = "/api/export/latest"', INDEX_HTML)
-        self.assertIn('link.download = "export.csv"', INDEX_HTML)
-        self.assertIn('document.body.appendChild(link)', INDEX_HTML)
-        self.assertIn('link.click()', INDEX_HTML)
-        self.assertIn('link.remove()', INDEX_HTML)
+        self.assertNotIn('window.location.href = "/api/export/latest"', API_JS)
+        self.assertIn('const link = document.createElement("a")', API_JS)
+        self.assertIn('exportLatest: "/api/export/latest"', API_JS)
+        self.assertIn('link.download = "export.csv"', API_JS)
+        self.assertIn('document.body.appendChild(link)', API_JS)
+        self.assertIn('link.click()', API_JS)
+        self.assertIn('link.remove()', API_JS)
 
     def test_dashboard_light_theme_and_operator_panel_order(self) -> None:
-        self.assertIn("color-scheme: light", INDEX_HTML)
-        self.assertIn("--control: #ffffff", INDEX_HTML)
-        self.assertIn("--chart-bg: #ffffff", INDEX_HTML)
-        self.assertIn('ctx.fillStyle = themeColor("--chart-bg")', INDEX_HTML)
-        self.assertIn('ctx.strokeStyle = themeColor("--chart-grid")', INDEX_HTML)
-        self.assertIn('ctx.fillStyle = themeColor("--chart-label")', INDEX_HTML)
-        self.assertIn('color: themeColor("--chart-blue")', INDEX_HTML)
-        self.assertNotIn('ctx.fillStyle = "#12161b"', INDEX_HTML)
-        self.assertNotIn("background: #242a32", INDEX_HTML)
+        self.assertIn("color-scheme: light", DASHBOARD_CSS)
+        self.assertIn("--control: #ffffff", DASHBOARD_CSS)
+        self.assertIn("--chart-bg: #ffffff", DASHBOARD_CSS)
+        self.assertIn('ctx.fillStyle = themeColor("--chart-bg")', CHARTS_JS)
+        self.assertIn('ctx.strokeStyle = themeColor("--chart-grid")', CHARTS_JS)
+        self.assertIn('ctx.fillStyle = themeColor("--chart-label")', CHARTS_JS)
+        self.assertIn('themeColor(item.color)', CHARTS_JS)
+        self.assertNotIn('ctx.fillStyle = "#12161b"', CHARTS_JS)
+        self.assertNotIn("background: #242a32", DASHBOARD_CSS)
         stepper_panel = INDEX_HTML.index("<h2>Yún Stepper Motion</h2>")
         metadata_panel = INDEX_HTML.index("<h2>Test Metadata</h2>")
-        sources_panel = INDEX_HTML.index("<h2>Sources</h2>")
+        sources_panel = INDEX_HTML.index("<span>Source details</span>")
         self.assertLess(stepper_panel, metadata_panel)
         self.assertLess(stepper_panel, sources_panel)
+        self.assertIn('<article class="control-panel stepper-panel">', INDEX_HTML)
+        self.assertIn('<article class="metadata-panel">', INDEX_HTML)
+        self.assertIn('<details class="source-panel source-drawer">', INDEX_HTML)
+        self.assertIn(
+            '<label>Powder flow rate<input name="powder_flow_rate_g_per_min"',
+            INDEX_HTML,
+        )
+        self.assertIn('<label>Description<input name="description"', INDEX_HTML)
+        self.assertIn('class="wide metadata-notes"', INDEX_HTML)
+        self.assertIn(
+            ".lower-grid {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));",
+            DASHBOARD_CSS,
+        )
+
+    def test_dashboard_uses_field_readable_type_and_compact_top_controls(self) -> None:
+        self.assertNotIn("<h1>Flow Management Supervisor</h1>", INDEX_HTML)
+        self.assertNotIn('id="configuredMode"', INDEX_HTML)
+        self.assertNotIn('id="sampleText"', INDEX_HTML)
+        self.assertNotIn('id="recordingText"', INDEX_HTML)
+        self.assertNotIn('class="readout"', INDEX_HTML)
+        self.assertIn('id="clockText" class="clock-text"', INDEX_HTML)
+        self.assertIn("font-size: 1.25rem", DASHBOARD_CSS)
+        self.assertIn(">E-STOP</button>", INDEX_HTML)
+        self.assertNotIn("SOFTWARE E-STOP", INDEX_HTML)
+        self.assertIn(
+            "grid-template-columns: repeat(6, minmax(0, 1fr))",
+            DASHBOARD_CSS,
+        )
+        self.assertIn(
+            "grid-template-columns: minmax(360px, 1fr) minmax(240px, 300px) minmax(480px, 1fr)",
+            DASHBOARD_CSS,
+        )
+        self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", DASHBOARD_CSS)
+        self.assertIn("height: 100dvh", DASHBOARD_CSS)
+        self.assertIn(
+            "grid-template-rows: 86px 99px minmax(0, 1fr) 486px",
+            DASHBOARD_CSS,
+        )
+        self.assertIn("overflow: hidden", DASHBOARD_CSS)
+        self.assertIn("max-width: 300px", DASHBOARD_CSS)
+        self.assertIn("min-height: 76px", DASHBOARD_CSS)
+        self.assertIn("font-size: 1.25rem", DASHBOARD_CSS)
+        self.assertNotRegex(DASHBOARD_CSS, r"font-size:\s*0\.")
+        self.assertIn("`${16 * ratio}px system-ui, sans-serif`", CHARTS_JS)
+
+    def test_dashboard_chart_layout_and_open_flow_sums(self) -> None:
+        pressure_panel = INDEX_HTML.index("<h2>Pressure (bar)</h2>")
+        esp_flow_panel = INDEX_HTML.index("<h2>ESP32 Mass Flow (g/min)</h2>")
+        sick_flow_panel = INDEX_HTML.index("<h2>SICK Mass Flow (g/min)</h2>")
+        self.assertLess(pressure_panel, esp_flow_panel)
+        self.assertLess(esp_flow_panel, sick_flow_panel)
+        self.assertIn("main {\n  width: 100%;\n  margin: 0;", DASHBOARD_CSS)
+        self.assertNotIn("width: min(1480px, 100%)", DASHBOARD_CSS)
+        self.assertIn("grid-template-columns: repeat(3, minmax(0, 1fr))", DASHBOARD_CSS)
+        self.assertIn("height: 320px", DASHBOARD_CSS)
+
+        self.assertIn('id="pressureChart"', INDEX_HTML)
+        self.assertIn('id="espFlowChart"', INDEX_HTML)
+        self.assertIn('id="sickFlowChart"', INDEX_HTML)
+        self.assertNotIn('id="sickPressureChart"', INDEX_HTML)
+        self.assertNotIn('id="flowChart"', INDEX_HTML)
+
+        for field in (
+            "esp32_p1_bar",
+            "esp32_p2_bar",
+            "esp32_p3_bar",
+            "dxmr90_port1_pressure_bar",
+            "dxmr90_port2_pressure_bar",
+            "esp32_f1_gmin",
+            "esp32_f2_gmin",
+            "esp32_f3_gmin",
+            "dxmr90_port1_mass_flow_g_min",
+            "dxmr90_port2_mass_flow_g_min",
+        ):
+            self.assertIn(f'key: "{field}"', CONFIG_JS)
+
+        self.assertNotIn("espFlowSumToggle", INDEX_HTML)
+        self.assertNotIn("sickFlowSumToggle", INDEX_HTML)
+        self.assertNotIn("chart-toggle", INDEX_HTML)
+        self.assertEqual(INDEX_HTML.count(">Open SUM</span>"), 2)
+        self.assertIn('key: "esp32_open_flow_gmin"', CONFIG_JS)
+        self.assertIn('key: "dxmr90_open_total_mass_flow_g_min"', CONFIG_JS)
+
+    def test_dashboard_metric_grid_uses_channel_and_open_line_summaries(self) -> None:
+        self.assertIn(
+            "grid-template-columns: repeat(5, minmax(150px, 1fr))",
+            DASHBOARD_CSS,
+        )
+        self.assertIn("<label>ESP32 Pressure</label>", INDEX_HTML)
+        for channel in range(1, 4):
+            self.assertIn(f'id="mEspP{channel}"', INDEX_HTML)
+            self.assertIn(
+                f'numberValue(sample, "esp32_p{channel}_bar", digits.esp32Pressure)',
+                METRICS_JS,
+            )
+        self.assertIn("<label>SICK Pressure (max)</label>", INDEX_HTML)
+        self.assertIn('setText(els.mSickPressure, maxNumberValue(sample, [', METRICS_JS)
+        self.assertIn('"dxmr90_port1_pressure_bar"', METRICS_JS)
+        self.assertIn('"dxmr90_port2_pressure_bar"', METRICS_JS)
+
+        self.assertIn("<label>Open-Line Air Flow</label>", INDEX_HTML)
+        self.assertIn(
+            'numberValue(sample, "esp32_open_flow_gmin", digits.massFlow)',
+            METRICS_JS,
+        )
+
+        self.assertIn("<label>SICK Flow · Solenoid 4</label>", INDEX_HTML)
+        self.assertIn(
+            'numberValue(sample, "dxmr90_open_total_mass_flow_g_min", digits.massFlow)',
+            METRICS_JS,
+        )
+        self.assertIn("<label>Heartbeat</label>", INDEX_HTML)
+        self.assertNotIn("<label>P combined</label>", INDEX_HTML)
+
+
+class DashboardAssetServingTests(unittest.TestCase):
+    def test_serves_local_assets_and_read_only_configuration(self) -> None:
+        runtime = DashboardRuntime(
+            scenario="healthy",
+            rate_hz=10.0,
+            drop_after_s=2.0,
+            stale_after_s=5.0,
+            history_limit=20,
+            record_dir=Path("/tmp/dashboard-asset-test-recordings"),
+            esp32_source="sim",
+            dxmr90_source="sim",
+            stepper_source="sim",
+            stepper_port="/dev/null",
+            stepper_baud=9600,
+            dxmr90_host="127.0.0.1",
+            dxmr90_port=502,
+            dxmr90_unit_id=1,
+            dxmr90_timeout=0.1,
+            dxmr90_addressing="one-based",
+            dxmr90_word_order="high-low",
+            dxmr90_data_path="direct",
+            dxmr90_rate_hz=10.0,
+        )
+        server = DashboardServer(("127.0.0.1", 0), build_handler(runtime, quiet=True))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+        base_url = f"http://{host}:{port}"
+        try:
+            expected = {
+                "/": "text/html",
+                "/assets/dashboard.css": "text/css",
+                "/assets/app.js": "text/javascript",
+                "/assets/components/stepper.js": "text/javascript",
+                "/api/config": "application/json",
+            }
+            for path, content_type in expected.items():
+                with self.subTest(path=path), urlopen(base_url + path) as response:
+                    self.assertEqual(response.status, HTTPStatus.OK)
+                    self.assertEqual(response.headers.get_content_type(), content_type)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertTrue(response.read())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1.0)
+            runtime.stop()
+
+
+class OpenFlowSummaryTests(unittest.TestCase):
+    def test_merger_sums_only_channels_with_open_solenoids(self) -> None:
+        esp32 = SimulatedEsp32Source(auto_sequence=False)
+        dxmr90 = SimulatedDxmr90Source()
+        merger = SourceMerger([esp32, dxmr90])
+        timestamp = datetime.now(timezone.utc)
+
+        closed = merger.poll(1.0, timestamp)
+        self.assertEqual(closed["esp32_open_flow_gmin"], 0.0)
+        self.assertEqual(closed["dxmr90_open_total_mass_flow_g_min"], 0.0)
+
+        esp32.set_solenoid(0, True)
+        esp32.set_solenoid(3, True)
+        opened = merger.poll(1.1, timestamp)
+        self.assertEqual(
+            opened["esp32_open_flow_gmin"],
+            opened["esp32_f1_gmin"],
+        )
+        self.assertEqual(
+            opened["dxmr90_open_total_mass_flow_g_min"],
+            opened["dxmr90_total_mass_flow_g_min"],
+        )
+
+        esp32.set_solenoid(1, True)
+        two_esp32_lines = merger.poll(1.2, timestamp)
+        self.assertAlmostEqual(
+            two_esp32_lines["esp32_open_flow_gmin"],
+            two_esp32_lines["esp32_f1_gmin"] + two_esp32_lines["esp32_f2_gmin"],
+            places=2,
+        )
 
 
 class _Esp32ContractServer(ThreadingHTTPServer):

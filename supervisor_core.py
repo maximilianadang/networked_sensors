@@ -86,9 +86,12 @@ DEFAULT_STEPPER_LIMIT_QUALIFICATION_MS = 5.0
 # Quantity bounds only. They are not an absolute-position safety envelope;
 # D6/D8 stop travel into their respective ends.
 DEFAULT_STEPPER_MAX_DISTANCE_MM = DEFAULT_STEPPER_TRAVEL_MM
+DEFAULT_STEPPER_MIN_SPEED_MM_S = 0.1
 DEFAULT_STEPPER_MAX_SPEED_MM_S = 10.0
 DEFAULT_STEPPER_ACCELERATION_MM_S2 = 5.0
-DEFAULT_STEPPER_MIN_SPEED_SPS = round(0.1 * DEFAULT_STEPPER_STEPS_PER_MM)
+DEFAULT_STEPPER_MIN_SPEED_SPS = round(
+    DEFAULT_STEPPER_MIN_SPEED_MM_S * DEFAULT_STEPPER_STEPS_PER_MM
+)
 DEFAULT_STEPPER_MAX_SPEED_SPS = round(
     DEFAULT_STEPPER_MAX_SPEED_MM_S * DEFAULT_STEPPER_STEPS_PER_MM
 )
@@ -369,6 +372,14 @@ class SimulatedStepperSource:
         "stepper_pulse_measurement_capable",
         "stepper_measured_pulse_rate_sps",
         "stepper_measured_speed_mm_s",
+        "stepper_dro_capable",
+        "stepper_dro_fresh",
+        "stepper_dro_position_mm",
+        "stepper_dro_displacement_mm",
+        "stepper_dro_sample_age_ms",
+        "stepper_dro_valid_frame_count",
+        "stepper_dro_rejected_frame_count",
+        "stepper_dro_dropped_frame_count",
         "stepper_acceleration_mm_s2",
         "stepper_command_id",
         "stepper_positive_limit_active",
@@ -660,6 +671,14 @@ class SimulatedStepperSource:
             "stepper_pulse_measurement_capable": False,
             "stepper_measured_pulse_rate_sps": None,
             "stepper_measured_speed_mm_s": None,
+            "stepper_dro_capable": False,
+            "stepper_dro_fresh": False,
+            "stepper_dro_position_mm": None,
+            "stepper_dro_displacement_mm": None,
+            "stepper_dro_sample_age_ms": None,
+            "stepper_dro_valid_frame_count": None,
+            "stepper_dro_rejected_frame_count": None,
+            "stepper_dro_dropped_frame_count": None,
             "stepper_acceleration_mm_s2": round(self._acceleration_mm_s2, 4),
             "stepper_command_id": self._command_id,
             "stepper_positive_limit_active": self._positive_limit_active,
@@ -846,6 +865,58 @@ class UsbStepperSource:
         else:
             measured_pulse_rate_sps = None
             measured_speed_mm_s = None
+
+        dro_keys = ("dc", "df", "dr", "dd", "da", "dq", "dx")
+        dro_capable = all(key in payload for key in dro_keys)
+        if any(key in payload for key in dro_keys) and not dro_capable:
+            raise ValueError("USB DRO status fields must be provided together")
+        if dro_capable:
+            if cls._wire_level(payload, "dc") != 1:
+                raise ValueError("USB stepper field dc must be 1 when present")
+            dro_fresh = cls._wire_level(payload, "df") == 1
+            dro_position_raw = payload.get("dr")
+            dro_displacement_raw = payload.get("dd")
+            dro_age_ms = payload.get("da")
+            dro_valid_frames = payload.get("dq")
+            dro_diagnostics = payload.get("dx")
+            for key, value in (
+                ("dr", dro_position_raw),
+                ("dd", dro_displacement_raw),
+                ("da", dro_age_ms),
+                ("dq", dro_valid_frames),
+                ("dx", dro_diagnostics),
+            ):
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError(f"USB stepper field {key} must be an integer")
+            if not -(2**31) <= dro_position_raw <= 2**31 - 1:
+                raise ValueError("USB stepper field dr must fit a signed 32-bit integer")
+            if not -(2**31) <= dro_displacement_raw <= 2**31 - 1:
+                raise ValueError("USB stepper field dd must fit a signed 32-bit integer")
+            if not -1 <= dro_age_ms <= 2**31 - 1:
+                raise ValueError("USB stepper field da must be -1..2147483647")
+            if not 0 <= dro_valid_frames <= 0xFFFFFFFF:
+                raise ValueError("USB stepper field dq must be 0..4294967295")
+            if not 0 <= dro_diagnostics <= 0xFFFF:
+                raise ValueError("USB stepper field dx must be 0..65535")
+            if dro_valid_frames == 0 and (dro_age_ms != -1 or dro_fresh):
+                raise ValueError("USB DRO cannot be fresh before its first valid frame")
+            if dro_valid_frames > 0 and dro_age_ms < 0:
+                raise ValueError("USB DRO sample age is missing after a valid frame")
+            dro_position_mm: float | None = round(dro_position_raw / 100.0, 2)
+            dro_displacement_mm: float | None = round(
+                dro_displacement_raw / 100.0,
+                2,
+            )
+            dro_rejected_frames: int | None = (dro_diagnostics >> 8) & 0xFF
+            dro_dropped_frames: int | None = dro_diagnostics & 0xFF
+        else:
+            dro_fresh = False
+            dro_position_mm = None
+            dro_displacement_mm = None
+            dro_age_ms = None
+            dro_valid_frames = None
+            dro_rejected_frames = None
+            dro_dropped_frames = None
 
         direction_sign_value = payload.get("ds")
         if direction_sign_value is not None:
@@ -1047,6 +1118,14 @@ class UsbStepperSource:
             "stepper_pulse_measurement_capable": pulse_measurement_capable,
             "stepper_measured_pulse_rate_sps": measured_pulse_rate_sps,
             "stepper_measured_speed_mm_s": measured_speed_mm_s,
+            "stepper_dro_capable": dro_capable,
+            "stepper_dro_fresh": dro_fresh,
+            "stepper_dro_position_mm": dro_position_mm,
+            "stepper_dro_displacement_mm": dro_displacement_mm,
+            "stepper_dro_sample_age_ms": dro_age_ms,
+            "stepper_dro_valid_frame_count": dro_valid_frames,
+            "stepper_dro_rejected_frame_count": dro_rejected_frames,
+            "stepper_dro_dropped_frame_count": dro_dropped_frames,
             "stepper_acceleration_mm_s2": (
                 DEFAULT_STEPPER_ACCELERATION_MM_S2
                 if position_command_capable
@@ -1159,9 +1238,9 @@ class UsbStepperSource:
             raise ValueError("speed_mm_s must be a finite number") from exc
         if not math.isfinite(speed):
             raise ValueError("speed_mm_s must be a finite number")
-        if speed < 0.1 or speed > DEFAULT_STEPPER_MAX_SPEED_MM_S:
+        if speed < DEFAULT_STEPPER_MIN_SPEED_MM_S or speed > DEFAULT_STEPPER_MAX_SPEED_MM_S:
             raise ValueError(
-                "speed_mm_s must be from 0.1 through "
+                f"speed_mm_s must be from {DEFAULT_STEPPER_MIN_SPEED_MM_S:g} through "
                 f"{DEFAULT_STEPPER_MAX_SPEED_MM_S:g}"
             )
         return int(round(speed * DEFAULT_STEPPER_STEPS_PER_MM))
@@ -2082,6 +2161,12 @@ class RealDxmr90Source:
 class SourceMerger:
     """Latest-value merge with per-source health and age fields."""
 
+    OPEN_FLOW_PAIRS = (
+        ("esp32_sol1", "esp32_f1_gmin"),
+        ("esp32_sol2", "esp32_f2_gmin"),
+        ("esp32_sol3", "esp32_f3_gmin"),
+    )
+
     def __init__(
         self,
         sources: list[SourceAdapter],
@@ -2124,7 +2209,38 @@ class SourceMerger:
             transport_error_field = f"{source.name}_transport_error"
             if transport_error_field in source.expected_fields:
                 sample[transport_error_field] = getattr(source, "last_error", None)
+        sample["esp32_open_flow_gmin"] = self._sum_open_flows(
+            sample,
+            self.OPEN_FLOW_PAIRS,
+        )
+        sample["dxmr90_open_total_mass_flow_g_min"] = self._sum_open_flows(
+            sample,
+            (("esp32_sol4", "dxmr90_total_mass_flow_g_min"),),
+        )
         return sample
+
+    @staticmethod
+    def _sum_open_flows(
+        sample: Mapping[str, object],
+        pairs: tuple[tuple[str, str], ...],
+    ) -> float | None:
+        """Sum measured flow only for channels whose valve state is open."""
+
+        total = 0.0
+        for solenoid_field, flow_field in pairs:
+            open_state = sample.get(solenoid_field)
+            if not isinstance(open_state, bool):
+                return None
+            if not open_state:
+                continue
+            raw_value = sample.get(flow_field)
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                return None
+            value = float(raw_value)
+            if not math.isfinite(value):
+                return None
+            total += value
+        return round(total, 6)
 
     def fresh_readings(self) -> tuple[SourceReading, ...]:
         return tuple(self._fresh_readings)

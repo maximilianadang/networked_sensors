@@ -90,6 +90,36 @@ const int PIN_DIR = 5;
 const int PIN_LIMIT_POS = 6;
 const int PIN_LIMIT_NEG = 8;  // D7 is reserved by the Yún Linux handshake.
 const int PIN_DRIVER_ENABLE_NEG = 9;
+const int PIN_DRO_CLOCK = 10;
+const int PIN_DRO_DATA = 11;
+
+// --- Read-only AbsoluteDRO Plus input ---
+// The level shifter presents 5 V logic to the Yún:
+//   D10/PB6/PCINT6 = scale-generated clock
+//   D11/PB7        = scale-generated data
+// The AbsoluteDRO Plus sends 52 bits continuously while its internal REQ pad
+// is grounded. Four leading 0xF nibbles make a self-synchronizing header, so
+// capture does not depend on a guessed inter-frame delay. D10 and D11 are
+// diagnostic inputs only; no DRO value participates in a motion decision.
+const byte DRO_FRAME_BITS = 52;
+const byte DRO_HEADER_BITS = 16;
+const byte DRO_FRAME_BYTES = 7;
+const unsigned long DRO_STALE_MS = 250UL;
+const unsigned long DRO_STATUS_MS = 200UL;
+
+volatile byte droCaptureFrame[DRO_FRAME_BYTES];
+volatile byte droCompletedFrame[DRO_FRAME_BYTES];
+volatile byte droCaptureBit = 0;
+volatile byte droHeaderOnes = 0;
+volatile bool droFrameReady = false;
+volatile byte droDroppedFrames = 0;
+
+bool droHasPosition = false;
+long droPositionHundredthsMm = 0L;
+long droReferenceHundredthsMm = 0L;
+unsigned long droLastValidAtMs = 0UL;
+unsigned long droValidFrames = 0UL;
+byte droRejectedFrames = 0;
 
 // All four inputs use INPUT_PULLUP. The installed magnetic switches are
 // passive normally-open contacts to GND: open/clear is HIGH and magnet-active
@@ -213,7 +243,10 @@ const char *lastCommandError = "none";
 // fields, m is control mode, h is homed, mv is moving, st is MotionState,
 // a means D4 OFF has been observed since boot, p/g are current/target steps,
 // c is the active command number, e is the software E-STOP latch, and lx packs
-// qualified limit state plus diagnostic-only rejected-edge counters.
+// qualified limit state plus diagnostic-only rejected-edge counters. dc marks
+// the read-only DRO decoder; df is freshness; dr/dd are absolute/reference
+// displacement in 0.01 mm; da is sample age; dq counts valid frames; and dx
+// packs rejected frames in its high byte and ISR-overrun drops in its low byte.
 const unsigned long STATUS_HEARTBEAT_MS = 1000UL;
 const unsigned long STATUS_MOTION_MS = 100UL;
 unsigned long statusSequence = 0;
@@ -245,7 +278,7 @@ byte networkCommandLength = 0;
 // The compact status has a checked upper bound below this size, including its
 // newline and terminator. Keeping one named size prevents the formatter and
 // shared transport buffer from drifting apart as telemetry evolves.
-const unsigned int STATUS_FRAME_SIZE = 288;
+const unsigned int STATUS_FRAME_SIZE = 384;
 char networkTxActive[STATUS_FRAME_SIZE];
 unsigned int networkTxActiveLength = 0;
 unsigned int networkTxActiveOffset = 0;
@@ -253,6 +286,52 @@ unsigned int usbTxActiveOffset = 0;
 bool networkTxActiveSharedWithUsb = false;
 char networkTxPendingAck[80];
 bool networkAckPending = false;
+
+ISR(PCINT0_vect) {
+  // PCINT0_vect fires on both D10 edges. AbsoluteDRO/Digimatic data is valid
+  // on the falling clock edge, so rising edges return immediately. Direct
+  // port access keeps this ISR short enough to coexist with Timer1 stepping.
+  byte portB = PINB;
+  if (portB & _BV(PB6)) return;
+  bool dataHigh = (portB & _BV(PB7)) != 0;
+
+  if (droCaptureBit == 0) {
+    if (!dataHigh) {
+      droHeaderOnes = 0;
+      return;
+    }
+    if (droHeaderOnes < DRO_HEADER_BITS) ++droHeaderOnes;
+    if (droHeaderOnes == DRO_HEADER_BITS) {
+      // The first two bytes are the known 16-one header. Clear the remainder
+      // before collecting bits 16..51 LSB-first.
+      droCaptureFrame[0] = 0xFF;
+      droCaptureFrame[1] = 0xFF;
+      for (byte index = 2; index < DRO_FRAME_BYTES; ++index) {
+        droCaptureFrame[index] = 0;
+      }
+      droCaptureBit = DRO_HEADER_BITS;
+    }
+    return;
+  }
+
+  if (dataHigh) {
+    droCaptureFrame[droCaptureBit >> 3] |=
+        _BV(droCaptureBit & 0x07);
+  }
+  ++droCaptureBit;
+  if (droCaptureBit < DRO_FRAME_BITS) return;
+
+  if (!droFrameReady) {
+    for (byte index = 0; index < DRO_FRAME_BYTES; ++index) {
+      droCompletedFrame[index] = droCaptureFrame[index];
+    }
+    droFrameReady = true;
+  } else if (droDroppedFrames < 255) {
+    ++droDroppedFrames;
+  }
+  droCaptureBit = 0;
+  droHeaderOnes = 0;
+}
 
 ISR(TIMER1_COMPA_vect) {
   if (!pulseTimerEnabled) return;
@@ -282,6 +361,87 @@ ISR(TIMER1_COMPA_vect) {
     pulseTimerScheduledSpeedSps = pulseTimerPendingSpeedSps;
     pulseTimerComparePending = false;
   }
+}
+
+byte droNibble(const byte frame[DRO_FRAME_BYTES], byte digitIndex) {
+  byte packed = frame[digitIndex >> 1];
+  if (digitIndex & 0x01) packed >>= 4;
+  return packed & 0x0F;
+}
+
+bool decodeDroFrame(
+    const byte frame[DRO_FRAME_BYTES],
+    long *positionHundredthsMm) {
+  // AbsoluteDRO Plus follows the 13-nibble Digimatic ordering, with every
+  // nibble transmitted least-significant bit first:
+  //   d1..d4=F, d5=sign, d6..d11=xxxx.xx, d12=2 decimals, d13=millimetres.
+  for (byte digit = 0; digit < 4; ++digit) {
+    if (droNibble(frame, digit) != 0x0F) return false;
+  }
+  byte sign = droNibble(frame, 4);
+  if (sign != 0 && sign != 8) return false;
+
+  long magnitudeHundredthsMm = 0L;
+  for (byte digit = 5; digit <= 10; ++digit) {
+    byte value = droNibble(frame, digit);
+    if (value > 9) return false;
+    magnitudeHundredthsMm = magnitudeHundredthsMm * 10L + value;
+  }
+  if (droNibble(frame, 11) != 2) return false;
+  if (droNibble(frame, 12) != 0) return false;
+
+  *positionHundredthsMm =
+      sign == 8 ? -magnitudeHundredthsMm : magnitudeHundredthsMm;
+  return true;
+}
+
+void pollDroFrames() {
+  byte frame[DRO_FRAME_BYTES];
+  bool ready = false;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    if (droFrameReady) {
+      for (byte index = 0; index < DRO_FRAME_BYTES; ++index) {
+        frame[index] = droCompletedFrame[index];
+      }
+      droFrameReady = false;
+      ready = true;
+    }
+  }
+  if (!ready) return;
+
+  long decodedHundredthsMm = 0L;
+  if (!decodeDroFrame(frame, &decodedHundredthsMm)) {
+    if (droRejectedFrames < 255) ++droRejectedFrames;
+    return;
+  }
+
+  unsigned long nowMs = millis();
+  if (!droHasPosition) {
+    droReferenceHundredthsMm = decodedHundredthsMm;
+    droHasPosition = true;
+    statusDirty = true;
+  }
+  droPositionHundredthsMm = decodedHundredthsMm;
+  droLastValidAtMs = nowMs;
+  if (droValidFrames < 0xFFFFFFFFUL) ++droValidFrames;
+}
+
+bool droIsFresh(unsigned long nowMs) {
+  return droHasPosition && nowMs - droLastValidAtMs <= DRO_STALE_MS;
+}
+
+long droSampleAgeMs(unsigned long nowMs) {
+  if (!droHasPosition) return -1L;
+  unsigned long ageMs = nowMs - droLastValidAtMs;
+  return ageMs > 0x7FFFFFFFUL ? 0x7FFFFFFFL : (long)ageMs;
+}
+
+unsigned long packedDroDiagnostics() {
+  byte dropped = 0;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    dropped = droDroppedFrames;
+  }
+  return ((unsigned long)droRejectedFrames << 8) | dropped;
 }
 
 uint16_t pulseCompareForSpeed(long speedSps) {
@@ -976,26 +1136,24 @@ void pollUsbCommands() {
   }
 }
 
-bool queueNetworkStatus(const char *line) {
-  // One immutable buffer feeds both transports with independent offsets. This
-  // avoids a second AVR status buffer and keeps USB transmission off the
-  // blocking Serial.println path. If either consumer is still draining, drop
-  // this periodic snapshot; the next bounded heartbeat supplies a fresh one.
+bool networkStatusBufferAvailable() {
   bool usbBusy = networkTxActiveSharedWithUsb &&
       usbTxActiveOffset < networkTxActiveLength;
-  if (networkTxActiveOffset < networkTxActiveLength || usbBusy ||
-      networkAckPending) {
-    return false;
-  }
-  strncpy(networkTxActive, line, sizeof(networkTxActive) - 2);
-  networkTxActive[sizeof(networkTxActive) - 2] = '\0';
-  strncat(networkTxActive, "\n", sizeof(networkTxActive) -
-      strlen(networkTxActive) - 1);
-  networkTxActiveLength = strlen(networkTxActive);
+  return networkTxActiveOffset >= networkTxActiveLength &&
+      !usbBusy &&
+      !networkAckPending;
+}
+
+void startNetworkStatusTransmission(unsigned int formattedLength) {
+  // The status formatter writes directly into the one immutable transport
+  // buffer. Avoiding a same-sized local copy preserves AVR stack headroom while
+  // USB and Serial1 continue to drain it with independent offsets.
+  networkTxActive[formattedLength] = '\n';
+  networkTxActive[formattedLength + 1] = '\0';
+  networkTxActiveLength = formattedLength + 1;
   networkTxActiveOffset = 0;
   usbTxActiveOffset = Serial ? 0 : networkTxActiveLength;
   networkTxActiveSharedWithUsb = true;
-  return true;
 }
 
 void queueNetworkAcknowledgement() {
@@ -1163,14 +1321,21 @@ bool reportMachineStatus(
       ((unsigned long)(negativeLimitInput.qualifiedActive ? 1 : 0) << 16) |
       ((unsigned long)positiveLimitInput.rejectedGlitches << 8) |
       (unsigned long)negativeLimitInput.rejectedGlitches;
-  char line[STATUS_FRAME_SIZE];
+  unsigned long statusNowMs = millis();
+  long droDisplacementHundredthsMm = droHasPosition
+      ? droPositionHundredthsMm - droReferenceHundredthsMm
+      : 0L;
+  // A busy transport keeps its immutable frame. The next bounded status
+  // interval will format a fresh snapshot after that frame has drained.
+  if (!networkStatusBufferAvailable()) return false;
   int formattedLength = snprintf(
-      line,
-      sizeof(line),
+      networkTxActive,
+      sizeof(networkTxActive),
       "{\"v\":1,\"t\":\"s\",\"q\":%lu,\"d4\":%d,\"d5\":%d,"
       "\"d6\":%d,\"d8\":%d,\"lx\":%lu,\"lp\":%d,\"ln\":%d,\"b\":%d,"
       "\"r\":\"%s\",\"sps\":%ld,\"csps\":%ld,\"aps\":%ld,\"ds\":%d,"
-      "\"en\":%d,\"ut\":1,"
+      "\"en\":%d,\"ut\":1,\"dc\":1,\"df\":%d,\"dr\":%ld,\"dd\":%ld,"
+      "\"da\":%ld,\"dq\":%lu,\"dx\":%lu,"
       "\"m\":%d,\"h\":%d,\"a\":%d,\"e\":%d,\"mv\":%d,\"st\":%d,\"p\":%ld,"
       "\"g\":%ld,\"c\":%u,\"o\":%d}",
       ++statusSequence,
@@ -1188,6 +1353,12 @@ bool reportMachineStatus(
       measuredPulseRateSps,
       FIXED_DIRECTION_SIGN,
       driverOutputEnabled ? 1 : 0,
+      droIsFresh(statusNowMs) ? 1 : 0,
+      droHasPosition ? droPositionHundredthsMm : 0L,
+      droDisplacementHundredthsMm,
+      droSampleAgeMs(statusNowMs),
+      droValidFrames,
+      packedDroDiagnostics(),
       (int)controlMode,
       positionHomed ? 1 : 0,
       d4OffObservedSinceBoot ? 1 : 0,
@@ -1202,10 +1373,11 @@ bool reportMachineStatus(
   // contract test also constructs the numeric worst case and keeps it below
   // STATUS_FRAME_SIZE, so this guard is a final fail-closed invariant.
   if (formattedLength < 0 ||
-      (unsigned int)formattedLength >= sizeof(line) - 1) {
+      (unsigned int)formattedLength >= sizeof(networkTxActive) - 1) {
     return false;
   }
-  return queueNetworkStatus(line);
+  startNetworkStatusTransmission((unsigned int)formattedLength);
+  return true;
 }
 
 void setup() {
@@ -1216,6 +1388,15 @@ void setup() {
   pinMode(PIN_DIR, INPUT_PULLUP);
   pinMode(PIN_LIMIT_POS, INPUT_PULLUP);
   pinMode(PIN_LIMIT_NEG, INPUT_PULLUP);
+  // SparkFun BOB-12009 already supplies the level-shifter pull-ups. Do not
+  // enable the Yún's 5 V internal pull-ups on these translated inputs.
+  pinMode(PIN_DRO_CLOCK, INPUT);
+  pinMode(PIN_DRO_DATA, INPUT);
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    PCMSK0 |= _BV(PCINT6);
+    PCIFR = _BV(PCIF0);
+    PCICR |= _BV(PCIE0);
+  }
   unsigned long limitInitUs = micros();
   initializeQualifiedLimit(
       &positiveLimitInput,
@@ -1244,6 +1425,7 @@ void setup() {
   Serial.println(F("USB and Yún-Linux controls share V1 S, M, H, G, X, E1, E0."));
   Serial.println(F("Timer1 owns Local/Web/Home STEP timing; DIR is fixed Normal."));
   Serial.println(F("D9 disables DM542T holding current while stopped."));
+  Serial.println(F("D10 clock/D11 data read AbsoluteDRO Plus diagnostically only."));
   reportLimitLevels(digitalRead(PIN_LIMIT_POS), digitalRead(PIN_LIMIT_NEG));
 }
 
@@ -1258,6 +1440,7 @@ void loop() {
     serviceTransports();
     lastTransportServiceUs = transportNowUs;
   }
+  pollDroFrames();
 
   int runRaw = digitalRead(PIN_RUN);
   int directionRaw = digitalRead(PIN_DIR);
@@ -1453,6 +1636,7 @@ void loop() {
 
   updateMeasuredPulseRate(moving);
 
+  unsigned long nowMs = millis();
   unsigned long statusSignature =
       ((unsigned long)(runRaw == HIGH) << 0) |
       ((unsigned long)(directionRaw == HIGH) << 1) |
@@ -1467,12 +1651,16 @@ void loop() {
       ((unsigned long)motionState << 10) |
       ((unsigned long)d4OffObservedSinceBoot << 14) |
       ((unsigned long)emergencyStopLatched << 15) |
-      ((unsigned long)driverOutputEnabled << 16);
+      ((unsigned long)driverOutputEnabled << 16) |
+      ((unsigned long)droIsFresh(nowMs) << 17);
   static unsigned long lastStatusSignature = 0xFFFFFFFFUL;
   static unsigned long lastStatusAtMs = 0UL;
-  unsigned long nowMs = millis();
+  static unsigned long lastStatusDroValidFrames = 0UL;
   bool motionUpdateDue = moving && nowMs - lastStatusAtMs >= STATUS_MOTION_MS;
+  bool droUpdateDue = droValidFrames != lastStatusDroValidFrames &&
+      nowMs - lastStatusAtMs >= DRO_STATUS_MS;
   if (statusDirty || statusSignature != lastStatusSignature || motionUpdateDue ||
+      droUpdateDue ||
       nowMs - lastStatusAtMs >= STATUS_HEARTBEAT_MS) {
     reportMachineStatus(
         runRaw,
@@ -1485,6 +1673,7 @@ void loop() {
         moving);
     lastStatusSignature = statusSignature;
     lastStatusAtMs = nowMs;
+    lastStatusDroValidFrames = droValidFrames;
     // A status snapshot may be dropped if an older USB or network frame is
     // still draining. Do not fast-loop the report; the next bounded heartbeat
     // refreshes each consumer without delaying STEP generation.

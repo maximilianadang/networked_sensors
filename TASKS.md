@@ -345,6 +345,47 @@ when runnable behavior changes.
   - [ ] Upload and compare configured, scheduled, emitted, and DRO speed in both
     Local Velocity and Web Position before closing the task.
 
+- [ ] **ACTIVE - T4G - bring up the AbsoluteDRO Plus as read-only position feedback.**
+  - Reserve Yún D10/PB6/PCINT6 for the level-shifted DRO clock and D11/PB7 for
+    the level-shifted DRO data. Keep D2-D9 and the Yún D7 handshake unchanged.
+  - Capture the scale-generated clock with the ATmega32U4 port-B pin-change
+    interrupt and sample data on each falling edge. Synchronize on the
+    protocol's 16-one header so decoding does not depend on an assumed
+    inter-frame delay.
+  - Decode and validate one 52-bit AbsoluteDRO Plus/Digimatic-style frame:
+    four `F` header nibbles, `0`/`8` sign, six BCD position digits, decimal
+    point `2`, and millimetre unit `0`. Reject malformed frames rather than
+    turning them into positions.
+  - Report read-only DRO capability, fresh/stale state, absolute position,
+    displacement from the first valid frame after boot, sample age, valid-frame
+    count, and rejected/dropped-frame diagnostics in the compact USB/network
+    status. Use integer hundredths of a millimetre on the AVR wire format and
+    convert only at the supervisor/UI boundary.
+  - Do not use the DRO to authorize, start, stop, home, correct, or otherwise
+    change motion in this task. D4/D5, qualified D6/D8, D9/ENA-, Timer1, and the
+    software E-STOP retain exactly their current behavior.
+  - Verification: host decoder/compact-frame tests, compile for
+    `arduino:avr:yun`, upload only while stopped, confirm fresh frames with the
+    motor supply off, move the reader head by hand through known distances in
+    both directions, and record scale factor, sign, repeatability, stale
+    timeout, and unplug/reconnect behavior.
+  - **Gate:** closed-loop design work may use this signal only after the manual
+    test proves correct units/direction and reliable fresh-frame detection.
+  - **Progress:** PCINT6/falling-edge capture, strict frame validation, compact
+    telemetry, USB/network decoding, and a read-only dashboard block with a
+    live 0–152.4 mm piston-head visualization are implemented. Fresh validated
+    frames animate the head; stale feedback freezes the last good position,
+    and missing/out-of-range feedback is visibly flagged. Forty-six stepper
+    tests and the complete 63-test desktop suite pass. The Yún target compiles at
+    21,228 bytes/74% flash and 1,653 bytes/64% global RAM and was uploaded with
+    verification while no stepper was connected. The first live run reported
+    a fresh, stable 141.79 mm position, advancing valid frames, one initial
+    synchronization reject, and zero dropped frames. Manual movement was then
+    observed live from 141.79 mm to 144.50 mm, producing the expected arithmetic
+    displacement of +2.71 mm without new rejects or drops. Known-distance scale
+    factor, physical-direction sign, return repeatability, stale/unplug,
+    reconnect, and motion-jitter checks remain.
+
 - [ ] **ACTIVE - T5 - refactor Yún firmware into a non-blocking distance engine.**
   - Preserve D2-D6 and D8 assignments and local safety inputs.
   - Use one Timer1 motion state machine for indefinite Local Velocity and

@@ -15,7 +15,7 @@ compiled, uploaded, and operator-confirmed for Local Velocity. It uses Timer1
 for Local Velocity pulses, controls DM542T `ENA-` from D9, and fixes stale
 opposite-limit history. The exact-image two-endpoint retreat/D9 matrix and Web
 Position timing qualification remain.
-The page's **SOFTWARE E-STOP** inhibits
+The page's **E-STOP** control inhibits
 STEP output through the laptop/USB/Yún-firmware chain. D9 removes holding
 current, but it does not isolate the 24 V driver supply and is not a hardwired,
 safety-rated emergency stop.
@@ -195,11 +195,28 @@ Start the dashboard:
 python3 networked_sensors/dashboard.py --host 127.0.0.1 --port 8000 --record-dir networked_sensors/recordings
 ```
 
+The page, stylesheet, and JavaScript modules are all served from local files in
+`networked_sensors/dashboard_app/static`. Internet access, Node, package
+installation, and a frontend build step are not required. Save a field edit and
+reload the browser; dashboard assets use `Cache-Control: no-store`.
+
+At 100% zoom, a content viewport at least 1121 px wide and 900 px tall uses the
+single-screen desktop layout. The status strip, controls, metrics, equal-width
+charts, and side-by-side Stepper/Test Metadata row fit the CSS viewport without
+page scrolling; CSS viewport units automatically exclude Firefox/Zen toolbar
+chrome. The Stepper panel keeps the vertical piston on its left and mode,
+motion controls, and condensed interlocks on its right. Open **Source details**
+at the upper right for full source health, stepper telemetry, and the optional
+Command ID. That overlay scrolls internally when needed and does not add height
+to the primary page. Narrower or shorter windows use the responsive layout and
+may return to normal document scrolling.
+
 Useful endpoints:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `/` | local browser dashboard with separate ESP32/SICK pressure plots in bar and individual/total SICK mass-flow traces |
+| `/` | local browser dashboard with three ESP32 pressure values, maximum parallel-SICK pressure, Solenoid 1–3-gated ESP32 flow sum, Solenoid 4-gated SICK flow sum, heartbeat, one combined pressure plot, and individual ESP32/SICK mass-flow plots with always-visible open-line SUM overlays |
+| `/api/config` | read-only history, solenoid-count, and stepper input limits used by the local page; authoritative command limits remain in Python |
 | `/api/state` | latest sample, run state/config, metadata, history size |
 | `/api/latest` | latest sample and run state; 10 Hz browser fallback when SSE is unavailable |
 | `/api/history?limit=240` | recent in-memory merged samples |
@@ -372,7 +389,7 @@ The coordinate uses 251.96850394 pulses/mm. Confirm it empirically with a short
 known pulse count and DRO-measured displacement in both directions before
 accepting dimensional accuracy. Changing DM542T SW5-SW8 invalidates it.
 
-The red **SOFTWARE E-STOP** near the top is deliberately a one-click action: it
+The red **E-STOP** near the top is deliberately a one-click action: it
 sends `V1 E1`, aborts bounded motion or continuous Local Velocity, and remains
 latched in the ATmega if the browser disconnects. While latched, the page
 disables motion controls. To reset, first put physical D4 OFF, then use
@@ -603,6 +620,61 @@ artifact. `/dev/ttyACM0` was the observed port but may change after reconnecting
 arduino-cli upload --fqbn arduino:avr:yun --port /dev/ttyACM0 --input-dir /tmp/limit_switch_build --verify /tmp/limit_switch_palas
 arduino-cli monitor --port /dev/ttyACM0 --config baudrate=9600
 ```
+
+### AbsoluteDRO Plus read-only bring-up (T4G)
+
+Keep the stepper disconnected or the DM542T motor supply off. The T4G firmware
+uses D10/PB6/PCINT6 for the level-shifted scale clock and D11/PB7 for
+level-shifted data. It samples data on falling clock edges, validates the full
+52-bit frame, and never feeds a DRO value into motion, limits, homing, or the
+software E-STOP.
+
+Run the existing dashboard with only the USB-backed Yún source:
+
+```bash
+python3 networked_sensors/dashboard.py \
+  --esp32-source off \
+  --dxmr90-source off \
+  --stepper-source usb \
+  --stepper-port /dev/ttyACM0
+```
+
+Open `http://127.0.0.1:8000/` and use the **DRO position** piston display:
+
+- The signal badge must become **Fresh**; `STALE` means no valid frame has arrived
+  for more than 250 ms.
+- **DRO position** is the scale's signed millimetre reading.
+- **Boot travel** subtracts the first valid frame received after
+  the ATmega32U4 boot. Reset the 32U4 before a new manual displacement trial.
+- **DRO frames** under **Source details** shows valid, rejected, and dropped
+  counts. A one-time
+  rejected frame while the firmware synchronizes is acceptable; a rising
+  rejected/dropped count while stationary requires wiring/noise investigation.
+
+For a manual check, record the initial absolute reading, move the reader head a
+known distance in one direction, and compare both the final absolute reading
+and displacement to that distance. Return to the start and confirm displacement
+returns to 0.00 mm within the scale's 0.01 mm resolution. Repeat in the opposite
+direction. Record which physical direction makes the reading increase; do not
+assume that sign for closed-loop control.
+
+The compact AVR fields behind the dashboard are diagnostic-only:
+
+- `dc:1`: decoder is present;
+- `df`: fresh (`1`) or stale/not-yet-valid (`0`);
+- `dr`: signed absolute position in 0.01 mm;
+- `dd`: signed displacement from the boot reference in 0.01 mm;
+- `da`: last-valid-sample age in ms, or `-1` before the first valid frame;
+- `dq`: valid-frame count;
+- `dx`: rejected count in bits 15..8 and dropped count in bits 7..0.
+
+The first physical T4G run decoded a stable 141.79 mm position with fresh
+samples, one initial synchronization reject, and zero dropped frames. Moving
+the head changed the live position to 144.50 mm and produced +2.71 mm boot-
+reference displacement without another reject or drop. Known-distance scale
+factor, physical-direction sign, return repeatability, unplug/stale, reconnect,
+and step-timing checks remain before this feedback can be considered for a
+later closed-loop task.
 
 If Linux reports permission denied and the port is owned by `root:dialout`, add
 the operator account to that group and log out/in before retrying:

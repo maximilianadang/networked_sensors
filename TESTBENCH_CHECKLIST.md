@@ -214,6 +214,32 @@ Before using the laptop supervisor as the primary logger:
 - Do not deliberately move with legacy T4C inverted firmware. The current
   laptop adapter must refuse Web Position mode/Home/Move when `ds:-1` is seen.
 
+### T4G AbsoluteDRO Plus read-only input
+
+- Keep the stepper disconnected or the DM542T motor supply off for first DRO
+  bring-up. Confirm D4 is OFF before upload/reset even though T4G does not use
+  DRO data for motion.
+- Confirm the dashboard's **DRO position** piston display shows `Fresh` and a
+  piston head at the matching 0–152.4 mm coordinate. Open **Source details**
+  and confirm an advancing valid-frame count and zero dropped frames. A single
+  initial rejected frame during 16-one-header synchronization is acceptable.
+- Hold the reader stationary for at least 30 seconds. Confirm absolute position
+  does not jump and rejected/dropped counts do not continue increasing.
+- Move the reader a known distance in each direction. Record starting/final
+  absolute position and displacement; confirm 0.01 mm scale, physical sign,
+  return-to-start repeatability, and matching visual head/direction movement.
+- Disconnect the DRO signal/power with all hazardous energy already removed.
+  Confirm freshness changes to `STALE` within 250 ms while the Yún stepper
+  source itself remains connected and that the visual freezes at the last good
+  position. Reconnect and confirm valid frames and visual updates resume
+  without a firmware reset.
+- With the full mechanism made safe, compare Timer1 STEP timing with and without
+  the D10 clock stream. The PCINT6 capture must not cause unacceptable pulse
+  jitter at any approved speed.
+- Do not use DRO position/displacement to authorize or correct motion until
+  every T4G gate above passes and a separate closed-loop control task defines
+  stale-data, following-error, homing/reference, and fault behavior.
+
 ## 12. USB bounded position control (T5)
 
 - Compile and upload the exact repository firmware with verification. Confirm
@@ -241,7 +267,7 @@ Before using the laptop supervisor as the primary logger:
   confirm it invokes the same guarded Move action; press Space while moving and
   confirm it invokes Stop. Repeat with the cursor in the distance, speed, and
   command-ID fields and confirm Space only edits the field and never moves.
-- Focus SOFTWARE E-STOP and press Space; confirm the focused safety button owns
+- Focus **E-STOP** and press Space; confirm the focused safety button owns
   the key and no global Move command is issued. Confirm held Space, modified
   Space, disabled actions, and an in-flight command cannot duplicate motion.
 - Repeat away from each active limit: D6 blocks D5 Forward, D8 blocks D5
@@ -263,7 +289,7 @@ Before using the laptop supervisor as the primary logger:
   requires emergency stopping; the dashboard path does not remove motor power.
 - Compile and upload the exact repository firmware with verification before the
   page is expected to advertise E-STOP capability.
-- With D4 OFF and no motion, press **SOFTWARE E-STOP**. Confirm the page reports
+- With D4 OFF and no motion, press **E-STOP**. Confirm the page reports
   `LATCHED`, firmware state is `emergency_stop`, and reset is available only
   under the documented D4-off condition.
 - Leave the latch set, turn D4 ON, and confirm neither Local Velocity nor a Web
