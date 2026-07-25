@@ -159,6 +159,11 @@ Before using the laptop supervisor as the primary logger:
 
 - Before upload, compile the repository sketch for `arduino:avr:yun`; do not
   infer compile success from Python tests.
+- Before compile, run the firmware contract test and confirm the sketch
+  explicitly contains `pinMode(PIN_STEP, OUTPUT)` and
+  `pinMode(PIN_DRIVER_DIR, OUTPUT)` after D9 is configured to hold the DM542T
+  disabled. Timer counters and dashboard telemetry do not prove those pins are
+  driven outputs.
 - Upload only under the established motor-safe procedure. T4B may change the
   speed setpoint but must not alter D4 start/stop, D5 direction, or D6/D8 limit
   authority.
@@ -177,15 +182,25 @@ Before using the laptop supervisor as the primary logger:
 - Reproduce Forward blocked at D6 and confirm the page says
   `BLOCKED: positive_limit` with zero effective speed; select Reverse and
   confirm motion-away is allowed and the positive latch clears.
+- In Web Position mode at D8/top, complete a Forward/downward 10 mm move while
+  D4 remains armed. Confirm raw and qualified D8 are clear and the negative
+  latch is also clear at completion. Turn D4 OFF, select Reverse, and confirm
+  the page no longer reports `negative_limit`; do not start the return move as
+  part of this latch-only check.
 - Unplug USB and confirm only the stepper source becomes stale/disconnected;
   the webpage, ESP32/DXMR90 sources, and any active recording remain alive.
 - With D4 OFF, apply 1.5 mm/s and confirm Configured speed reads 1.5 mm/s while
-  Scheduled speed and Measured STEP output remain 0; repeat at 3.0 mm/s.
+  Scheduled speed and Pulse timer remain 0; repeat at 3.0 mm/s.
 - With D4 ON, confirm Apply Manual Speed is disabled and a direct API request is
   rejected. A rejected request must not change the configured speed.
 - Confirm the page has no direction-mapping control or endpoint and reports
-  fixed Normal: D5 Forward toward D6 and D5 Reverse toward D8. Status must show
-  `ds:1`; treat legacy `ds:-1` as unsafe firmware requiring replacement.
+  fixed Normal: D5 Forward/down toward the D6 bottom limit and D5 Reverse/up
+  toward the D8 top limit. Status must show `ds:1`; treat legacy `ds:-1` as
+  unsafe firmware requiring replacement.
+- Confirm the compiled fixed electrical calibration is D2 LOW for
+  Forward/toward-D6 and D2 HIGH for Reverse/toward-D8. At D6, only Reverse may
+  be used for the first retreat; stop immediately if the DRO moves farther
+  toward the endpoint or the motor sounds rough.
 - With DM542T power off, confirm ENA+ remains on Yún 5 V and ENA- is connected
   to D9. Do not plug or unplug driver terminals while the DM542T is powered.
 - After fixed-direction firmware upload, keep D4 OFF and confirm compact status
@@ -198,17 +213,20 @@ Before using the laptop supervisor as the primary logger:
   matrix is required before treating the correction as physically verified.
 - Run short motion-away tests at 1.5, 3.0, then 5.0 mm/s. Confirm direction,
   smoothness, D4 stopping, and the destination limit at every stage. Record
-  Configured speed, Scheduled speed, Measured STEP pulses/s, converted measured
-  mm/s, and DRO speed. Stop escalation at the first missed step, stall,
-  roughness, or unexpected motion. The measured STEP field proves firmware D3
-  pulse attempts only, not driver acceptance or piston travel.
+  Configured speed, Scheduled speed, Pulse timer pulses/s, and signed
+  **DRO velocity**. The DRO value is the independent position-slope
+  measurement to compare with the pulse-derived values. Stop escalation at the
+  first missed step, stall, roughness, or unexpected motion.
+  Pulse timer proves only that the Timer1 ISR advanced its software counter; it
+  does not prove D3 was configured as an output, driver acceptance, or piston
+  travel.
 - Confirm **STEP pulse engine** reports **Unified Timer1 (Local / Web / Home)**.
   Treat **Legacy split scheduler** as firmware requiring replacement before
   speed qualification. Verify requested versus measured D3 pulse rate at 1.5,
   2.0, 3.0, 5.0, and 10.0 mm/s in both Local Velocity and Web Position.
 - During finite moves, distinguish the acceleration/deceleration ramp from the
   cruise plateau: Scheduled speed may be below Configured speed during a ramp,
-  but Measured STEP output must agree with Scheduled speed at cruise. Confirm
+  but Pulse timer must agree with Scheduled speed at cruise. Confirm
   the move still emits exactly its requested pulse count and does not restart
   after the target ISR disables Timer1.
 - Do not deliberately move with legacy T4C inverted firmware. The current
@@ -220,25 +238,46 @@ Before using the laptop supervisor as the primary logger:
   bring-up. Confirm D4 is OFF before upload/reset even though T4G does not use
   DRO data for motion.
 - Confirm the dashboard's **DRO position** piston display shows `Fresh` and a
-  piston head at the matching 0–152.4 mm coordinate. Open **Source details**
-  and confirm an advancing valid-frame count and zero dropped frames. A single
-  initial rejected frame during 16-one-header synchronization is acceptable.
+  piston head at the matching top-zero coordinate: `0 mm` at D8/top and
+  `−137.18 mm` at D6/bottom. The saved raw zero should be `136.77 mm` unless it
+  was deliberately recalibrated. Open **Source details** and confirm an
+  advancing valid-frame count and zero dropped frames. A single initial
+  rejected frame during 16-one-header synchronization is acceptable.
 - Hold the reader stationary for at least 30 seconds. Confirm absolute position
   does not jump and rejected/dropped counts do not continue increasing.
 - Move the reader a known distance in each direction. Record starting/final
   absolute position and displacement; confirm 0.01 mm scale, physical sign,
-  return-to-start repeatability, and matching visual head/direction movement.
+  return-to-start repeatability, matching visual head/direction movement, and
+  **DRO velocity** is positive upward/toward D8 and negative downward/toward
+  D6. Hold the reader still and confirm velocity settles to 0.00 mm/s.
 - Disconnect the DRO signal/power with all hazardous energy already removed.
   Confirm freshness changes to `STALE` within 250 ms while the Yún stepper
   source itself remains connected and that the visual freezes at the last good
-  position. Reconnect and confirm valid frames and visual updates resume
-  without a firmware reset.
+  position. **DRO velocity** must clear to `--`, not retain its last moving
+  value. Reconnect and confirm valid frames and visual updates resume without a
+  firmware reset.
 - With the full mechanism made safe, compare Timer1 STEP timing with and without
   the D10 clock stream. The PCINT6 capture must not cause unacceptable pulse
   jitter at any approved speed.
 - Do not use DRO position/displacement to authorize or correct motion until
   every T4G gate above passes and a separate closed-loop control task defines
   stale-data, following-error, homing/reference, and fault behavior.
+
+### T4H.1 persistent system DRO zero (display only)
+
+- Keep physical motion stopped. Confirm the DRO badge is **Fresh**, the raw
+  position is finite, measured STEP output is zero, and **Move to zero** is
+  disabled.
+- Record the raw reading, select **Set zero here**, and confirm **Position from
+  zero** becomes 0.00 mm while the diagnostic raw reading is unchanged.
+- Move only the unpowered reader head by hand. Confirm the zero-referenced value
+  changes by the same signed amount as the raw reading and that the vertical
+  graphic uses the measured 0–137.18 mm stroke scale.
+- Reload the browser, restart the dashboard, and cycle the USB/LAN connection;
+  confirm the same reference is restored from `system_config.json`.
+- Confirm a stale/disconnected DRO cannot set zero. Do not enable or test
+  **Move to zero** until T4H.2 and its physical closed-loop fault matrix are
+  implemented.
 
 ## 12. USB bounded position control (T5)
 

@@ -57,6 +57,12 @@ python3 networked_sensors/dashboard.py \
   --record-dir networked_sensors/recordings
 ```
 
+The dashboard loads machine-level settings from
+`networked_sensors/system_config.json` by default. **Set zero here** updates the
+saved DRO reference atomically, so dashboard restarts and USB/LAN reconnections
+reuse it. Pass `--system-config PATH` only to select a different machine
+configuration.
+
 Use the ESP32's printed IP in `--esp32-url` if `testbench.local` does not
 resolve, and replace `/dev/ttyACM0` with its stable `/dev/serial/by-id/...`
 path when available. The archived self-hosted ESP32 sketch emits an older,

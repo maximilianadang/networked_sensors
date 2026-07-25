@@ -286,6 +286,17 @@ when runnable behavior changes.
     no motion, then obtain an operator-confirmed working Local Velocity run.
   - [x] Fix stale opposite-end history: an exclusively active raw endpoint
     clears the opposite latch; simultaneous raw LOW inputs remain fail-closed.
+  - [x] Fix the Web Position departure lifecycle exposed by the first 10 mm
+    D8/top retreat: the one-time command-handler clear occurred before the
+    5 ms-qualified switch released, allowing D8 to re-latch during departure.
+    While an armed Web move remains active, repeatedly clear only the endpoint
+    behind its physical direction; continue checking the destination against
+    live qualified inputs. A source-order regression test locks this behavior.
+    All 68 desktop tests pass, and the exact Yún build uses 21,256 bytes/74%
+    flash and 1,653 bytes/64% RAM. Verified upload passed on `/dev/ttyACM1`;
+    the Yún re-enumerated at `/dev/ttyACM0` and the stopped live frame confirmed
+    D4 OFF, D9 disabled, D6/D8 raw and qualified clear, both latches false,
+    5 ms qualification, fresh DRO data, and zero measured pulses.
   - [x] Use Timer1 for Local Velocity STEP timing so dashboard/transport work
     cannot impose the former cooperative-loop pulse ceiling.
   - [ ] At each active limit, confirm STEP output reaches zero, D9 reports LOW,
@@ -336,6 +347,26 @@ when runnable behavior changes.
   - [x] Remove the AccelStepper STEP path and add compact `ut:1` deployment
     capability plus a read-only unified-engine dashboard row. Older firmware
     remains observable and is explicitly labeled as the legacy split scheduler.
+  - [x] Correct the D2/D3 initialization regression exposed during 2026-07-24
+    motor bring-up: removing the AccelStepper object also removed its implicit
+    GPIO-output setup. Preload STEP/DIR LOW and explicitly configure both as
+    outputs while D9 holds the DM542T disabled. Lock the boot ordering with a
+    source-contract regression test and record the invariant in the hardware
+    documentation, runbook, checklist, and integration record. The corrected
+    exact Yún source compiles at 21,252 bytes/74% flash and 1,653 bytes/64% RAM;
+    verified upload to `/dev/ttyACM0` and a stopped USB heartbeat pass with D4
+    OFF, limits clear, `en:0`, `aps:0`, `ut:1`, no E-STOP, and fresh DRO data.
+    Staged physical requalification remains pending.
+  - [x] Correct the fixed electrical DIR polarity using the first post-upload
+    motion record: −31,984 Reverse/negative pulse attempts moved the DRO from
+    162.93 mm to approximately −1.98 mm and activated D6, proving the prior D2
+    LOW level approached D6 while the interlock checked D8. Preserve the public
+    physical contract (`ds:1`, Forward→D6, Reverse→D8) by compiling D2 LOW for
+    Forward/toward-D6 and D2 HIGH for Reverse/toward-D8. Lock both levels with
+    static assertions, source tests, and matching hardware/runbook/checklist
+    documentation. All 66 tests, the exact Yún rebuild, verified upload, and
+    stopped D6-active heartbeat pass; a short Reverse retreat is the remaining
+    gate before further motion.
   - [x] Add requested-versus-emitted pulse-rate and exact-target regression
     tests across 1.5, 2.0, 3.0, 5.0, and 10.0 mm/s, including short moves that
     never reach cruise speed and all abort/interlock paths.
@@ -364,6 +395,10 @@ when runnable behavior changes.
   - Do not use the DRO to authorize, start, stop, home, correct, or otherwise
     change motion in this task. D4/D5, qualified D6/D8, D9/ENA-, Timer1, and the
     software E-STOP retain exactly their current behavior.
+  - Derive signed read-only velocity in the dashboard from a short rolling
+    least-squares fit of fresh raw position frames. Show it beside a visually
+    smaller pulse-timer measurement, clear it on stale/disconnected feedback,
+    and keep it outside every motion-decision path.
   - Verification: host decoder/compact-frame tests, compile for
     `arduino:avr:yun`, upload only while stopped, confirm fresh frames with the
     motor supply off, move the reader head by hand through known distances in
@@ -382,9 +417,58 @@ when runnable behavior changes.
     a fresh, stable 141.79 mm position, advancing valid frames, one initial
     synchronization reject, and zero dropped frames. Manual movement was then
     observed live from 141.79 mm to 144.50 mm, producing the expected arithmetic
-    displacement of +2.71 mm without new rejects or drops. Known-distance scale
-    factor, physical-direction sign, return repeatability, stale/unplug,
-    reconnect, and motion-jitter checks remain.
+    displacement of +2.71 mm without new rejects or drops. The dashboard now
+    also presents the signed, stale-aware raw-position slope beside the smaller
+    Pulse timer; deterministic tests cover positive, negative, stopped, and
+    stale cases. Known-distance scale factor, physical-direction sign,
+    return repeatability, stale/unplug, reconnect, and motion-jitter checks
+    remain.
+
+- [ ] **ACTIVE - T4H - establish an operator DRO zero, then return to it under closed-loop control.**
+  - [x] **Subtask T4H.1 - persistent system zero in the existing read-only interface.**
+    - Add **Set zero here** to snapshot only a fresh, finite DRO reading while
+      motion is stopped. Store the reference in the repository-level,
+      versioned `system_config.json`; dashboard, USB/LAN transport, and device
+      reconnections must reuse it instead of clearing it.
+    - Preserve the signed raw DRO position in diagnostics. Show the primary
+      position and piston animation as `raw - system_zero`, using the measured
+      137.18 mm mechanical stroke as a display scale only. The physically
+      verified zero is D8/negative/top: map `0 mm` to the animation top and
+      `−137.18 mm` to D6/positive/bottom, with the illustrated fixed end at the
+      top, without changing motion signs.
+    - Reject zero capture when the Yún/DRO is disconnected, unavailable, stale,
+      non-finite, or moving. The endpoint must report
+      `motion_commanded: false` and must not call any stepper command method.
+    - Show a **Move to zero** button in its intended layout, but keep it
+      unconditionally disabled and clearly identify T4H.2 as the missing gate.
+    - Verify the runtime zero calculation/API contract, frontend guards and
+      labels, a live stopped USB zero capture, continued raw telemetry, and the
+      existing desktop regression suite. This subtask must emit no STEP pulse.
+    - **Progress:** implemented and live-tested against the stopped USB Yún.
+      Capturing raw −2.81 mm returned zero-referenced 0.00 mm with
+      `motion_commanded:false`, stopped state, and measured STEP output
+      remaining 0 pulses/s. The zero is now atomically persisted through the
+      top-level system config and a runtime-restart test proves it is restored.
+  - [ ] **Subtask T4H.2 - physically tested DRO closed-loop return to zero.**
+    - Implement the position loop in the local Yún controller rather than as
+      repeated browser/network moves. Define and test DRO-to-physical-direction
+      sign, target tolerance/deadband, approach speed, deceleration, maximum
+      following error, no-progress timeout, overshoot/reversal policy, and a
+      bounded total move time.
+    - Fresh validated DRO feedback is mandatory throughout motion. A stale,
+      malformed, disconnected, or implausibly jumping reading must stop STEP
+      output and latch a visible fault requiring an explicit stopped reset.
+    - Preserve D4 authorization, fixed D5/physical-direction semantics,
+      qualified D6/D8 directional limits, D9 driver release, software E-STOP,
+      operator Stop, and exclusive USB/network ownership. No browser zero may
+      become motion authority without an explicit controller acknowledgement.
+    - Test only with the stepper physically in the loop under the staged
+      motor-safe procedure: first stationary/sign checks, then short low-speed
+      moves away from and back to zero, injected stale/unplug/no-progress
+      faults, each limit, Stop, E-STOP, overshoot, and repeatability.
+  - **Gate:** T4H.1 is display calibration only. Do not enable **Move to zero**
+    or claim closed-loop position control until every T4H.2 controller and
+    physical fault test passes.
 
 - [ ] **ACTIVE - T5 - refactor Yún firmware into a non-blocking distance engine.**
   - Preserve D2-D6 and D8 assignments and local safety inputs.

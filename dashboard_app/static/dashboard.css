@@ -38,6 +38,18 @@
   display: none !important;
 }
 
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
 html,
 body {
   margin: 0;
@@ -632,20 +644,28 @@ canvas {
 .piston-readout {
   min-width: 0;
   display: grid;
-  gap: 6px;
+  grid-template-columns: 1fr;
+  gap: 5px;
 }
 
-.piston-visual-header {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 6px 8px;
+.piston-readout-values {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
-.piston-visual-header > div {
+.piston-readout-values > div {
+  min-width: 0;
   display: grid;
   gap: 4px;
+}
+
+.piston-readout-values > div:last-child {
+  text-align: right;
+}
+
+.piston-position-readout {
+  grid-column: 1 / -1;
 }
 
 .piston-eyebrow {
@@ -663,17 +683,23 @@ canvas {
   letter-spacing: -0.04em;
 }
 
-.piston-signal {
+.piston-secondary-value {
+  font-size: clamp(1.25rem, 1.45vw, 1.65rem);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.025em;
+}
+
+.piston-zero-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.piston-zero-controls button {
+  min-width: 0;
   min-height: 32px;
-  padding: 5px 9px;
-  border: 1px solid color-mix(in srgb, var(--piston-accent) 70%, #64748b);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--piston-accent) 13%, white);
-  color: #263341;
-  font-size: 1rem;
-  font-weight: 750;
-  white-space: nowrap;
-  justify-self: start;
+  padding: 4px 7px;
 }
 
 .piston-stage {
@@ -715,12 +741,12 @@ canvas {
 .piston-rod {
   position: absolute;
   left: 50%;
-  bottom: 4%;
+  top: 4%;
   width: 16px;
   height: calc(var(--piston-position) - 4%);
   transform: translateX(-50%);
   border: 1px solid #236a9d;
-  border-radius: 999px 999px 0 0;
+  border-radius: 0 0 999px 999px;
   background: linear-gradient(90deg, #dff2ff, var(--piston-accent) 45%, #1769aa);
   box-shadow: 0 1px 4px rgb(23 105 170 / 40%);
   transition: height 180ms linear, opacity 160ms ease;
@@ -729,17 +755,17 @@ canvas {
 .piston-head {
   position: absolute;
   left: 50%;
-  bottom: var(--piston-position);
+  top: var(--piston-position);
   z-index: 2;
   width: 112px;
   height: 34px;
-  transform: translate(-50%, 50%);
+  transform: translate(-50%, -50%);
   border: 3px solid #344454;
   border-radius: 8px;
   background:
     linear-gradient(180deg, #657687 0 14%, #dbe3eb 14% 40%, var(--piston-accent) 40% 60%, #e5eaf1 60% 86%, #657687 86%);
   box-shadow: 0 8px 16px rgb(15 23 42 / 28%);
-  transition: bottom 180ms linear, opacity 160ms ease;
+  transition: top 180ms linear, opacity 160ms ease;
 }
 
 .piston-head::before {
@@ -767,10 +793,10 @@ canvas {
 .piston-origin {
   position: absolute;
   left: 50%;
-  bottom: 4%;
+  top: 4%;
   width: 96px;
   height: 24px;
-  transform: translate(-50%, 50%);
+  transform: translate(-50%, -50%);
   border: 3px solid #344454;
   border-radius: 6px;
   background: linear-gradient(180deg, #697989, #d8e0e8 50%, #697989);
@@ -796,53 +822,24 @@ canvas {
   position: absolute;
   right: 7px;
   z-index: 3;
+  padding: 3px 6px;
   color: #526170;
+  border: 1px solid rgb(125 137 150 / 35%);
+  border-radius: 5px;
+  background: rgb(248 250 252 / 88%);
   font-size: 1rem;
   font-weight: 750;
   font-variant-numeric: tabular-nums;
   line-height: 1;
-  writing-mode: vertical-rl;
+  white-space: nowrap;
 }
 
 .piston-end-start {
   bottom: 8px;
-  transform: rotate(180deg);
 }
 
 .piston-end-finish {
   top: 8px;
-}
-
-.piston-live-strip {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.piston-live-strip > div {
-  display: grid;
-  gap: 2px;
-  padding: 7px 9px;
-  border: 1px solid #bfc9d4;
-  border-radius: 8px;
-  background: rgb(255 255 255 / 74%);
-}
-
-.piston-live-strip span,
-.piston-range-note {
-  color: var(--muted);
-  font-size: 1rem;
-}
-
-.piston-live-strip strong {
-  color: #1e2b38;
-  font-size: 1.05rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.piston-range-note {
-  margin: 0;
-  line-height: 1.25;
 }
 
 .piston-visual.is-stale {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import math
 import os
 import pty
@@ -11,6 +12,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 from networked_sensors.dashboard import (
@@ -308,6 +310,115 @@ class UsbStepperSourceTests(unittest.TestCase):
         )[0]
         self.assertIn("stopPulseEngine();", stop_body)
         self.assertIn("disableDriverOutput();", stop_body)
+
+    def test_firmware_explicitly_owns_step_and_direction_outputs(self) -> None:
+        repository = Path(__file__).parent
+        firmware = (repository / "limit_switch_palas.ino").read_text()
+        setup = firmware.split("void setup()", 1)[1].split("void loop()", 1)[0]
+
+        required_once = (
+            "digitalWrite(PIN_DRIVER_ENABLE_NEG, DRIVER_OUTPUT_DISABLED_LEVEL);",
+            "pinMode(PIN_DRIVER_ENABLE_NEG, OUTPUT);",
+            "digitalWrite(PIN_STEP, LOW);",
+            "digitalWrite(PIN_DRIVER_DIR, LOW);",
+            "pinMode(PIN_STEP, OUTPUT);",
+            "pinMode(PIN_DRIVER_DIR, OUTPUT);",
+        )
+        for statement in required_once:
+            with self.subTest(statement=statement):
+                self.assertEqual(setup.count(statement), 1)
+
+        # D9 must inhibit the DM542T before D2/D3 become driven outputs. Both
+        # GPIO output latches must be LOW before either data-direction bit is
+        # enabled, and Timer1 must remain disabled until all GPIO is configured.
+        ordered_statements = (
+            "digitalWrite(PIN_DRIVER_ENABLE_NEG, DRIVER_OUTPUT_DISABLED_LEVEL);",
+            "pinMode(PIN_DRIVER_ENABLE_NEG, OUTPUT);",
+            "digitalWrite(PIN_STEP, LOW);",
+            "digitalWrite(PIN_DRIVER_DIR, LOW);",
+            "pinMode(PIN_STEP, OUTPUT);",
+            "pinMode(PIN_DRIVER_DIR, OUTPUT);",
+            "TIMSK1 &= ~_BV(OCIE1A);",
+        )
+        positions = [setup.index(statement) for statement in ordered_statements]
+        self.assertEqual(positions, sorted(positions))
+
+        # Timer1 is the sole STEP-edge owner after setup. A software pulse
+        # counter without these physical writes is not evidence of D3 output.
+        timer_isr = firmware.split("ISR(TIMER1_COMPA_vect)", 1)[1].split(
+            "byte droNibble", 1
+        )[0]
+        self.assertIn("digitalWrite(PIN_STEP, HIGH);", timer_isr)
+        self.assertIn("delayMicroseconds(5);", timer_isr)
+        self.assertIn("digitalWrite(PIN_STEP, LOW);", timer_isr)
+
+        hardware_contract = (
+            repository / "documentation" / "README.md"
+        ).read_text()
+        self.assertIn("pinMode(PIN_STEP, OUTPUT)", hardware_contract)
+        self.assertIn("pinMode(PIN_DRIVER_DIR, OUTPUT)", hardware_contract)
+        self.assertIn("must not depend on a library constructor", hardware_contract)
+
+    def test_web_motion_continuously_clears_departed_endpoint_latch(self) -> None:
+        firmware = Path(__file__).with_name("limit_switch_palas.ino").read_text()
+        loop_body = firmware.split("void loop()", 1)[1]
+        active_web_body = loop_body.split("if (activeWebMotion) {", 1)[1].split(
+            "if (!activeWebMotion)", 1
+        )[0]
+        continuous_clear = (
+            "if (d4MotionArmed) "
+            "clearOppositeLimitLatch(activePhysicalDirection);"
+        )
+        qualified_destination_check = (
+            "limitBlocksPhysicalDirection(\n"
+            "                     activePhysicalDirection,\n"
+            "                     positiveLimitActive,\n"
+            "                     negativeLimitActive)"
+        )
+        self.assertIn(continuous_clear, active_web_body)
+        self.assertIn(qualified_destination_check, active_web_body)
+        self.assertLess(
+            active_web_body.index(continuous_clear),
+            active_web_body.index(qualified_destination_check),
+        )
+        self.assertIn(
+            "if (d4MotionArmed) clearOppositeLimitLatch(physicalDirection);",
+            loop_body,
+        )
+
+    def test_fixed_dir_output_polarity_matches_physical_limit_contract(self) -> None:
+        repository = Path(__file__).parent
+        firmware = (repository / "limit_switch_palas.ino").read_text()
+
+        self.assertIn("const int FIXED_DIRECTION_SIGN = 1;", firmware)
+        self.assertIn(
+            "const int DRIVER_DIR_POSITIVE_LEVEL = LOW;",
+            firmware,
+        )
+        self.assertIn(
+            "const int DRIVER_DIR_NEGATIVE_LEVEL = HIGH;",
+            firmware,
+        )
+        self.assertIn("DRIVER_DIR_POSITIVE_LEVEL == LOW", firmware)
+        self.assertIn("DRIVER_DIR_NEGATIVE_LEVEL == HIGH", firmware)
+        start_engine = firmware.split("void startPulseEngine(", 1)[1].split(
+            "void queuePulseEngineSpeed", 1
+        )[0]
+        self.assertIn(
+            "? DRIVER_DIR_POSITIVE_LEVEL\n"
+            "          : DRIVER_DIR_NEGATIVE_LEVEL",
+            start_engine,
+        )
+        self.assertNotIn(
+            "digitalWrite(PIN_DRIVER_DIR, direction > 0 ? HIGH : LOW);",
+            firmware,
+        )
+
+        hardware_contract = (
+            repository / "documentation" / "README.md"
+        ).read_text()
+        self.assertIn("D2 LOW = Forward/positive toward D6", hardware_contract)
+        self.assertIn("D2 HIGH = Reverse/negative toward D8", hardware_contract)
 
     def test_unified_timer_compare_quantization_matches_commanded_cruise(self) -> None:
         timer_hz = 16_000_000 // 64
@@ -676,11 +787,14 @@ class NetworkStepperSourceTests(unittest.TestCase):
                 "http://192.168.8.137:8080",
                 "--stepper-timeout",
                 "0.4",
+                "--system-config",
+                "/tmp/test-system-config.json",
             ]
         )
         self.assertEqual(args.stepper_source, "network")
         self.assertEqual(args.stepper_url, "http://192.168.8.137:8080")
         self.assertEqual(args.stepper_timeout, 0.4)
+        self.assertEqual(args.system_config, Path("/tmp/test-system-config.json"))
         sources = make_sources(
             esp32_source="off",
             dxmr90_source="off",
@@ -959,6 +1073,35 @@ class UsbStepperDashboardTests(unittest.TestCase):
     def test_dashboard_separates_scheduled_and_measured_step_output(self) -> None:
         self.assertIn("Scheduled speed", INDEX_HTML)
         self.assertIn('id="stepperMeasuredSpeed"', INDEX_HTML)
+        self.assertIn('id="stepperPrimaryPulseOutput"', INDEX_HTML)
+        self.assertIn('id="stepperDroVelocity"', INDEX_HTML)
+        self.assertIn("Pulse timer", INDEX_HTML)
+        self.assertIn("DRO velocity", INDEX_HTML)
+        self.assertIn(
+            'id="stepperPrimaryPulseOutput" class="piston-secondary-value"',
+            INDEX_HTML,
+        )
+        self.assertIn(
+            'id="stepperDroVelocity" class="piston-secondary-value"',
+            INDEX_HTML,
+        )
+        self.assertNotIn('id="stepperPulseMonitor"', INDEX_HTML)
+        self.assertLess(
+            INDEX_HTML.index('id="stepperDroPosition"'),
+            INDEX_HTML.index('id="stepperPrimaryPulseOutput"'),
+        )
+        self.assertLess(
+            INDEX_HTML.index('id="stepperDroVelocity"'),
+            INDEX_HTML.index('id="stepperPrimaryPulseOutput"'),
+        )
+        self.assertIn(
+            "stepperPrimaryPulseOutput,\n"
+            "        hasMeasuredPulseOutput ?",
+            STEPPER_JS,
+        )
+        self.assertIn("stepper_dro_velocity_mm_s", STEPPER_JS)
+        self.assertIn("stepper_dro_velocity_window_ms", STEPPER_JS)
+        self.assertIn(".piston-secondary-value", DASHBOARD_CSS)
         self.assertIn("stepper_measured_pulse_rate_sps", STEPPER_JS)
         self.assertIn("stepper_measured_speed_mm_s", STEPPER_JS)
         self.assertIn('id="stepperPulseEngine"', INDEX_HTML)
@@ -972,9 +1115,9 @@ class UsbStepperDashboardTests(unittest.TestCase):
             'aria-label="Read-only piston head position measured by the DRO"',
             INDEX_HTML,
         )
-        self.assertIn("read-only display", INDEX_HTML)
+        self.assertIn('<span class="piston-eyebrow">DRO position</span>', INDEX_HTML)
         self.assertIn('id="stepperDroPosition"', INDEX_HTML)
-        self.assertIn('id="stepperDroDisplacement"', INDEX_HTML)
+        self.assertNotIn('id="stepperDroDisplacement"', INDEX_HTML)
         self.assertIn("stepper_dro_fresh", STEPPER_JS)
         self.assertIn("stepper_dro_valid_frame_count", STEPPER_JS)
 
@@ -982,8 +1125,13 @@ class UsbStepperDashboardTests(unittest.TestCase):
         self.assertIn('class="control-panel stepper-panel"', INDEX_HTML)
         self.assertIn('class="stepper-layout"', INDEX_HTML)
         self.assertIn('id="stepperPistonVisual"', INDEX_HTML)
-        self.assertIn('id="stepperDroDirection"', INDEX_HTML)
         self.assertIn('class="piston-readout"', INDEX_HTML)
+        self.assertNotIn('id="stepperDroState"', INDEX_HTML)
+        self.assertNotIn('id="stepperDroDirection"', INDEX_HTML)
+        self.assertNotIn("Boot travel", INDEX_HTML)
+        self.assertNotIn("System zero not set", INDEX_HTML)
+        self.assertNotIn('class="piston-live-strip"', INDEX_HTML)
+        self.assertNotIn('class="piston-range-note"', INDEX_HTML)
         self.assertIn('class="stepper-console"', INDEX_HTML)
         self.assertIn('class="source-row stepper-interlocks"', INDEX_HTML)
         self.assertNotIn("<header><h3>Motion</h3></header>", INDEX_HTML)
@@ -996,14 +1144,42 @@ class UsbStepperDashboardTests(unittest.TestCase):
             INDEX_HTML.index("<summary>Stepper diagnostics and motion telemetry</summary>"),
         )
         self.assertIn('<div class="interlock-item"><dt title="Local enable input">Enable (D4)</dt>', INDEX_HTML)
-        self.assertIn('<div class="interlock-item"><dt title="Positive travel limit">+ Limit (D6)</dt>', INDEX_HTML)
+        self.assertIn(
+            '<dt title="Positive/bottom travel limit">+ Limit (D6 · bottom)</dt>',
+            INDEX_HTML,
+        )
+        self.assertIn(
+            '<dt title="Negative/top travel limit">− Limit (D8 · top)</dt>',
+            INDEX_HTML,
+        )
         self.assertLess(
             INDEX_HTML.index('id="stepperPistonVisual"'),
             INDEX_HTML.index('class="stepper-console"'),
         )
+        self.assertNotIn("droVisualRange", CONFIG_JS)
         self.assertIn(
-            "droVisualRange: Object.freeze({minMm: 0, maxMm: 152.4})",
-            CONFIG_JS,
+            "const droVisualMinMm = -limits.max_distance_mm",
+            STEPPER_JS,
+        )
+        self.assertIn("const droVisualMaxMm = 0", STEPPER_JS)
+        self.assertIn(
+            "const droVisualEndpointToleranceMm = 0.1",
+            STEPPER_JS,
+        )
+        self.assertIn(
+            "positionMm < droVisualMinMm - droVisualEndpointToleranceMm",
+            STEPPER_JS,
+        )
+        self.assertIn(
+            'setText(els.stepperDroMaxLabel, "D8 top 0 mm")',
+            STEPPER_JS,
+        )
+        self.assertIn("D6 bottom ${droVisualMinMm.toFixed(2)} mm", STEPPER_JS)
+        self.assertIn("D8 top 0 mm", INDEX_HTML)
+        self.assertIn("D6 bottom −137.18 mm", INDEX_HTML)
+        self.assertIn(
+            "positive is upward and negative is downward",
+            STEPPER_JS,
         )
         self.assertIn('style.setProperty(\n        "--piston-position"', STEPPER_JS)
         self.assertIn('classList.toggle("is-stale", hasPosition && !fresh)', STEPPER_JS)
@@ -1018,8 +1194,213 @@ class UsbStepperDashboardTests(unittest.TestCase):
         self.assertIn(".piston-head", DASHBOARD_CSS)
         self.assertIn("min-height: 500px", DASHBOARD_CSS)
         self.assertIn("grid-template-rows: auto minmax(320px, 1fr)", DASHBOARD_CSS)
-        self.assertIn("bottom: var(--piston-position)", DASHBOARD_CSS)
+        self.assertNotIn(".piston-live-strip", DASHBOARD_CSS)
+        self.assertNotIn(".piston-range-note", DASHBOARD_CSS)
+        self.assertIn("top: var(--piston-position)", DASHBOARD_CSS)
         self.assertIn("height: calc(var(--piston-position) - 4%)", DASHBOARD_CSS)
+        self.assertIn("const positionPercent = 96 - ratio * 92", STEPPER_JS)
+        self.assertNotIn("bottom: var(--piston-position)", DASHBOARD_CSS)
+        self.assertNotIn("writing-mode: vertical-rl", DASHBOARD_CSS)
+
+    def test_dashboard_derives_signed_velocity_only_from_fresh_dro_frames(
+        self,
+    ) -> None:
+        config_directory = TemporaryDirectory()
+        self.addCleanup(config_directory.cleanup)
+        runtime = DashboardRuntime(
+            scenario="healthy",
+            rate_hz=10.0,
+            drop_after_s=2.0,
+            stale_after_s=5.0,
+            history_limit=10,
+            record_dir=Path("/tmp/stepper-dashboard-dro-velocity-test-recordings"),
+            esp32_source="sim",
+            dxmr90_source="sim",
+            stepper_source="sim",
+            stepper_port="/dev/null",
+            stepper_baud=9600,
+            dxmr90_host="127.0.0.1",
+            dxmr90_port=502,
+            dxmr90_unit_id=1,
+            dxmr90_timeout=0.1,
+            dxmr90_addressing="one-based",
+            dxmr90_word_order="high-low",
+            dxmr90_data_path="direct",
+            dxmr90_rate_hz=10.0,
+            system_config_path=Path(config_directory.name) / "system_config.json",
+        )
+
+        def dro_sample(
+            position_mm: float,
+            frame_count: int,
+            *,
+            fresh: bool = True,
+        ) -> dict[str, object]:
+            return {
+                "stepper_connected": True,
+                "stepper_dro_capable": True,
+                "stepper_dro_fresh": fresh,
+                "stepper_dro_position_mm": position_mm,
+                "stepper_dro_valid_frame_count": frame_count,
+                "stepper_dro_sample_age_ms": 0,
+            }
+
+        try:
+            first = dro_sample(10.0, 1)
+            runtime._apply_stepper_dro_velocity_locked(first, 0.0)
+            self.assertIsNone(first["stepper_dro_velocity_mm_s"])
+
+            positive = dro_sample(10.2, 2)
+            runtime._apply_stepper_dro_velocity_locked(positive, 0.2)
+            self.assertEqual(positive["stepper_dro_velocity_mm_s"], 1.0)
+            self.assertEqual(positive["stepper_dro_velocity_window_ms"], 200)
+
+            positive_smoothed = dro_sample(10.4, 3)
+            runtime._apply_stepper_dro_velocity_locked(positive_smoothed, 0.4)
+            self.assertEqual(
+                positive_smoothed["stepper_dro_velocity_mm_s"],
+                1.0,
+            )
+
+            stale = dro_sample(10.4, 3, fresh=False)
+            runtime._apply_stepper_dro_velocity_locked(stale, 0.6)
+            self.assertIsNone(stale["stepper_dro_velocity_mm_s"])
+
+            stopped_first = dro_sample(10.4, 4)
+            runtime._apply_stepper_dro_velocity_locked(stopped_first, 0.8)
+            stopped = dro_sample(10.4, 5)
+            runtime._apply_stepper_dro_velocity_locked(stopped, 1.0)
+            self.assertEqual(stopped["stepper_dro_velocity_mm_s"], 0.0)
+
+            reset = dro_sample(10.4, 5, fresh=False)
+            runtime._apply_stepper_dro_velocity_locked(reset, 1.2)
+            negative_first = dro_sample(10.4, 6)
+            runtime._apply_stepper_dro_velocity_locked(negative_first, 1.4)
+            negative = dro_sample(10.2, 7)
+            runtime._apply_stepper_dro_velocity_locked(negative, 1.6)
+            self.assertEqual(negative["stepper_dro_velocity_mm_s"], -1.0)
+        finally:
+            runtime.stop()
+
+    def test_dashboard_zeroes_fresh_dro_without_enabling_return_motion(self) -> None:
+        self.assertIn('id="stepperSetDroZero"', INDEX_HTML)
+        self.assertIn('id="stepperMoveToDroZero"', INDEX_HTML)
+        self.assertIn(
+            'id="stepperMoveToDroZero" type="button" disabled',
+            INDEX_HTML,
+        )
+        self.assertIn('id="stepperDroRawPosition"', INDEX_HTML)
+        self.assertIn('id="stepperDroZeroDiagnostic"', INDEX_HTML)
+        self.assertIn('stepperDroZero: "/api/stepper/dro-zero"', API_JS)
+        self.assertIn("els.stepperMoveToDroZero.disabled = true", STEPPER_JS)
+        zero_handler = STEPPER_JS.split(
+            'els.stepperSetDroZero.addEventListener("click"',
+            1,
+        )[1].split('els.stepperForm.addEventListener("input"', 1)[0]
+        self.assertIn("postJson(API.stepperDroZero)", zero_handler)
+        self.assertNotIn("API.stepperMove", zero_handler)
+        self.assertNotIn("requestMove", zero_handler)
+        self.assertIn("payload.zero?.motion_commanded !== false", zero_handler)
+
+        config_directory = TemporaryDirectory()
+        self.addCleanup(config_directory.cleanup)
+        system_config_path = Path(config_directory.name) / "system_config.json"
+        runtime_arguments = dict(
+            scenario="healthy",
+            rate_hz=10.0,
+            drop_after_s=2.0,
+            stale_after_s=5.0,
+            history_limit=10,
+            record_dir=Path("/tmp/stepper-dashboard-dro-zero-test-recordings"),
+            esp32_source="sim",
+            dxmr90_source="sim",
+            stepper_source="sim",
+            stepper_port="/dev/null",
+            stepper_baud=9600,
+            dxmr90_host="127.0.0.1",
+            dxmr90_port=502,
+            dxmr90_unit_id=1,
+            dxmr90_timeout=0.1,
+            dxmr90_addressing="one-based",
+            dxmr90_word_order="high-low",
+            dxmr90_data_path="direct",
+            dxmr90_rate_hz=10.0,
+            system_config_path=system_config_path,
+        )
+        runtime = DashboardRuntime(**runtime_arguments)
+        try:
+            self.assertFalse(runtime.latest["stepper_dro_zero_set"])
+            self.assertIsNone(runtime.latest["stepper_dro_zero_raw_mm"])
+            self.assertIsNone(runtime.latest["stepper_dro_zeroed_position_mm"])
+            with runtime._condition:
+                runtime.latest.update(
+                    {
+                        "stepper_connected": True,
+                        "stepper_moving": False,
+                        "stepper_dro_capable": True,
+                        "stepper_dro_fresh": True,
+                        "stepper_dro_position_mm": -2.81,
+                        "stepper_dro_valid_frame_count": 10,
+                    }
+                )
+            stepper = next(
+                source for source in runtime.sources if source.name == "stepper"
+            )
+            with mock.patch.object(stepper, "move") as move:
+                payload = runtime.set_stepper_dro_zero()
+                move.assert_not_called()
+            self.assertEqual(
+                payload["zero"],
+                {
+                    "set": True,
+                    "raw_position_mm": -2.81,
+                    "scope": "system_config",
+                    "motion_commanded": False,
+                },
+            )
+            self.assertEqual(
+                json.loads(system_config_path.read_text(encoding="utf-8")),
+                {
+                    "version": 1,
+                    "stepper": {
+                        "dro_zero_raw_mm": -2.81,
+                    },
+                },
+            )
+            self.assertEqual(payload["sample"]["stepper_dro_zeroed_position_mm"], 0.0)
+
+            next_sample = dict(payload["sample"])
+            next_sample["stepper_dro_position_mm"] = 1.69
+            runtime._apply_stepper_dro_zero_locked(next_sample)
+            self.assertEqual(next_sample["stepper_dro_zeroed_position_mm"], 4.5)
+            self.assertEqual(next_sample["stepper_dro_position_mm"], 1.69)
+
+            runtime.latest["stepper_moving"] = True
+            with self.assertRaisesRegex(RuntimeError, "stop motion"):
+                runtime.set_stepper_dro_zero()
+            runtime.latest["stepper_moving"] = False
+            runtime.latest["stepper_dro_fresh"] = False
+            with self.assertRaisesRegex(RuntimeError, "fresh connected DRO"):
+                runtime.set_stepper_dro_zero()
+        finally:
+            runtime.stop()
+
+        restarted_runtime = DashboardRuntime(**runtime_arguments)
+        try:
+            self.assertTrue(restarted_runtime.latest["stepper_dro_zero_set"])
+            self.assertEqual(
+                restarted_runtime.latest["stepper_dro_zero_raw_mm"],
+                -2.81,
+            )
+            reconnected_sample = dict(restarted_runtime.latest)
+            reconnected_sample["stepper_dro_position_mm"] = 1.69
+            restarted_runtime._apply_stepper_dro_zero_locked(reconnected_sample)
+            self.assertEqual(
+                reconnected_sample["stepper_dro_zeroed_position_mm"],
+                4.5,
+            )
+        finally:
+            restarted_runtime.stop()
 
     def test_dashboard_exposes_and_latches_simulated_software_estop(self) -> None:
         self.assertIn('id="emergencyStop"', INDEX_HTML)

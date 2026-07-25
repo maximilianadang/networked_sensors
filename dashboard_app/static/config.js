@@ -4,7 +4,6 @@ export const UI_CONFIG = Object.freeze({
   historyLimit: 240,
   pollingIntervalMs: 100,
   moveConfirmation: Object.freeze({distanceMm: 50, speedMmS: 5}),
-  droVisualRange: Object.freeze({minMm: 0, maxMm: 152.4}),
   stepperInputs: Object.freeze({
     minDistanceMm: 0.01,
     distanceStepMm: 0.01,

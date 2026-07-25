@@ -416,15 +416,24 @@ compile, verified USB upload, and stopped `aps:0` status pass. The arm remains
 wet until its live 3/5 mm/s pulse measurements are compared with the external
 DRO. The field is not driver acknowledgement or mechanical feedback.
 
+The dashboard now provides the complementary mechanical measurement. Its
+runtime fits a signed least-squares slope to fresh raw DRO positions over a
+short rolling window, publishes `stepper_dro_velocity_mm_s` with the actual
+window duration, and clears both fields when feedback is stale, disconnected,
+or has not yet accumulated enough samples. The piston panel keeps DRO position
+primary and places a smaller Pulse timer beside this **DRO velocity**. This is
+derived independent motion evidence and is recorded in merged samples, but it
+does not feed any firmware or laptop motion decision.
+
 ## Step I3f - immutable physical direction and D9 driver output
 
 Live physical testing invalidated I3b3's assumption that runtime electrical
 inversion could leave logical D6/D8 meanings unchanged. The source arm now
 integrates a single physically verified direction contract across firmware,
-USB, network, and page: Forward/positive approaches D6; Reverse/negative
-approaches D8. The mutating `V1 D` grammar is absent at every layer, while
-read-only `ds` remains for deployment detection and legacy `ds:-1` prevents
-Web Position commands.
+USB, network, and page: Forward/positive approaches the D6 bottom limit;
+Reverse/negative approaches the D8 top limit. The mutating `V1 D` grammar is
+absent at every layer, while read-only `ds` remains for deployment detection
+and legacy `ds:-1` prevents Web Position commands.
 
 The arm also adds optional compact `en`. On the new firmware it reports the D9
 output connected to common-anode DM542T `ENA-`; LOW disables motor winding
@@ -444,6 +453,66 @@ identifies this deployment. Forty-two stepper tests, all 54 desktop tests, and
 the 20,222-byte/70%-flash, 1,457-byte/56%-RAM compile pass. This arm remains wet
 until the unified image is uploaded and passes cruise-rate, endpoint
 disable/wake/retreat, and exact finite-target checks over LAN.
+
+The 2026-07-24 motor bring-up exposed an initialization regression in that
+unified image. The earlier Local Velocity Timer1 path worked only because the
+otherwise unrelated global `AccelStepper` constructor implicitly configured D3
+STEP and D2 DIR as outputs. Removing that object for the unified engine also
+removed its hidden side effect, while the software pulse counter continued to
+advance and misleadingly suggested output activity. Firmware now preloads and
+explicitly configures both GPIO outputs while D9 holds the DM542T disabled. A
+source-contract regression test checks the complete D9 → STEP/DIR latch →
+STEP/DIR output → Timer1-disabled boot order, and the hardware documentation
+records the same invariant. The corrected exact source compiles for
+`arduino:avr:yun` at 21,252 bytes/74% flash and 1,653 bytes/64% RAM. It was
+uploaded to `/dev/ttyACM0` with verification. The direct post-reset USB
+heartbeat confirmed D4 OFF, D6/D8 clear, D9 disabled (`en:0`), zero pulse
+attempts (`aps:0`), unified Timer1 (`ut:1`), no E-STOP, and fresh DRO frames at
+162.93 mm with zero rejected/dropped diagnostics. Staged physical motion remains
+wet for this corrected image.
+
+The first post-upload Local Velocity run supplied the missing physical polarity
+evidence. The firmware counter moved from 0 to −31,984 pulses while the DRO moved
+from 162.93 mm to approximately −1.98 mm and D6 became active. Thus the old
+generic `direction > 0 ? HIGH : LOW` output made Reverse/negative drive toward
+D6 even though the interlock checked D8. A subsequent brief Reverse attempt at
+D6 produced rough energization but no additional pulse count; D4 was returned
+OFF. The corrected fixed calibration now drives D2 LOW for
+Forward/positive/toward-D6 and D2 HIGH for Reverse/negative/toward-D8, while
+retaining the immutable `ds:1` physical contract. Compile-time assertions,
+source-contract tests, and the hardware/runbook/checklist text lock those
+electrical levels to their physical endpoints. All 66 desktop tests and the
+exact 21,252-byte/74%-flash, 1,653-byte/64%-RAM Yún build pass. The corrected
+image was uploaded with verification; the Yún re-enumerated at `/dev/ttyACM1`
+and reported D4 OFF, D6 active/latched, D8 clear, `positive_limit`, `en:0`,
+`aps:0`, `ut:1`, and fresh −1.98 mm DRO data. A short Reverse retreat from D6
+is the remaining physical polarity check.
+
+The subsequent endpoint/zero check establishes the vertical installation:
+D8/negative is the physical upper limit and D6/positive is the lower limit.
+The persistent configuration contains raw DRO zero `136.77 mm`; the endpoint
+reading was `136.82 mm`, a `raw - zero` offset of `+0.05 mm`. The page therefore
+keeps all verified control and sensor signs intact but maps `0 mm` to the top
+of the piston animation and `−137.18 mm` to the bottom. Endpoint labels and
+Home/D8 wording carry the same top/bottom relationship.
+
+The first Web Position departure from that D8/top zero completed command
+`usb-00001` and moved the independent DRO to −9.78 mm, but live status still
+reported `negative_limit_latched=true` even though D8 raw was HIGH/clear and
+its qualified state was inactive. The 5 ms input qualification was present and
+working; this was a separate latch-lifecycle defect. The command handler
+cleared the behind-side latch once, then the still-qualified D8 input could
+re-latch it before the carriage released the switch. Firmware now repeats that
+behind-side clear throughout an armed Web move, just as Local Velocity already
+did, while its destination decision continues to use current qualified inputs.
+All 68 desktop tests pass and the exact `arduino:avr:yun` build uses
+21,256 bytes/74% flash and 1,653 bytes/64% RAM. Verified upload passed on
+`/dev/ttyACM1`, after which the Yún re-enumerated at `/dev/ttyACM0`. The
+USB-backed dashboard then confirmed D4 HIGH/OFF, D9 disabled, zero measured
+pulses, D6/D8 raw and qualified clear, both endpoint latches false, explicit
+5 ms qualification, fresh 122.95 mm DRO feedback, and the persistent
+132.73 mm zero. A physical repeat of the depart-then-reverse sequence remains
+the wet regression check.
 
 ## Step I5B - partial-hardware ESP32 source integrated
 

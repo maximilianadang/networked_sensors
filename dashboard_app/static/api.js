@@ -15,7 +15,8 @@ export const API = Object.freeze({
   stepperEstopReset: "/api/stepper/estop/reset",
   stepperHome: "/api/stepper/home",
   stepperControlMode: "/api/stepper/control-mode",
-  stepperSpeed: "/api/stepper/speed"
+  stepperSpeed: "/api/stepper/speed",
+  stepperDroZero: "/api/stepper/dro-zero"
 });
 
 export async function getJson(url) {

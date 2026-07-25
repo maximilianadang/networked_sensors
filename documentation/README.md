@@ -42,6 +42,22 @@ header numbers on the Yún:
 | Negative limit switch | D8 | ATmega32U4 input with internal pull-up |
 | Driver disable (`ENA-`) | D9 | ATmega32U4 output; LOW disables DM542T output |
 
+STEP and DIR GPIO ownership is a firmware invariant, not an incidental library
+behavior. `setup()` must contain both `pinMode(PIN_STEP, OUTPUT)` and
+`pinMode(PIN_DRIVER_DIR, OUTPUT)`; it must not depend on a library constructor
+to configure either pin. The safe boot order is:
+
+1. Preload D9 with the disabled level and configure D9 as an output.
+2. Preload the D3 STEP and D2 DIR output latches LOW.
+3. Configure D3 STEP and D2 DIR as outputs.
+4. Configure Timer1 while leaving its compare interrupt disabled.
+
+Calling `digitalWrite()` does not make an input pin a driven output. The
+firmware pulse counter can therefore advance even when no valid electrical STEP
+signal reaches the DM542T if either explicit `pinMode()` is removed. The desktop
+firmware-contract test locks this initialization and ordering against
+regression.
+
 Do not add an I2C device on D2/D3 without moving STEP and DIR. Avoid D0/D1:
 the Yún uses the ATmega32U4 hardware serial connection to communicate with the
 AR9331 Linux processor. D7 also has a Yún handshake connection and is not needed
@@ -70,6 +86,10 @@ Normal physical direction is fixed after endpoint verification: D5
 Forward/positive approaches D6, while D5 Reverse/negative approaches D8.
 Runtime electrical inversion was removed because it could reverse physical
 travel without reversing the endpoint selected by the software interlock.
+The current fixed electrical calibration is `D2 LOW = Forward/positive toward D6`
+and `D2 HIGH = Reverse/negative toward D8`. This polarity is compiled into the
+Timer1 engine and protected by static assertions and a source-contract test; it
+is not an operator setting.
 
 ### Critical power constraint
 

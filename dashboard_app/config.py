@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 DEFAULT_HISTORY_LIMIT = 600
+DEFAULT_SYSTEM_CONFIG_PATH = Path(__file__).resolve().parents[1] / "system_config.json"
 DEFAULT_METADATA = {
     "sample_number": "",
     "sub_number": "",

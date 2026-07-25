@@ -44,6 +44,12 @@ except ImportError:  # pragma: no cover - direct dashboard.py execution
     )
 
 from .config import DEFAULT_METADATA
+from .system_config import SystemConfig
+
+
+DRO_VELOCITY_WINDOW_S = 0.65
+DRO_VELOCITY_MIN_SPAN_S = 0.15
+DRO_VELOCITY_STOP_DEADBAND_MM_S = 0.04
 
 
 class DashboardRuntime:
@@ -75,6 +81,7 @@ class DashboardRuntime:
         dxmr90_rate_hz: float,
         stepper_network_url: str = DEFAULT_STEPPER_NETWORK_URL,
         stepper_network_timeout: float = DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
+        system_config_path: Path | None = None,
     ) -> None:
         if rate_hz <= 0:
             raise ValueError("rate_hz must be positive")
@@ -138,7 +145,12 @@ class DashboardRuntime:
         self.start_time = datetime.now(timezone.utc)
         self.monotonic0 = time.monotonic()
         self.latest: dict[str, object] | None = None
+        # This display-only reference survives dashboard and transport restarts.
+        # It is never sent to the motion controller.
+        self.system_config = SystemConfig(system_config_path)
         self.sequence = 0
+        self._dro_velocity_samples: deque[tuple[float, float, int]] = deque()
+        self._dro_velocity_last_frame_count: int | None = None
         self._stop_event = threading.Event()
         self._condition = threading.Condition(threading.RLock())
         self._thread: threading.Thread | None = None
@@ -178,12 +190,132 @@ class DashboardRuntime:
     def _poll_locked(self, elapsed_s: float) -> None:
         timestamp = self.start_time + timedelta(seconds=elapsed_s)
         self.latest = self.merger.poll(elapsed_s, timestamp)
+        self._apply_stepper_dro_zero_locked(self.latest)
+        self._apply_stepper_dro_velocity_locked(self.latest, elapsed_s)
         fresh_readings = self.merger.fresh_readings()
         self.history.append(self.latest)
         if self.recording and self.recorder is not None:
             self.recorder.record_sample(self.latest, fresh_readings)
         self.sequence += 1
         self._condition.notify_all()
+
+    def _apply_stepper_dro_zero_locked(
+        self,
+        sample: dict[str, object],
+    ) -> None:
+        """Add the persistent display reference without changing raw DRO data."""
+
+        zero_raw_mm = self.system_config.stepper_dro_zero_raw_mm
+        raw_value = sample.get("stepper_dro_position_mm")
+        try:
+            raw_position_mm = float(raw_value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            raw_position_mm = math.nan
+        has_raw_position = math.isfinite(raw_position_mm)
+
+        sample["stepper_dro_zero_set"] = zero_raw_mm is not None
+        sample["stepper_dro_zero_raw_mm"] = zero_raw_mm
+        sample["stepper_dro_zeroed_position_mm"] = (
+            round(raw_position_mm - zero_raw_mm, 2)
+            if zero_raw_mm is not None and has_raw_position
+            else None
+        )
+
+    def _apply_stepper_dro_velocity_locked(
+        self,
+        sample: dict[str, object],
+        elapsed_s: float,
+    ) -> None:
+        """Derive display-only velocity from fresh raw DRO position samples."""
+
+        sample["stepper_dro_velocity_mm_s"] = None
+        sample["stepper_dro_velocity_window_ms"] = None
+
+        raw_value = sample.get("stepper_dro_position_mm")
+        frame_value = sample.get("stepper_dro_valid_frame_count")
+        age_value = sample.get("stepper_dro_sample_age_ms")
+        try:
+            raw_position_mm = float(raw_value)  # type: ignore[arg-type]
+            frame_count = int(frame_value)  # type: ignore[arg-type]
+            sample_age_ms = float(age_value)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            self._reset_stepper_dro_velocity_locked()
+            return
+
+        valid_sample = (
+            sample.get("stepper_connected") is True
+            and sample.get("stepper_dro_capable") is True
+            and sample.get("stepper_dro_fresh") is True
+            and math.isfinite(raw_position_mm)
+            and not isinstance(frame_value, bool)
+            and frame_count >= 0
+            and math.isfinite(sample_age_ms)
+            and sample_age_ms >= 0.0
+        )
+        if not valid_sample:
+            self._reset_stepper_dro_velocity_locked()
+            return
+
+        if (
+            self._dro_velocity_last_frame_count is not None
+            and frame_count < self._dro_velocity_last_frame_count
+        ):
+            self._reset_stepper_dro_velocity_locked()
+
+        if frame_count != self._dro_velocity_last_frame_count:
+            measurement_time_s = elapsed_s - sample_age_ms / 1000.0
+            if (
+                self._dro_velocity_samples
+                and measurement_time_s <= self._dro_velocity_samples[-1][0]
+            ):
+                measurement_time_s = elapsed_s
+            self._dro_velocity_samples.append(
+                (measurement_time_s, raw_position_mm, frame_count)
+            )
+            self._dro_velocity_last_frame_count = frame_count
+
+        cutoff_s = elapsed_s - DRO_VELOCITY_WINDOW_S
+        while (
+            len(self._dro_velocity_samples) > 2
+            and self._dro_velocity_samples[1][0] < cutoff_s
+        ):
+            self._dro_velocity_samples.popleft()
+
+        if len(self._dro_velocity_samples) < 2:
+            return
+
+        window_s = (
+            self._dro_velocity_samples[-1][0]
+            - self._dro_velocity_samples[0][0]
+        )
+        if window_s < DRO_VELOCITY_MIN_SPAN_S:
+            return
+
+        mean_time_s = sum(point[0] for point in self._dro_velocity_samples) / len(
+            self._dro_velocity_samples
+        )
+        mean_position_mm = sum(
+            point[1] for point in self._dro_velocity_samples
+        ) / len(self._dro_velocity_samples)
+        denominator = sum(
+            (point[0] - mean_time_s) ** 2
+            for point in self._dro_velocity_samples
+        )
+        if denominator <= 0.0:
+            return
+        velocity_mm_s = sum(
+            (point[0] - mean_time_s) * (point[1] - mean_position_mm)
+            for point in self._dro_velocity_samples
+        ) / denominator
+        if abs(velocity_mm_s) < DRO_VELOCITY_STOP_DEADBAND_MM_S:
+            velocity_mm_s = 0.0
+
+        sample["stepper_dro_velocity_mm_s"] = round(velocity_mm_s, 3)
+        sample["stepper_dro_velocity_window_ms"] = round(window_s * 1000.0)
+
+    def _reset_stepper_dro_velocity_locked(self) -> None:
+        self._dro_velocity_samples.clear()
+        self._dro_velocity_last_frame_count = None
 
     def run_config_locked(self) -> dict[str, object]:
         return {
@@ -207,6 +339,14 @@ class DashboardRuntime:
             "dxmr90_word_order": self.dxmr90_word_order,
             "dxmr90_data_path": self.dxmr90_data_path,
             "dxmr90_rate_hz": self.dxmr90_rate_hz,
+            "system_config_path": (
+                str(self.system_config.path)
+                if self.system_config.path is not None
+                else None
+            ),
+            "stepper_dro_zero_raw_mm": (
+                self.system_config.stepper_dro_zero_raw_mm
+            ),
         }
 
     def run_state_locked(self) -> dict[str, object]:
@@ -439,6 +579,44 @@ class DashboardRuntime:
             return {
                 "stepper": self._stepper_payload_locked(),
                 "sample": self.latest,
+            }
+
+    def set_stepper_dro_zero(self) -> dict[str, object]:
+        """Snapshot a fresh stopped DRO reading as a display-only zero."""
+
+        with self._condition:
+            latest = self.latest
+            if latest is None:
+                raise RuntimeError("no dashboard sample is available")
+            if latest.get("stepper_moving") is True:
+                raise RuntimeError("stop motion before setting the DRO zero")
+            if (
+                latest.get("stepper_connected") is not True
+                or latest.get("stepper_dro_capable") is not True
+                or latest.get("stepper_dro_fresh") is not True
+            ):
+                raise RuntimeError("a fresh connected DRO sample is required")
+            try:
+                raw_position_mm = float(latest.get("stepper_dro_position_mm"))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("a finite DRO position is required") from exc
+            if not math.isfinite(raw_position_mm):
+                raise RuntimeError("a finite DRO position is required")
+
+            persisted_zero = self.system_config.set_stepper_dro_zero_raw_mm(
+                raw_position_mm
+            )
+            self._apply_stepper_dro_zero_locked(latest)
+            self.sequence += 1
+            self._condition.notify_all()
+            return {
+                "zero": {
+                    "set": True,
+                    "raw_position_mm": persisted_zero,
+                    "scope": "system_config",
+                    "motion_commanded": False,
+                },
+                "sample": latest,
             }
 
     def move_stepper(self, values: dict[str, object]) -> dict[str, object]:

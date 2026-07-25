@@ -83,6 +83,13 @@ unsigned long pulseRampLastUpdateUs = 0UL;
 // command: changing electrical polarity without changing physical endpoint
 // semantics can make motion approach D8 while the firmware checks D6.
 const int FIXED_DIRECTION_SIGN = 1;
+// Physical bring-up after explicit D2 output initialization established the
+// required electrical polarity: D2 LOW moved toward D6, so physical
+// positive/toward-D6 must drive LOW and physical negative/toward-D8 must drive
+// HIGH. Keep this compile-time calibration separate from the immutable physical
+// contract reported by FIXED_DIRECTION_SIGN; it is not a runtime inversion.
+const int DRIVER_DIR_POSITIVE_LEVEL = LOW;
+const int DRIVER_DIR_NEGATIVE_LEVEL = HIGH;
 
 // --- Switch pins ---
 const int PIN_RUN = 4;
@@ -539,7 +546,11 @@ void startPulseEngine(
   if (initialSpeedSps < 1L) initialSpeedSps = 1L;
   uint16_t initialCompare = pulseCompareForSpeed(initialSpeedSps);
 
-  digitalWrite(PIN_DRIVER_DIR, direction > 0 ? HIGH : LOW);
+  digitalWrite(
+      PIN_DRIVER_DIR,
+      direction > 0
+          ? DRIVER_DIR_POSITIVE_LEVEL
+          : DRIVER_DIR_NEGATIVE_LEVEL);
   digitalWrite(PIN_STEP, LOW);
   pulseRampSpeedSps = (float)initialSpeedSps;
   pulseRampCruiseSpeedSps = cruiseSpeedSps;
@@ -630,6 +641,16 @@ constexpr bool limitBlocksPhysicalDirection(
   return (physicalDirection > 0 && positiveLimit) ||
       (physicalDirection < 0 && negativeLimit);
 }
+
+// Compile-time electrical-to-physical direction calibration. The D6-end
+// bring-up established that D2 LOW is the physical positive/toward-D6 level;
+// D2 HIGH is therefore the physical negative/toward-D8 retreat level.
+static_assert(
+    DRIVER_DIR_POSITIVE_LEVEL == LOW,
+    "physical positive/toward-D6 must drive D2 LOW");
+static_assert(
+    DRIVER_DIR_NEGATIVE_LEVEL == HIGH,
+    "physical negative/toward-D8 must drive D2 HIGH");
 
 // Compile-time physical safety matrix. Any future edit that swaps endpoint
 // meanings or blocks retreat makes the AVR build fail before it can be flashed.
@@ -1413,12 +1434,23 @@ void setup() {
   driverOutputEnabled = false;
   d4OffObservedSinceBoot = digitalRead(PIN_RUN) == HIGH;
 
+  // Timer1 drives STEP/DIR directly, so their GPIO direction must be owned
+  // explicitly here. The former AccelStepper object configured these pins as
+  // an implicit constructor side effect; removing that object while
+  // unifying the pulse engine left D2/D3 as inputs and reduced digitalWrite()
+  // to pull-up control. Keep the driver disabled above, preload both output
+  // latches LOW, and only then enable the pin drivers so setup cannot create a
+  // spurious step or direction transition at the DM542T.
+  digitalWrite(PIN_STEP, LOW);
+  digitalWrite(PIN_DRIVER_DIR, LOW);
+  pinMode(PIN_STEP, OUTPUT);
+  pinMode(PIN_DRIVER_DIR, OUTPUT);
+
   // Timer1 CTC at F_CPU/64. The compare interrupt remains disabled until an
   // authorized motion in either mode has completed the 200 ms driver wake-up.
   TCCR1A = 0;
   TCCR1B = _BV(WGM12) | _BV(CS11) | _BV(CS10);
   TIMSK1 &= ~_BV(OCIE1A);
-  digitalWrite(PIN_STEP, LOW);
 
   Serial.println(F("Stepper ready in stopped Local Velocity mode."));
   Serial.println(F("D4/D5 run Local Velocity; Web Position uses D4 arm and D5 direction."));
@@ -1531,6 +1563,13 @@ void loop() {
     motionReason = statusReason;
   } else {
     if (activeWebMotion) {
+      // Keep clearing the endpoint behind an armed Web Position move. Clearing
+      // only in handleMoveCommand() is too early: the 5 ms qualified input can
+      // still be active during initial departure and re-latch before the
+      // carriage releases the switch. The destination check below uses the
+      // current qualified inputs, so this never suppresses the limit ahead.
+      if (d4MotionArmed) clearOppositeLimitLatch(activePhysicalDirection);
+
       bool d5AuthorizesActiveDirection =
           (activePhysicalDirection > 0 && !d5Reverse) ||
           (activePhysicalDirection < 0 && d5Reverse);

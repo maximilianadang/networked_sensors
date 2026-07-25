@@ -12,6 +12,7 @@ try:
     from .dashboard_app import DashboardRuntime, DashboardServer, build_handler, parse_body
     from .dashboard_app.config import (
         DEFAULT_HISTORY_LIMIT,
+        DEFAULT_SYSTEM_CONFIG_PATH,
         INDEX_HTML,
         load_dashboard_asset,
     )
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
     from dashboard_app import DashboardRuntime, DashboardServer, build_handler, parse_body
     from dashboard_app.config import (
         DEFAULT_HISTORY_LIMIT,
+        DEFAULT_SYSTEM_CONFIG_PATH,
         INDEX_HTML,
         load_dashboard_asset,
     )
@@ -205,6 +207,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="directory for disk-backed run artifacts",
     )
     parser.add_argument(
+        "--system-config",
+        type=Path,
+        default=DEFAULT_SYSTEM_CONFIG_PATH,
+        help="persistent machine-level dashboard settings JSON",
+    )
+    parser.add_argument(
         "--verbose-http",
         action="store_true",
         help="print HTTP access logs",
@@ -264,8 +272,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             dxmr90_word_order=args.dxmr90_word_order,
             dxmr90_data_path=args.dxmr90_data_path,
             dxmr90_rate_hz=args.dxmr90_rate_hz,
+            system_config_path=args.system_config,
         )
-    except (NotImplementedError, ValueError) as exc:
+    except (NotImplementedError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 

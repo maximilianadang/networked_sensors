@@ -318,6 +318,15 @@ In **Local Velocity** mode, speed may be changed without starting motion:
 3. Wait for **Configured speed** to show the requested value.
 4. Select the safe direction with D5, then use D4 to start/stop continuous motion.
 
+Both magnetic-limit inputs use non-blocking 5 ms assertion qualification
+(debounce): raw LOW must remain continuous for 5 ms before it becomes ACTIVE,
+can latch, or can stop motion. Release to raw HIGH is accepted immediately.
+Short rejected LOW assertions increment the separate saturating D6/D8 glitch
+counters shown by **Limit input filter**. The persistent latch is a separate
+state: during an armed Local Velocity or Web Position departure, firmware
+repeatedly clears only the endpoint behind the commanded direction, while the
+destination stop continues to use the current 5 ms-qualified input.
+
 The firmware receives `V1 S25..2520`, where the integer is driver pulses/s.
 The calibrated conversion is 251.96850394 pulses/mm: the motor datasheet gives
 0.00396875 mm per 1.8-degree full step, and the photographed DM542T SW5-SW8
@@ -328,23 +337,37 @@ checks. The 10 mm/s limit is provisional software protection, not a proven
 mechanical rating: begin at 1.5 mm/s and increase through short 3.0 and 5.0 mm/s
 travel-away checks before attempting anything faster.
 
-With the instrumented firmware, **Measured STEP output** is calculated from the
-change in the firmware's signed pulse-position counter over a 250 ms window.
-One Timer1 engine advances that counter in Local Velocity, Web Position, and
-Home. It shows both pulses/s and the corresponding magnitude in mm/s. Compare
+With the instrumented firmware, **Pulse timer** is calculated from the change in
+the firmware's signed pulse-position counter over a 250 ms window. One Timer1
+engine advances that counter in Local Velocity, Web Position, and Home. Compare
 it with **Configured speed** and **Scheduled speed** at the cruise plateau;
 Scheduled is intentionally lower while the fixed ramp accelerates or
-decelerates. A 5 mm/s request should cruise near 1260 pulses/s. This remains
-open-loop electrical evidence: it does not prove that the DM542T accepted every
-pulse or that the piston travelled the converted distance, so retain the DRO
-comparison.
+decelerates. A 5 mm/s request should cruise near 1260 pulses/s.
+
+The piston panel places the smaller **Pulse timer** next to **DRO velocity**.
+DRO velocity is the signed least-squares slope of fresh raw DRO positions over
+a rolling window of roughly 0.65 seconds. Positive means the scale reading is
+increasing and negative means it is decreasing. It reads `--` until enough
+fresh samples exist and clears again when feedback becomes stale or
+disconnected. It is independent mechanical-motion evidence, but it is a
+derived position slope—not a direct tachometer signal—and remains display-only
+until the T4H.2 closed-loop controller is implemented and qualified.
+
+**Pulse timer counts ISR attempts, not observed voltage on D3.** Before every
+Yún build and upload, the repository test must confirm that `setup()` explicitly
+configures `PIN_STEP` and `PIN_DRIVER_DIR` as outputs after D9 has disabled the
+DM542T. A nonzero Pulse timer value cannot substitute for that invariant, an
+oscilloscope/logic-analyzer observation, driver acknowledgement, or DRO travel.
 
 T4C runtime direction mapping is retired. The physically verified relationship
-is immutable: D5 Forward/positive travels toward D6, and D5 Reverse/negative
-travels toward D8. `V1 D0|1`, its API, and its dashboard toggle no longer
-exist. Status retains `ds:1` only as read-only deployment evidence. A legacy
-`ds:-1` frame is marked unsafe and Web Position commands are refused until the
-fixed-direction firmware is uploaded.
+is immutable: D5 Forward/positive travels downward toward the D6 bottom limit,
+and D5 Reverse/negative travels upward toward the D8 top limit. `V1 D0|1`, its
+API, and its dashboard toggle no longer exist. Status retains `ds:1` only as
+read-only deployment evidence. A legacy `ds:-1` frame is marked unsafe and Web
+Position commands are refused until the fixed-direction firmware is uploaded.
+For the current wiring, that physical contract requires D2 LOW for
+Forward/toward-D6/bottom and D2 HIGH for Reverse/toward-D8/top. Do not infer
+physical direction directly from a generic HIGH=forward driver convention.
 
 The fixed-direction firmware also controls DM542T motor current. With all
 power off, leave `ENA+` on the existing Yún 5 V common-anode connection and
@@ -367,16 +390,16 @@ no STEP pulses until D4 is cycled OFF.
   D5 selects Forward/Reverse, and **Apply Local Velocity Speed** changes the
   stopped setpoint.
 - **Web Position** makes D4 an arm/immediate-abort and D5 the direction selector
-  for the next positive travel magnitude. D5 Forward commands toward D6; D5
-  Reverse commands toward D8. Changing D5 during motion aborts and never
-  reverses the active command.
+  for the next positive travel magnitude. D5 Forward commands downward toward
+  D6/bottom; D5 Reverse commands upward toward D8/top. Changing D5 during
+  motion aborts and never reverses the active command.
 
 The optional D8-limit action is not a prerequisite for Move:
 
 1. With D4 OFF, select Web Position and wait for the Yún confirmation.
 2. Put D5 in Reverse.
 3. Put D4 ON to arm motion.
-4. Select **Move to D8 Limit** and confirm. Its fixed speed is 1.5 mm/s.
+4. Select **Home to D8 (top)** and confirm. Its fixed speed is 1.5 mm/s.
 5. D8 activation stops motion. Put D5 Forward before moving away from D8.
 
 For any relative move, enter a positive travel distance and positive speed,
@@ -641,15 +664,34 @@ python3 networked_sensors/dashboard.py \
 
 Open `http://127.0.0.1:8000/` and use the **DRO position** piston display:
 
-- The signal badge must become **Fresh**; `STALE` means no valid frame has arrived
-  for more than 250 ms.
-- **DRO position** is the scale's signed millimetre reading.
-- **Boot travel** subtracts the first valid frame received after
-  the ATmega32U4 boot. Reset the 32U4 before a new manual displacement trial.
-- **DRO frames** under **Source details** shows valid, rejected, and dropped
-  counts. A one-time
-  rejected frame while the firmware synchronizes is acceptable; a rising
-  rejected/dropped count while stationary requires wiring/noise investigation.
+- Before setting a system zero, **DRO position** is the scale's signed
+  raw millimetre reading and the piston graphic remains unreferenced.
+- With motion stopped and feedback Fresh, **Set zero here** snapshots the
+  current raw reading into the repository-level `system_config.json`. The
+  same **DRO position** value becomes zero-referenced, while the signed raw
+  reading remains under **Source details → Stepper diagnostics and motion
+  telemetry**.
+- The installed reference is the D8 negative limit at the physical top:
+  `system_config.json` stores raw zero `136.77 mm`. The display preserves
+  `raw - zero`, so the top is `0 mm`, travel downward toward D6 is negative,
+  and travel upward is positive. The animation maps `0 mm` to its top and
+  `−137.18 mm` to its bottom, with the illustrated fixed end at the top and
+  the rod extending downward, without changing any firmware direction sign.
+- Dashboard restarts and USB/LAN reconnections reload the saved zero. Use
+  `--system-config PATH` only when intentionally selecting another machine
+  configuration.
+- **Move to zero** is intentionally disabled until T4H.2 implements and
+  physically qualifies the local closed-loop controller. Setting zero does not
+  send any motion command or STEP pulse.
+- **DRO frames** under **Source details** shows freshness through advancing
+  valid frames, plus rejected and dropped counts. A one-time rejected frame
+  while the firmware synchronizes is acceptable; a rising rejected/dropped
+  count while stationary requires wiring/noise investigation.
+- **DRO velocity** is calculated on the laptop from fresh raw readings and
+  appears beside the smaller **Pulse timer** value. Move the head in both
+  directions and confirm positive is upward/toward D8 while negative is
+  downward/toward D6; hold it still and confirm the value settles to
+  0.00 mm/s. Stale feedback must show `--`, never a held velocity.
 
 For a manual check, record the initial absolute reading, move the reader head a
 known distance in one direction, and compare both the final absolute reading

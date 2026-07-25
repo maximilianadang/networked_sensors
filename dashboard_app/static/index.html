@@ -100,32 +100,33 @@
         <section id="stepperPistonVisual" class="piston-visual is-unavailable"
           aria-label="Read-only piston head position measured by the DRO">
           <div class="piston-readout">
-            <header class="piston-visual-header">
-              <div>
+            <div class="piston-readout-values">
+              <div class="piston-position-readout">
                 <span class="piston-eyebrow">DRO position</span>
                 <strong id="stepperDroPosition" class="piston-position">--</strong>
               </div>
-              <span id="stepperDroState" class="piston-signal">Waiting for data</span>
-            </header>
-
-            <div class="piston-live-strip">
-              <div>
-                <span>Boot travel</span>
-                <strong id="stepperDroDisplacement">--</strong>
+              <div class="piston-secondary-readout">
+                <span class="piston-eyebrow">DRO velocity</span>
+                <strong id="stepperDroVelocity" class="piston-secondary-value">--</strong>
               </div>
-              <div>
-                <span>Direction</span>
-                <strong id="stepperDroDirection">Waiting</strong>
+              <div class="piston-secondary-readout">
+                <span class="piston-eyebrow">Pulse timer</span>
+                <strong id="stepperPrimaryPulseOutput" class="piston-secondary-value">--</strong>
               </div>
             </div>
-            <p id="stepperDroRange" class="piston-range-note">
-              DRO range: 0–152.4 mm · read-only display.
-            </p>
+
+            <div class="piston-zero-controls" role="group" aria-label="DRO zero controls">
+              <button id="stepperSetDroZero" type="button">Set zero here</button>
+              <button id="stepperMoveToDroZero" type="button" disabled
+                title="Deferred until the closed-loop controller is implemented and physically tested">Move to zero</button>
+              <span id="stepperDroZeroStatus" class="visually-hidden" role="status"
+                aria-live="polite"></span>
+            </div>
           </div>
 
           <div class="piston-stage" aria-hidden="true">
-            <div class="piston-end-label piston-end-start">0 mm</div>
-            <div class="piston-end-label piston-end-finish">152.4 mm</div>
+            <div id="stepperDroMinLabel" class="piston-end-label piston-end-start">D6 bottom −137.18 mm</div>
+            <div id="stepperDroMaxLabel" class="piston-end-label piston-end-finish">D8 top 0 mm</div>
             <div class="piston-axis">
               <div class="piston-rod"></div>
               <div class="piston-head"><span>HEAD</span></div>
@@ -148,7 +149,7 @@
             </div>
             <div class="form-actions">
               <button id="stepperMove" class="primary" type="submit" aria-keyshortcuts="Space" hidden>Move <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
-              <button id="stepperHome" type="button" hidden>Home to D8</button>
+              <button id="stepperHome" type="button" hidden>Home to D8 (top)</button>
               <button id="stepperStop" class="stop" type="button" aria-keyshortcuts="Space" hidden>Stop <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
               <button id="stepperApplySpeed" type="button">Apply Local Velocity Speed</button>
               <span class="pill" id="stepperMessage" aria-live="polite">Simulation only</span>
@@ -161,8 +162,8 @@
               <div class="interlock-item"><dt title="Local enable input">Enable (D4)</dt><dd id="stepperLocal">--</dd></div>
               <div class="interlock-item"><dt id="stepperD5Label" title="Manual or authorized travel direction">Direction (D5)</dt><dd id="stepperManualDirection">--</dd></div>
               <div class="interlock-item"><dt title="Driver enable output">Driver (D9)</dt><dd id="stepperDriverOutput">--</dd></div>
-              <div class="interlock-item"><dt title="Positive travel limit">+ Limit (D6)</dt><dd id="stepperPositiveLimit">--</dd></div>
-              <div class="interlock-item"><dt title="Negative travel limit">− Limit (D8)</dt><dd id="stepperNegativeLimit">--</dd></div>
+              <div class="interlock-item"><dt title="Positive/bottom travel limit">+ Limit (D6 · bottom)</dt><dd id="stepperPositiveLimit">--</dd></div>
+              <div class="interlock-item"><dt title="Negative/top travel limit">− Limit (D8 · top)</dt><dd id="stepperNegativeLimit">--</dd></div>
               <div class="interlock-item"><dt title="Final motion authorization decision">Decision</dt><dd id="stepperBlocked">--</dd></div>
             </dl>
           </section>
@@ -205,6 +206,8 @@
             <dt>Fixed physical direction</dt><dd id="stepperDirectionStatus">--</dd>
             <dt>STEP pulse engine</dt><dd id="stepperPulseEngine">--</dd>
             <dt>Limit input filter</dt><dd id="stepperLimitFilter">--</dd>
+            <dt>Raw DRO position</dt><dd id="stepperDroRawPosition">--</dd>
+            <dt>System DRO zero</dt><dd id="stepperDroZeroDiagnostic">Not set</dd>
             <dt>DRO frames</dt><dd id="stepperDroFrames">--</dd>
             <dt>USB status sequence</dt><dd id="stepperSequence">--</dd>
             <dt>Transport</dt><dd id="stepperTransport">--</dd>

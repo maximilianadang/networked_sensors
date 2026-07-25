@@ -11,26 +11,33 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     "stepperApplySpeed", "stepperMessage", "stepperState", "stepperConfiguredSpeed",
     "stepperEffectiveSpeed", "stepperMeasuredSpeed", "stepperPulseEngine",
     "stepperCommand", "stepperOwner", "stepperModeStatus", "stepperLocal",
-    "stepperPistonVisual", "stepperDroState", "stepperDroPosition",
-    "stepperDroDisplacement", "stepperDroDirection", "stepperDroRange",
-    "stepperDroFrames",
+    "stepperPistonVisual", "stepperDroPosition", "stepperSetDroZero",
+    "stepperMoveToDroZero", "stepperDroZeroStatus",
+    "stepperDroMinLabel", "stepperDroMaxLabel",
+    "stepperDroRawPosition", "stepperDroZeroDiagnostic", "stepperDroFrames",
     "stepperD5Label", "stepperManualDirection", "stepperDirectionStatus",
     "stepperDriverOutput", "stepperPositiveLimit", "stepperNegativeLimit",
     "stepperLimitFilter", "stepperBlocked", "stepperSequence", "stepperTransport"
   ]);
+  // Keep a pre-restart page functional while its cached HTML lacks this field.
+  const stepperPrimaryPulseOutput =
+    document.getElementById("stepperPrimaryPulseOutput");
+  const stepperDroVelocity = document.getElementById("stepperDroVelocity");
 
   let controlModeDirty = false;
   let controlModeRequestPending = false;
   let messageSticky = false;
   let speedRequestPending = false;
   let motionRequestPending = false;
-  let lastFreshDroFrameCount = null;
+  let droZeroRequestPending = false;
   let lastFreshDroPositionMm = null;
-  let observedDroDirection = "Waiting";
 
-  const droVisualMinMm = UI_CONFIG.droVisualRange.minMm;
-  const droVisualMaxMm = UI_CONFIG.droVisualRange.maxMm;
+  // The saved display zero is the physical D8/negative limit at the top.
+  // Preserve raw-minus-zero sign: positions below that top zero are negative.
+  const droVisualMinMm = -limits.max_distance_mm;
+  const droVisualMaxMm = 0;
   const droVisualSpanMm = droVisualMaxMm - droVisualMinMm;
+  const droVisualEndpointToleranceMm = 0.1;
 
   els.stepperDistance.min = String(limits.min_distance_mm);
   els.stepperDistance.max = String(limits.max_distance_mm);
@@ -40,6 +47,8 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   els.stepperSpeed.max = String(limits.max_speed_mm_s);
   els.stepperSpeed.step = String(UI_CONFIG.stepperInputs.speedStepMmS);
   els.stepperSpeed.value = String(limits.default_speed_mm_s);
+  setText(els.stepperDroMinLabel, `D6 bottom ${droVisualMinMm.toFixed(2)} mm`);
+  setText(els.stepperDroMaxLabel, "D8 top 0 mm");
   const modeInputs = [els.stepperModeLocal, els.stepperModeWeb];
 
   function updateControls() {
@@ -75,6 +84,26 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       Number.isFinite(speed) &&
       speed >= limits.min_speed_mm_s && speed <= limits.max_speed_mm_s;
     const simulated = latest && latest.stepper_mode === "sim";
+    const rawDroPositionMm = Number(latest?.stepper_dro_position_mm);
+    const canSetDroZero = connected &&
+      latest?.stepper_dro_capable === true &&
+      latest?.stepper_dro_fresh === true &&
+      Number.isFinite(rawDroPositionMm) &&
+      !moving;
+
+    els.stepperSetDroZero.disabled = droZeroRequestPending || !canSetDroZero;
+    els.stepperSetDroZero.title = droZeroRequestPending
+      ? "Saving the system zero"
+      : moving
+        ? "Stop motion before setting zero"
+        : !canSetDroZero
+          ? "A fresh connected DRO sample is required"
+          : `Use the current raw reading ${rawDroPositionMm.toFixed(2)} mm as the saved system zero`;
+    // T4H.2 deliberately remains inert until a local closed-loop controller
+    // and its physical fault tests exist.
+    els.stepperMoveToDroZero.disabled = true;
+    els.stepperMoveToDroZero.title =
+      "Deferred: requires the T4H.2 closed-loop controller and physical stepper tests";
 
     els.emergencyStop.disabled = !connected || !estopCapable || estopLatched;
     els.emergencyReset.disabled = !connected || !estopCapable || !estopLatched ||
@@ -153,12 +182,16 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   }
 
   function renderPiston(latest, droCapable, droHasSample) {
-    const positionMm = Number(latest.stepper_dro_position_mm);
-    const frameCount = Number(latest.stepper_dro_valid_frame_count);
-    const hasPosition = droHasSample && Number.isFinite(positionMm);
+    const rawPositionMm = Number(latest.stepper_dro_position_mm);
+    const positionMm = Number(latest.stepper_dro_zeroed_position_mm);
+    const zeroSet = latest.stepper_dro_zero_set === true;
+    const hasPosition = zeroSet && droHasSample && Number.isFinite(positionMm);
     const fresh = hasPosition && latest.stepper_dro_fresh === true;
     const outOfRange = hasPosition &&
-      (positionMm < droVisualMinMm || positionMm > droVisualMaxMm);
+      (
+        positionMm < droVisualMinMm - droVisualEndpointToleranceMm ||
+        positionMm > droVisualMaxMm + droVisualEndpointToleranceMm
+      );
     const hasTrustworthyVisualPosition = fresh || lastFreshDroPositionMm !== null;
 
     els.stepperPistonVisual.classList.toggle(
@@ -169,17 +202,14 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     els.stepperPistonVisual.classList.toggle("is-out-of-range", outOfRange);
 
     if (!hasPosition) {
-      lastFreshDroFrameCount = null;
       lastFreshDroPositionMm = null;
-      observedDroDirection = droCapable ? "Waiting for sample" : "Unavailable";
-      setText(els.stepperDroDirection, observedDroDirection);
-      setText(
-        els.stepperDroRange,
-        `DRO range: ${droVisualMinMm}–${droVisualMaxMm} mm · read-only display.`,
-      );
       els.stepperPistonVisual.setAttribute(
         "aria-label",
-        `Read-only piston position unavailable. ${observedDroDirection}.`,
+        zeroSet
+          ? "DRO piston position unavailable."
+          : `DRO position ${
+            Number.isFinite(rawPositionMm) ? rawPositionMm.toFixed(2) : "unavailable"
+          } millimeters. Piston position unavailable.`,
       );
       return;
     }
@@ -191,43 +221,19 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       const ratio = droVisualSpanMm > 0
         ? (clampedMm - droVisualMinMm) / droVisualSpanMm
         : 0;
-      const positionPercent = 4 + ratio * 92;
+      const positionPercent = 96 - ratio * 92;
       els.stepperPistonVisual.style.setProperty(
         "--piston-position",
         `${positionPercent.toFixed(3)}%`,
       );
-
-      // Infer direction only when a new validated DRO frame arrives. Dashboard
-      // polls between sensor frames should not make the direction flicker.
-      if (frameCount !== lastFreshDroFrameCount) {
-        if (lastFreshDroPositionMm === null) {
-          observedDroDirection = "Position acquired";
-        } else {
-          const deltaMm = positionMm - lastFreshDroPositionMm;
-          observedDroDirection = deltaMm > 0.005
-            ? "Increasing →"
-            : deltaMm < -0.005 ? "← Decreasing" : "Holding";
-        }
-        lastFreshDroFrameCount = frameCount;
-        lastFreshDroPositionMm = positionMm;
-      }
+      lastFreshDroPositionMm = positionMm;
     }
 
-    setText(
-      els.stepperDroDirection,
-      fresh ? observedDroDirection : "Frozen — stale",
-    );
-    setText(
-      els.stepperDroRange,
-      outOfRange
-        ? `The ${positionMm.toFixed(2)} mm DRO coordinate is outside the ${droVisualMinMm}–${droVisualMaxMm} mm display range; the head is clamped at the edge.`
-        : `DRO range: ${droVisualMinMm}–${droVisualMaxMm} mm · read-only display.`,
-    );
     els.stepperPistonVisual.setAttribute(
       "aria-label",
-      `Read-only piston head position ${positionMm.toFixed(2)} millimeters. ${
-        fresh ? observedDroDirection : "Sensor data stale; graphic frozen"
-      }.`,
+      `DRO piston position ${positionMm.toFixed(2)} millimeters relative to the D8 top zero; positive is upward and negative is downward${
+        fresh ? "" : "; sensor data stale and graphic frozen"
+      }${outOfRange ? "; outside the displayed stroke" : ""}.`,
     );
   }
 
@@ -256,9 +262,21 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     setText(els.stepperConfiguredSpeed, `${numberValue(latest, "stepper_command_speed_mm_s", 3)} mm/s`);
     setText(els.stepperEffectiveSpeed, `${numberValue(latest, "stepper_speed_mm_s", 3)} mm/s`);
     const pulseMeasurementCapable = latest.stepper_pulse_measurement_capable === true;
-    setText(els.stepperMeasuredSpeed, pulseMeasurementCapable
-      ? `${numberValue(latest, "stepper_measured_speed_mm_s", 3)} mm/s (${numberValue(latest, "stepper_measured_pulse_rate_sps", 0)} pulses/s)`
-      : "Unavailable — firmware update required");
+    const measuredPulseRate = Number(latest.stepper_measured_pulse_rate_sps);
+    const measuredPulseSpeed = Number(latest.stepper_measured_speed_mm_s);
+    const hasMeasuredPulseOutput = pulseMeasurementCapable &&
+      Number.isFinite(measuredPulseRate) &&
+      Number.isFinite(measuredPulseSpeed);
+    const measuredPulseOutput = hasMeasuredPulseOutput
+      ? `${measuredPulseRate.toFixed(0)} pulses/s · ${measuredPulseSpeed.toFixed(3)} mm/s`
+      : "Unavailable — firmware update required";
+    setText(els.stepperMeasuredSpeed, measuredPulseOutput);
+    if (stepperPrimaryPulseOutput) {
+      setText(
+        stepperPrimaryPulseOutput,
+        hasMeasuredPulseOutput ? `${measuredPulseRate.toFixed(0)} pulses/s` : "--",
+      );
+    }
     setText(els.stepperPulseEngine, latest.stepper_unified_timer_capable === true
       ? "Unified Timer1 (Local / Web / Home)"
       : "Legacy split scheduler — firmware update required");
@@ -267,19 +285,48 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     const droHasSample = droCapable &&
       Number.isFinite(Number(latest.stepper_dro_valid_frame_count)) &&
       Number(latest.stepper_dro_valid_frame_count) > 0;
-    setText(els.stepperDroState, !droCapable
-      ? "DRO unavailable"
-      : !droHasSample
-        ? "Waiting for data"
-        : latest.stepper_dro_fresh === true
-          ? `Fresh · ${numberValue(latest, "stepper_dro_sample_age_ms", 0)} ms`
-          : `STALE · ${numberValue(latest, "stepper_dro_sample_age_ms", 0)} ms`);
+    const droZeroSet = latest.stepper_dro_zero_set === true;
+    const droZeroedPosition = Number(latest.stepper_dro_zeroed_position_mm);
+    const droVelocityValue = latest.stepper_dro_velocity_mm_s;
+    const droVelocityMmS = Number(droVelocityValue);
+    const droVelocityWindowMs = Number(latest.stepper_dro_velocity_window_ms);
+    const hasDroVelocity = connected &&
+      latest.stepper_dro_fresh === true &&
+      droVelocityValue !== null &&
+      droVelocityValue !== undefined &&
+      Number.isFinite(droVelocityMmS);
     setText(els.stepperDroPosition, droHasSample
+      ? droZeroSet && Number.isFinite(droZeroedPosition)
+        ? `${droZeroedPosition.toFixed(2)} mm`
+        : `${numberValue(latest, "stepper_dro_position_mm", 2)} mm`
+      : "--");
+    if (stepperDroVelocity) {
+      setText(
+        stepperDroVelocity,
+        hasDroVelocity
+          ? `${droVelocityMmS > 0 ? "+" : ""}${droVelocityMmS.toFixed(2)} mm/s`
+          : "--",
+      );
+      stepperDroVelocity.title = hasDroVelocity
+        ? `Signed slope of fresh DRO positions (positive upward, negative downward) over ${
+            Number.isFinite(droVelocityWindowMs)
+              ? droVelocityWindowMs.toFixed(0)
+              : "--"
+          } ms`
+        : "Waiting for enough fresh DRO position samples";
+    }
+    setText(els.stepperDroRawPosition, droHasSample
       ? `${numberValue(latest, "stepper_dro_position_mm", 2)} mm`
       : "--");
-    setText(els.stepperDroDisplacement, droHasSample
-      ? `${Number(latest.stepper_dro_displacement_mm) > 0 ? "+" : ""}${numberValue(latest, "stepper_dro_displacement_mm", 2)} mm`
-      : "--");
+    const zeroRawMm = Number(latest.stepper_dro_zero_raw_mm);
+    const hasFiniteZero = droZeroSet && Number.isFinite(zeroRawMm);
+    const zeroText = hasFiniteZero
+      ? `Raw ${zeroRawMm.toFixed(2)} mm · saved system reference`
+      : "Not set";
+    setText(els.stepperDroZeroStatus, hasFiniteZero
+      ? `Zero: ${zeroRawMm.toFixed(2)} mm raw · saved`
+      : "System zero not set");
+    setText(els.stepperDroZeroDiagnostic, zeroText);
     renderPiston(latest, droCapable, droHasSample);
     setText(els.stepperDroFrames, droCapable
       ? `valid=${latest.stepper_dro_valid_frame_count ?? "--"}, rejected=${latest.stepper_dro_rejected_frame_count ?? "--"}, dropped=${latest.stepper_dro_dropped_frame_count ?? "--"}`
@@ -310,7 +357,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     }
     const directionCalibrationSafe = latest.stepper_direction_calibration_safe === true;
     setText(els.stepperDirectionStatus, directionCalibrationSafe
-      ? "Normal (Forward → D6; Reverse → D8)"
+      ? "Normal (Forward → D6 bottom; Reverse → D8 top)"
       : latest.stepper_direction_mapping === "inverted"
         ? "UNSAFE LEGACY INVERSION — upload required"
         : "Unavailable — firmware update required");
@@ -464,6 +511,29 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       setText(els.stepperMessage, `E-STOP reset rejected: ${error.message}`);
     }
   });
+  els.stepperSetDroZero.addEventListener("click", async () => {
+    if (els.stepperSetDroZero.disabled || droZeroRequestPending) return;
+    droZeroRequestPending = true;
+    setText(els.stepperDroZeroStatus, "Saving system zero…");
+    updateControls();
+    try {
+      const payload = await postJson(API.stepperDroZero);
+      if (payload.zero?.set !== true || payload.zero?.motion_commanded !== false) {
+        throw new Error("dashboard did not confirm a display-only zero");
+      }
+      lastFreshDroPositionMm = null;
+      if (payload.sample) applySample(payload.sample);
+      setText(
+        els.stepperDroZeroStatus,
+        `Zero: ${Number(payload.zero.raw_position_mm).toFixed(2)} mm raw · saved`,
+      );
+    } catch (error) {
+      setText(els.stepperDroZeroStatus, `Zero rejected: ${error.message}`);
+    } finally {
+      droZeroRequestPending = false;
+      updateControls();
+    }
+  });
   els.stepperForm.addEventListener("input", updateControls);
   els.stepperSpeed.addEventListener("input", () => { messageSticky = false; });
   async function requestControlMode() {
@@ -506,15 +576,15 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   });
   els.stepperStop.addEventListener("click", () => void requestStop());
   els.stepperHome.addEventListener("click", async () => {
-    if (!window.confirm(`Move toward D8 until its limit switch activates? Speed is fixed at ${limits.home_speed_mm_s} mm/s; D4 must be armed and D5 set to Reverse.`)) return;
+    if (!window.confirm(`Move upward toward D8 until its top limit switch activates? Speed is fixed at ${limits.home_speed_mm_s} mm/s; D4 must be armed and D5 set to Reverse.`)) return;
     messageSticky = true;
-    setText(els.stepperMessage, "Moving toward the D8 limit…");
+    setText(els.stepperMessage, "Moving upward toward the D8 top limit…");
     try {
       const payload = await postJson(API.stepperHome);
       if (payload.sample) applySample(payload.sample);
       setText(els.stepperMessage, payload.stepper?.stepper_negative_limit_active
-        ? "D8 limit reached"
-        : `D8-limit move accepted at ${limits.home_speed_mm_s} mm/s`);
+        ? "D8 top limit reached"
+        : `D8 top-limit move accepted at ${limits.home_speed_mm_s} mm/s`);
     } catch (error) {
       setText(els.stepperMessage, `D8-limit move rejected: ${error.message}`);
     }

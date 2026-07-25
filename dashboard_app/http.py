@@ -113,6 +113,8 @@ def build_handler(runtime: DashboardRuntime, quiet: bool) -> type[BaseHTTPReques
                     )
                 elif path == "/api/stepper/speed":
                     self._send_json(runtime.set_stepper_speed(parse_body(self)))
+                elif path == "/api/stepper/dro-zero":
+                    self._send_json(runtime.set_stepper_dro_zero())
                 else:
                     self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
             except (ValueError, json.JSONDecodeError) as exc:
