@@ -143,6 +143,13 @@ async function startDashboard() {
       return;
     }
 
+    const motorPressed = event.code === "KeyM" || event.key.toLowerCase() === "m";
+    if (motorPressed) {
+      if (!stepper.handleMotorShortcut()) return;
+      event.preventDefault();
+      return;
+    }
+
     const index = Number(event.key) - 1;
     if (!Number.isInteger(index) ||
         index < 0 || index >= operationalConfig.solenoid_count) return;

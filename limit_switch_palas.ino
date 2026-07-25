@@ -99,6 +99,27 @@ const int PIN_LIMIT_NEG = 8;  // D7 is reserved by the Yún Linux handshake.
 const int PIN_DRIVER_ENABLE_NEG = 9;
 const int PIN_DRO_CLOCK = 10;
 const int PIN_DRO_DATA = 11;
+const int PIN_ESC_SIGNAL = 12;
+
+// --- Brushless ESC output ---
+// The BadAss Renegade 130A V2 OPTO uses a receiver-style throttle signal, not
+// analogWrite() duty-cycle PWM. Timer3 emits one pulse every 20 ms on D12 while
+// Timer1 remains the stepper's sole pulse engine. OFF is always 1000 us; the
+// configured ON pulse is adjustable from 1000 through 2000 us and defaults to
+// 1200 us. Firmware boot and software E-STOP both force OFF.
+const unsigned int ESC_FRAME_US = 20000U;
+const unsigned int ESC_OFF_PULSE_US = 1000U;
+const unsigned int ESC_DEFAULT_ON_PULSE_US = 1200U;
+const unsigned int ESC_MAX_PULSE_US = 2000U;
+const unsigned long ESC_TIMER_HZ = F_CPU / 8UL;
+const unsigned int ESC_TIMER_TICKS_PER_US =
+    (unsigned int)(ESC_TIMER_HZ / 1000000UL);
+const unsigned int ESC_FRAME_TICKS =
+    ESC_FRAME_US * ESC_TIMER_TICKS_PER_US;
+volatile unsigned int escPulseTicks =
+    ESC_OFF_PULSE_US * ESC_TIMER_TICKS_PER_US;
+bool brushlessMotorOn = false;
+unsigned int brushlessOnPulseUs = ESC_DEFAULT_ON_PULSE_US;
 
 // --- Read-only AbsoluteDRO Plus input ---
 // The level shifter presents 5 V logic to the Yún:
@@ -239,8 +260,10 @@ const char *lastCommandError = "none";
 //   V1 H                         home to D8 in Web Position mode
 //   V1 G<signed_steps>,<sps>,<id> bounded relative move in Web Position mode
 //   V1 X                         immediate Web Position abort
-//   V1 E1                        latch software E-STOP in either control mode
+//   V1 E1                        latch software E-STOP and turn brushless motor OFF
 //   V1 E0                        reset E-STOP while D4 is OFF and motion stopped
+//   V1 B0|1                      brushless motor OFF/ON at configured pulse
+//   V1 P1000..2000               configure brushless ON pulse width in us
 // Home/move require D4 ON/LOW. Home additionally requires D5 Reverse/LOW;
 // signed internal moves require D5 to match their sign. Home is optional and is
 // never a motion prerequisite. No command is retained over reset, and boot
@@ -249,8 +272,9 @@ const char *lastCommandError = "none";
 // Compact status keeps Serial work bounded. In addition to the established
 // fields, m is control mode, h is homed, mv is moving, st is MotionState,
 // a means D4 OFF has been observed since boot, p/g are current/target steps,
-// c is the active command number, e is the software E-STOP latch, and lx packs
-// qualified limit state plus diagnostic-only rejected-edge counters. dc marks
+// c is the active command number, e is the software E-STOP latch, bo is the
+// brushless motor state, bp is its configured ON pulse width in us, and lx
+// packs qualified limit state plus diagnostic-only rejected-edge counters. dc marks
 // the read-only DRO decoder; df is freshness; dr/dd are absolute/reference
 // displacement in 0.01 mm; da is sample age; dq counts valid frames; and dx
 // packs rejected frames in its high byte and ISR-overrun drops in its low byte.
@@ -338,6 +362,18 @@ ISR(PCINT0_vect) {
   }
   droCaptureBit = 0;
   droHeaderOnes = 0;
+}
+
+ISR(TIMER3_OVF_vect) {
+  // Timer3 is free-running at 2 MHz. Raising D12 at each 20 ms frame boundary
+  // and lowering it at OCR3A produces the selected 1000/1200 us pulse without
+  // borrowing Timer1 from the stepper.
+  digitalWrite(PIN_ESC_SIGNAL, HIGH);
+  OCR3A = escPulseTicks;
+}
+
+ISR(TIMER3_COMPA_vect) {
+  digitalWrite(PIN_ESC_SIGNAL, LOW);
 }
 
 ISR(TIMER1_COMPA_vect) {
@@ -797,6 +833,25 @@ void stopStepperImmediately() {
   disableDriverOutput();
 }
 
+void setBrushlessMotor(bool on) {
+  brushlessMotorOn = on;
+  unsigned int pulseUs = on ? brushlessOnPulseUs : ESC_OFF_PULSE_US;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    escPulseTicks = pulseUs * ESC_TIMER_TICKS_PER_US;
+  }
+  statusDirty = true;
+}
+
+void setBrushlessPulseWidth(unsigned int pulseUs) {
+  brushlessOnPulseUs = pulseUs;
+  if (brushlessMotorOn) {
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+      escPulseTicks = pulseUs * ESC_TIMER_TICKS_PER_US;
+    }
+  }
+  statusDirty = true;
+}
+
 void abortWebMotion(MotionState state, const char *reason) {
   stopStepperImmediately();
   motionState = state;
@@ -996,11 +1051,50 @@ void processCommandBody(char *commandBuffer, CommandTransport transport) {
   // safety-rated emergency-stop circuit that removes hazardous energy.
   if (strcmp(commandBuffer, "V1 E1") == 0) {
     emergencyStopLatched = true;
+    setBrushlessMotor(false);
     stopStepperImmediately();
     motionState = STATE_EMERGENCY_STOP;
     motionReason = "emergency_stop";
     statusDirty = true;
     Serial.println(F("Software E-STOP latched; step pulses inhibited."));
+    return;
+  }
+
+  if (strcmp(commandBuffer, "V1 B0") == 0 ||
+      strcmp(commandBuffer, "V1 B1") == 0) {
+    bool requestedOn = commandBuffer[4] == '1';
+    if (requestedOn && emergencyStopLatched) {
+      rejectCommand(F("reset the software E-STOP before starting the brushless motor."));
+      return;
+    }
+    setBrushlessMotor(requestedOn);
+    if (!driverOutputEnabled && Serial) {
+      if (requestedOn) {
+        Serial.print(F("Brushless motor ON at "));
+        Serial.print(brushlessOnPulseUs);
+        Serial.println(F(" us."));
+      } else {
+        Serial.println(F("Brushless motor OFF at 1000 us."));
+      }
+    }
+    return;
+  }
+
+  if (strncmp(commandBuffer, "V1 P", 4) == 0) {
+    long requestedPulseUs = 0L;
+    if (strlen(commandBuffer) != 8 ||
+        !parseLongExact(commandBuffer + 4, &requestedPulseUs) ||
+        requestedPulseUs < ESC_OFF_PULSE_US ||
+        requestedPulseUs > ESC_MAX_PULSE_US) {
+      rejectCommand(F("brushless pulse width must be 1000..2000 us."));
+      return;
+    }
+    setBrushlessPulseWidth((unsigned int)requestedPulseUs);
+    if (!driverOutputEnabled && Serial) {
+      Serial.print(F("Brushless ON pulse configured to "));
+      Serial.print(brushlessOnPulseUs);
+      Serial.println(F(" us."));
+    }
     return;
   }
 
@@ -1357,7 +1451,8 @@ bool reportMachineStatus(
       "\"r\":\"%s\",\"sps\":%ld,\"csps\":%ld,\"aps\":%ld,\"ds\":%d,"
       "\"en\":%d,\"ut\":1,\"dc\":1,\"df\":%d,\"dr\":%ld,\"dd\":%ld,"
       "\"da\":%ld,\"dq\":%lu,\"dx\":%lu,"
-      "\"m\":%d,\"h\":%d,\"a\":%d,\"e\":%d,\"mv\":%d,\"st\":%d,\"p\":%ld,"
+      "\"m\":%d,\"h\":%d,\"a\":%d,\"e\":%d,\"bo\":%d,\"bp\":%u,"
+      "\"mv\":%d,\"st\":%d,\"p\":%ld,"
       "\"g\":%ld,\"c\":%u,\"o\":%d}",
       ++statusSequence,
       runRaw,
@@ -1384,6 +1479,8 @@ bool reportMachineStatus(
       positionHomed ? 1 : 0,
       d4OffObservedSinceBoot ? 1 : 0,
       emergencyStopLatched ? 1 : 0,
+      brushlessMotorOn ? 1 : 0,
+      brushlessOnPulseUs,
       moving ? 1 : 0,
       (int)motionState,
       currentPulsePosition(),
@@ -1446,6 +1543,20 @@ void setup() {
   pinMode(PIN_STEP, OUTPUT);
   pinMode(PIN_DRIVER_DIR, OUTPUT);
 
+  // Preload D12 LOW before enabling its output driver. Timer3 then maintains a
+  // 50 Hz receiver pulse independently of Timer1 stepper motion.
+  digitalWrite(PIN_ESC_SIGNAL, LOW);
+  pinMode(PIN_ESC_SIGNAL, OUTPUT);
+  TCCR3A = 0;
+  TCCR3B = 0;
+  TCNT3 = 0;
+  ICR3 = ESC_FRAME_TICKS - 1U;
+  OCR3A = escPulseTicks;
+  TIFR3 = _BV(TOV3) | _BV(OCF3A);
+  TCCR3A = _BV(WGM31);
+  TCCR3B = _BV(WGM33) | _BV(WGM32) | _BV(CS31);
+  TIMSK3 = _BV(TOIE3) | _BV(OCIE3A);
+
   // Timer1 CTC at F_CPU/64. The compare interrupt remains disabled until an
   // authorized motion in either mode has completed the 200 ms driver wake-up.
   TCCR1A = 0;
@@ -1454,10 +1565,11 @@ void setup() {
 
   Serial.println(F("Stepper ready in stopped Local Velocity mode."));
   Serial.println(F("D4/D5 run Local Velocity; Web Position uses D4 arm and D5 direction."));
-  Serial.println(F("USB and Yún-Linux controls share V1 S, M, H, G, X, E1, E0."));
+  Serial.println(F("USB and Yún-Linux controls share V1 S, M, H, G, X, E1, E0, B0, B1, P."));
   Serial.println(F("Timer1 owns Local/Web/Home STEP timing; DIR is fixed Normal."));
   Serial.println(F("D9 disables DM542T holding current while stopped."));
   Serial.println(F("D10 clock/D11 data read AbsoluteDRO Plus diagnostically only."));
+  Serial.println(F("D12 ESC OFF is 1000 us; P sets the 1000..2000 us B1 pulse."));
   reportLimitLevels(digitalRead(PIN_LIMIT_POS), digitalRead(PIN_LIMIT_NEG));
 }
 
@@ -1691,7 +1803,9 @@ void loop() {
       ((unsigned long)d4OffObservedSinceBoot << 14) |
       ((unsigned long)emergencyStopLatched << 15) |
       ((unsigned long)driverOutputEnabled << 16) |
-      ((unsigned long)droIsFresh(nowMs) << 17);
+      ((unsigned long)droIsFresh(nowMs) << 17) |
+      ((unsigned long)brushlessMotorOn << 18) |
+      ((unsigned long)brushlessOnPulseUs << 19);
   static unsigned long lastStatusSignature = 0xFFFFFFFFUL;
   static unsigned long lastStatusAtMs = 0UL;
   static unsigned long lastStatusDroValidFrames = 0UL;

@@ -8,16 +8,22 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     "stepperDistanceField", "stepperDistance", "stepperSpeed", "stepperSpeedLabel",
     "stepperModeLocal", "stepperModeWeb", "stepperCommandField",
     "stepperCommandInput", "stepperMove", "stepperHome", "stepperStop",
-    "stepperApplySpeed", "stepperMessage", "stepperState", "stepperConfiguredSpeed",
+    "stepperApplySpeed", "stepperMessage", "stepperCommandFeedback",
+    "stepperState", "stepperConfiguredSpeed",
     "stepperEffectiveSpeed", "stepperMeasuredSpeed", "stepperPulseEngine",
     "stepperCommand", "stepperOwner", "stepperModeStatus", "stepperLocal",
     "stepperPistonVisual", "stepperDroPosition", "stepperSetDroZero",
     "stepperMoveToDroZero", "stepperDroZeroStatus",
     "stepperDroMinLabel", "stepperDroMaxLabel",
+    "stepperDirectionIndicator", "stepperDirectionArrow",
+    "stepperDirectionLabel", "stepperDirectionBlocked",
+    "stepperDirectionBlockLabel",
     "stepperDroRawPosition", "stepperDroZeroDiagnostic", "stepperDroFrames",
     "stepperD5Label", "stepperManualDirection", "stepperDirectionStatus",
     "stepperDriverOutput", "stepperPositiveLimit", "stepperNegativeLimit",
-    "stepperLimitFilter", "stepperBlocked", "stepperSequence", "stepperTransport"
+    "stepperLimitFilter", "stepperBlocked", "stepperSequence", "stepperTransport",
+    "brushlessMotorState", "brushlessMotorDetail", "brushlessMotorToggle",
+    "brushlessMotorAction", "brushlessPulseWidth", "brushlessApplyPulse"
   ]);
   // Keep a pre-restart page functional while its cached HTML lacks this field.
   const stepperPrimaryPulseOutput =
@@ -29,8 +35,16 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   let messageSticky = false;
   let speedRequestPending = false;
   let motionRequestPending = false;
+  let brushlessRequestPending = false;
+  let brushlessPulseRequestPending = false;
+  let brushlessPulseDirty = false;
   let droZeroRequestPending = false;
   let lastFreshDroPositionMm = null;
+
+  function setCommandFeedback(message = "") {
+    setText(els.stepperCommandFeedback, message);
+    els.stepperCommandFeedback.hidden = message === "";
+  }
 
   // The saved display zero is the physical D8/negative limit at the top.
   // Preserve raw-minus-zero sign: positions below that top zero are negative.
@@ -47,6 +61,9 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   els.stepperSpeed.max = String(limits.max_speed_mm_s);
   els.stepperSpeed.step = String(UI_CONFIG.stepperInputs.speedStepMmS);
   els.stepperSpeed.value = String(limits.default_speed_mm_s);
+  els.brushlessPulseWidth.min = "1000";
+  els.brushlessPulseWidth.max = "2000";
+  els.brushlessPulseWidth.step = "1";
   setText(els.stepperDroMinLabel, `D6 bottom ${droVisualMinMm.toFixed(2)} mm`);
   setText(els.stepperDroMaxLabel, "D8 top 0 mm");
   const modeInputs = [els.stepperModeLocal, els.stepperModeWeb];
@@ -90,6 +107,43 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       latest?.stepper_dro_fresh === true &&
       Number.isFinite(rawDroPositionMm) &&
       !moving;
+    const brushlessCapable =
+      latest && latest.stepper_brushless_motor_capable === true;
+    const brushlessVariableCapable =
+      latest && latest.stepper_brushless_motor_variable_capable === true;
+    const brushlessOn =
+      latest && latest.stepper_brushless_motor_on === true;
+    const brushlessPulseUs = Number(els.brushlessPulseWidth.value);
+    const validBrushlessPulse = Number.isInteger(brushlessPulseUs) &&
+      brushlessPulseUs >= 1000 && brushlessPulseUs <= 2000;
+
+    els.brushlessMotorToggle.disabled = brushlessRequestPending ||
+      brushlessPulseRequestPending ||
+      !connected || !brushlessCapable || estopLatched;
+    els.brushlessMotorToggle.title = brushlessRequestPending
+      ? "Waiting for the Yún to confirm the brushless motor state"
+      : !connected
+        ? "Yún status is not connected"
+        : !brushlessCapable
+          ? "The connected firmware does not support brushless motor control"
+          : estopLatched
+            ? "Reset E-STOP before starting the brushless motor"
+            : `${brushlessOn ? "Turn off" : "Turn on"} the brushless motor (M)`;
+    els.brushlessPulseWidth.disabled = brushlessPulseRequestPending ||
+      !connected || !brushlessVariableCapable;
+    els.brushlessApplyPulse.disabled = brushlessPulseRequestPending ||
+      !connected || !brushlessVariableCapable || !validBrushlessPulse;
+    els.brushlessApplyPulse.title = brushlessPulseRequestPending
+      ? "Waiting for the Yún to confirm the pulse width"
+      : !connected
+        ? "Yún status is not connected"
+        : !brushlessVariableCapable
+          ? "Upload variable-pulse firmware before changing the pulse width"
+          : !validBrushlessPulse
+            ? "Enter an integer pulse width from 1000 through 2000 µs"
+            : brushlessOn
+              ? `Apply ${brushlessPulseUs} µs immediately while the motor is ON`
+              : `Use ${brushlessPulseUs} µs the next time the motor is turned ON`;
 
     els.stepperSetDroZero.disabled = droZeroRequestPending || !canSetDroZero;
     els.stepperSetDroZero.title = droZeroRequestPending
@@ -244,8 +298,17 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     const localEnabled = latest.stepper_local_enabled === true;
     const commandCapable = latest.stepper_command_capable === true;
     const connected = latest.stepper_connected === true;
+    const directionCalibrationSafe =
+      latest.stepper_direction_calibration_safe === true;
     const controlMode = latest.stepper_control_mode || "unknown";
     const webPositionMode = controlMode === "web_position";
+    const brushlessCapable =
+      latest.stepper_brushless_motor_capable === true;
+    const brushlessOn = latest.stepper_brushless_motor_on === true;
+    const brushlessPulseUs = Number(latest.stepper_brushless_motor_pulse_us);
+    const brushlessSetpointUs = Number(
+      latest.stepper_brushless_motor_setpoint_us,
+    );
     document.body.classList.toggle("estop-latched", estopLatched);
     setText(els.emergencyState, estopLatched
       ? "LATCHED — step pulses inhibited"
@@ -255,10 +318,40 @@ export function createStepperComponent({getLatest, applySample, limits}) {
           ? "Ready"
           : "Unavailable — firmware update required");
     setText(els.stepperState, latest.stepper_state || "Unknown");
+    setText(
+      els.brushlessMotorState,
+      !connected
+        ? "Offline"
+        : brushlessCapable
+          ? brushlessOn ? "ON" : "OFF"
+          : "Unavailable",
+    );
+    els.brushlessMotorState.classList.toggle(
+      "on",
+      connected && brushlessCapable && brushlessOn,
+    );
+    setText(
+      els.brushlessMotorDetail,
+      brushlessCapable && Number.isFinite(brushlessPulseUs)
+        ? `D12 Pulse Timer: ${brushlessPulseUs.toFixed(0)} µs`
+        : "D12 Pulse Timer: unavailable",
+    );
+    setText(els.brushlessMotorAction, brushlessOn ? "Turn off" : "Turn on");
+    if (
+      Number.isInteger(brushlessSetpointUs) &&
+      brushlessSetpointUs >= 1000 &&
+      brushlessSetpointUs <= 2000
+    ) {
+      if (!brushlessPulseDirty) {
+        els.brushlessPulseWidth.value = String(brushlessSetpointUs);
+      } else if (Number(els.brushlessPulseWidth.value) === brushlessSetpointUs) {
+        brushlessPulseDirty = false;
+      }
+    }
     setText(els.stepperOwner, `${latest.stepper_mode || "--"} / ${latest.stepper_control_owner || "--"}`);
     setText(els.stepperModeStatus, webPositionMode
       ? "Web Position"
-      : controlMode === "local_velocity" ? "Local Velocity" : "--");
+      : controlMode === "local_velocity" ? "Local Speed" : "--");
     setText(els.stepperConfiguredSpeed, `${numberValue(latest, "stepper_command_speed_mm_s", 3)} mm/s`);
     setText(els.stepperEffectiveSpeed, `${numberValue(latest, "stepper_speed_mm_s", 3)} mm/s`);
     const pulseMeasurementCapable = latest.stepper_pulse_measurement_capable === true;
@@ -347,6 +440,53 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     const d5Raw = latest.stepper_d5_raw || "--";
     setText(els.stepperManualDirection, `${compactDirection} · ${d5Raw}`);
     els.stepperManualDirection.title = `${manualDirection} / ${d5Raw}`;
+    const hasD5Direction = connected &&
+      ["HIGH", "LOW"].includes(d5Raw) &&
+      ["forward", "reverse"].includes(manualDirection);
+    const arrowDirection = hasD5Direction && manualDirection === "forward"
+      ? "down"
+      : hasD5Direction && manualDirection === "reverse" ? "up" : "unavailable";
+    const blockedLimit = arrowDirection === "down" &&
+      latest.stepper_positive_limit_active === true
+      ? "D6 BOTTOM LIMIT"
+      : arrowDirection === "up" &&
+          latest.stepper_negative_limit_active === true
+        ? "D8 TOP LIMIT"
+        : null;
+    els.stepperDirectionIndicator.classList.toggle(
+      "is-down",
+      arrowDirection === "down",
+    );
+    els.stepperDirectionIndicator.classList.toggle(
+      "is-up",
+      arrowDirection === "up",
+    );
+    els.stepperDirectionIndicator.classList.toggle(
+      "is-unavailable",
+      arrowDirection === "unavailable",
+    );
+    els.stepperDirectionIndicator.classList.toggle(
+      "is-blocked",
+      blockedLimit !== null,
+    );
+    setText(
+      els.stepperDirectionArrow,
+      arrowDirection === "down" ? "↓" : arrowDirection === "up" ? "↑" : "",
+    );
+    setText(
+      els.stepperDirectionLabel,
+      arrowDirection === "down"
+        ? "D5 FWD · D6 BOTTOM"
+        : arrowDirection === "up"
+          ? "D5 REV · D8 TOP"
+          : connected ? "D5 DIRECTION UNAVAILABLE" : "YÚN DISCONNECTED",
+    );
+    setText(
+      els.stepperDirectionBlockLabel,
+      blockedLimit
+        ? `${blockedLimit} BLOCKS ${arrowDirection === "down" ? "↓" : "↑"}`
+        : "",
+    );
     if (latest.stepper_control_mode) {
       if (!controlModeDirty) {
         els.stepperModeWeb.checked = webPositionMode;
@@ -355,7 +495,6 @@ export function createStepperComponent({getLatest, applySample, limits}) {
         controlModeDirty = false;
       }
     }
-    const directionCalibrationSafe = latest.stepper_direction_calibration_safe === true;
     setText(els.stepperDirectionStatus, directionCalibrationSafe
       ? "Normal (Forward → D6 bottom; Reverse → D8 top)"
       : latest.stepper_direction_mapping === "inverted"
@@ -411,15 +550,17 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       (connected ? "Connected" : "Waiting for status"));
     if (!messageSticky && ["usb", "network"].includes(latest.stepper_mode)) {
       const transportLabel = latest.stepper_mode === "network" ? "LAN" : "USB";
-      setText(els.stepperMessage, !directionCalibrationSafe
-        ? `${transportLabel} unsafe legacy direction mapping; upload fixed-direction firmware before motion`
-        : commandCapable
-          ? webPositionMode
-            ? "Web Position ready; D4 arms, D5 selects direction, and D6/D8 stop travel"
-            : "Local Velocity: D4 runs/stops and D5 selects direction"
-          : latest.stepper_speed_command_capable
-            ? `${transportLabel} speed tuning ready; upload position-capable firmware for Home and Move`
-            : `${transportLabel} diagnostics only; upload T4B firmware for speed tuning`);
+      setText(els.stepperMessage, !connected
+        ? "Yún disconnected"
+        : !directionCalibrationSafe
+          ? `${transportLabel} unsafe legacy direction mapping; upload fixed-direction firmware before motion`
+          : commandCapable
+            ? webPositionMode
+              ? "Web Position ready; D4 arms, D5 selects direction, and D6/D8 stop travel"
+              : "Local Speed: D4 runs/stops and D5 selects direction"
+            : latest.stepper_speed_command_capable
+              ? `${transportLabel} speed tuning ready; upload position-capable firmware for Home and Move`
+              : `${transportLabel} diagnostics only; upload T4B firmware for speed tuning`);
     }
     updateControls();
   }
@@ -434,6 +575,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       : latest?.stepper_authorized_direction;
     if (selectedDirection !== "forward" && selectedDirection !== "reverse") {
       setText(els.stepperMessage, "Rejected: D5 direction is unavailable");
+      setCommandFeedback("Move rejected: D5 direction is unavailable.");
       return false;
     }
     const confirmAt = UI_CONFIG.moveConfirmation;
@@ -443,13 +585,17 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     const commandId = els.stepperCommandInput.value.trim();
     if (commandId) body.command_id = commandId;
     motionRequestPending = "move";
-    updateControls();
+    setCommandFeedback();
     try {
+      // Keep UI-state work inside the try so any unexpected rendering error
+      // cannot strand the Move button in its pending/disabled state.
+      updateControls();
       const payload = await postJson(API.stepperMove, body);
       setText(els.stepperMessage, `${payload.resolved_direction || selectedDirection} move accepted`);
       if (payload.sample) applySample(payload.sample);
     } catch (error) {
       setText(els.stepperMessage, `Rejected: ${error.message}`);
+      setCommandFeedback(`Move failed: ${error.message}`);
     } finally {
       if (motionRequestPending === "move") motionRequestPending = false;
       updateControls();
@@ -487,13 +633,100 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     return true;
   }
 
+  async function requestBrushlessToggle() {
+    if (els.brushlessMotorToggle.disabled || brushlessRequestPending) return false;
+    brushlessRequestPending = true;
+    messageSticky = true;
+    updateControls();
+    try {
+      const payload = await postJson(API.stepperMotorToggle);
+      if (payload.confirmed !== true || typeof payload.on !== "boolean") {
+        throw new Error("the Yún did not confirm the motor state");
+      }
+      if (payload.sample) applySample(payload.sample);
+      setText(
+        els.stepperMessage,
+        `Brushless motor ${payload.on ? "ON" : "OFF"} at ${payload.pulse_us} µs`,
+      );
+    } catch (error) {
+      setText(els.stepperMessage, `Brushless motor command failed: ${error.message}`);
+    } finally {
+      brushlessRequestPending = false;
+      updateControls();
+    }
+    return true;
+  }
+
+  async function requestBrushlessPulse() {
+    if (els.brushlessApplyPulse.disabled || brushlessPulseRequestPending) {
+      return false;
+    }
+    const pulseUs = Number(els.brushlessPulseWidth.value);
+    if (!Number.isInteger(pulseUs) || pulseUs < 1000 || pulseUs > 2000) {
+      messageSticky = true;
+      setText(
+        els.stepperMessage,
+        "Brushless pulse rejected: enter an integer from 1000 through 2000 µs",
+      );
+      updateControls();
+      return false;
+    }
+    brushlessPulseRequestPending = true;
+    messageSticky = true;
+    els.brushlessApplyPulse.textContent = "Applying…";
+    setText(
+      els.stepperMessage,
+      `Sending ${pulseUs} µs; waiting for Yún confirmation…`,
+    );
+    updateControls();
+    try {
+      const payload = await postJson(
+        API.stepperMotorPulse,
+        {pulse_us: pulseUs},
+      );
+      if (payload.sample) applySample(payload.sample);
+      if (
+        payload.confirmed !== true ||
+        Number(payload.setpoint_us) !== pulseUs
+      ) {
+        throw new Error("the Yún did not confirm the pulse width");
+      }
+      brushlessPulseDirty = false;
+      setText(
+        els.stepperMessage,
+        `Brushless ON pulse confirmed at ${pulseUs} µs${
+          payload.stepper?.stepper_brushless_motor_on ? " and applied live" : ""
+        }`,
+      );
+    } catch (error) {
+      setText(
+        els.stepperMessage,
+        `Brushless pulse command failed: ${error.message}`,
+      );
+    } finally {
+      brushlessPulseRequestPending = false;
+      els.brushlessApplyPulse.textContent = "Apply pulse";
+      updateControls();
+    }
+    return true;
+  }
+
+  function handleMotorShortcut() {
+    if (els.brushlessMotorToggle.disabled || brushlessRequestPending) return false;
+    void requestBrushlessToggle();
+    return true;
+  }
+
   els.emergencyStop.addEventListener("click", async () => {
     // E-STOP remains a single action; confirmation is only for reset.
     try {
       const payload = await postJson(API.stepperEstop);
       if (payload.sample) applySample(payload.sample);
       messageSticky = true;
-      setText(els.stepperMessage, "E-STOP latched; step pulses inhibited");
+      setText(
+        els.stepperMessage,
+        "E-STOP latched; step pulses inhibited and brushless motor OFF",
+      );
     } catch (error) {
       messageSticky = true;
       setText(els.stepperMessage, `E-STOP failed: ${error.message}`);
@@ -535,7 +768,15 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     }
   });
   els.stepperForm.addEventListener("input", updateControls);
-  els.stepperSpeed.addEventListener("input", () => { messageSticky = false; });
+  els.stepperDistance.addEventListener("input", () => setCommandFeedback());
+  els.stepperSpeed.addEventListener("input", () => {
+    messageSticky = false;
+    setCommandFeedback();
+  });
+  els.brushlessPulseWidth.addEventListener("input", () => {
+    brushlessPulseDirty = true;
+    messageSticky = false;
+  });
   async function requestControlMode() {
     const latest = getLatest();
     const webPosition = els.stepperModeWeb.checked;
@@ -543,7 +784,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     controlModeDirty = true;
     controlModeRequestPending = true;
     messageSticky = true;
-    setText(els.stepperMessage, `Selecting ${webPosition ? "Web Position" : "Local Velocity"}…`);
+    setText(els.stepperMessage, `Selecting ${webPosition ? "Web Position" : "Local Speed"}…`);
     updateControls();
     try {
       const payload = await postJson(API.stepperControlMode, {web_position: webPosition});
@@ -554,7 +795,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       }
       setText(els.stepperMessage, webPosition
         ? "Web Position selected; D5 chooses travel direction; D6/D8 stop travel"
-        : "Local Velocity selected; D4 runs/stops and D5 selects direction");
+        : "Local Speed selected; D4 runs/stops and D5 selects direction");
     } catch (error) {
       controlModeDirty = false;
       els.stepperModeWeb.checked = previousWebPosition;
@@ -574,6 +815,14 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     event.preventDefault();
     void requestMove();
   });
+  els.brushlessMotorToggle.addEventListener(
+    "click",
+    () => void requestBrushlessToggle(),
+  );
+  els.brushlessApplyPulse.addEventListener(
+    "click",
+    () => void requestBrushlessPulse(),
+  );
   els.stepperStop.addEventListener("click", () => void requestStop());
   els.stepperHome.addEventListener("click", async () => {
     if (!window.confirm(`Move upward toward D8 until its top limit switch activates? Speed is fixed at ${limits.home_speed_mm_s} mm/s; D4 must be armed and D5 set to Reverse.`)) return;
@@ -614,10 +863,10 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       setText(els.stepperMessage, `Speed rejected: ${error.message}`);
     } finally {
       speedRequestPending = false;
-      els.stepperApplySpeed.textContent = "Apply Local Velocity Speed";
+      els.stepperApplySpeed.textContent = "Apply Motor Speed";
       updateControls();
     }
   });
 
-  return {render, handleSpaceShortcut};
+  return {render, handleSpaceShortcut, handleMotorShortcut};
 }

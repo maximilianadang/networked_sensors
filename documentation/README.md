@@ -41,6 +41,8 @@ header numbers on the Yún:
 | Positive limit switch | D6 | ATmega32U4 input with internal pull-up |
 | Negative limit switch | D8 | ATmega32U4 input with internal pull-up |
 | Driver disable (`ENA-`) | D9 | ATmega32U4 output; LOW disables DM542T output |
+| AbsoluteDRO clock/data | D10/D11 | Read-only, level-shifted scale inputs |
+| Brushless ESC signal | D12 | Timer3-generated 1000 us OFF / configurable 1000..2000 us ON receiver pulse |
 
 STEP and DIR GPIO ownership is a firmware invariant, not an incidental library
 behavior. `setup()` must contain both `pinMode(PIN_STEP, OUTPUT)` and
@@ -50,13 +52,21 @@ to configure either pin. The safe boot order is:
 1. Preload D9 with the disabled level and configure D9 as an output.
 2. Preload the D3 STEP and D2 DIR output latches LOW.
 3. Configure D3 STEP and D2 DIR as outputs.
-4. Configure Timer1 while leaving its compare interrupt disabled.
+4. Preload D12 LOW, configure it as an output, and start its independent
+   Timer3 50 Hz ESC pulse at the 1000 us OFF setting.
+5. Configure Timer1 while leaving its compare interrupt disabled.
 
 Calling `digitalWrite()` does not make an input pin a driven output. The
 firmware pulse counter can therefore advance even when no valid electrical STEP
 signal reaches the DM542T if either explicit `pinMode()` is removed. The desktop
 firmware-contract test locks this initialization and ordering against
 regression.
+
+The Renegade OPTO ESC signal return joins Yún GND, but its main battery and
+motor leads never connect to the Yún. The OPTO model has no BEC, so it does not
+power the Yún. `V1 P1000..2000` configures the ON pulse, `V1 B0` selects
+1000 us OFF, `V1 B1` selects the configured ON pulse, and `V1 E1` always
+returns D12 to 1000 us.
 
 Do not add an I2C device on D2/D3 without moving STEP and DIR. Avoid D0/D1:
 the Yún uses the ATmega32U4 hardware serial connection to communicate with the

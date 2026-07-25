@@ -13,6 +13,8 @@ export const API = Object.freeze({
   stepperStop: "/api/stepper/stop",
   stepperEstop: "/api/stepper/estop",
   stepperEstopReset: "/api/stepper/estop/reset",
+  stepperMotorToggle: "/api/stepper/motor/toggle",
+  stepperMotorPulse: "/api/stepper/motor/pulse",
   stepperHome: "/api/stepper/home",
   stepperControlMode: "/api/stepper/control-mode",
   stepperSpeed: "/api/stepper/speed",
@@ -21,7 +23,7 @@ export const API = Object.freeze({
 
 export async function getJson(url) {
   const response = await fetch(url);
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw new Error(await responseError(response));
   return response.json();
 }
 
@@ -31,8 +33,19 @@ export async function postJson(url, payload = {}) {
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify(payload)
   });
-  if (!response.ok) throw new Error(await response.text());
+  if (!response.ok) throw new Error(await responseError(response));
   return response.json();
+}
+
+async function responseError(response) {
+  const text = await response.text();
+  try {
+    const payload = JSON.parse(text);
+    if (payload && typeof payload.error === "string") return payload.error;
+  } catch (_error) {
+    // Fall through to the unstructured response below.
+  }
+  return text || `${response.status} ${response.statusText}`;
 }
 
 export function downloadLatestExport() {

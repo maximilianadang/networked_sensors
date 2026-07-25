@@ -82,6 +82,9 @@ DEFAULT_STEPPER_STEPS_PER_MM = 1.0 / DEFAULT_STEPPER_MM_PER_PULSE
 DEFAULT_STEPPER_TRAVEL_MM = 137.18
 DEFAULT_STEPPER_HOME_SPEED_MM_S = 1.5
 DEFAULT_STEPPER_LIMIT_QUALIFICATION_MS = 5.0
+DEFAULT_BRUSHLESS_PULSE_US = 1200
+MIN_BRUSHLESS_PULSE_US = 1000
+MAX_BRUSHLESS_PULSE_US = 2000
 
 # Quantity bounds only. They are not an absolute-position safety envelope;
 # D6/D8 stop travel into their respective ends.
@@ -356,6 +359,11 @@ class SimulatedStepperSource:
         "stepper_home_capable",
         "stepper_estop_capable",
         "stepper_estop_latched",
+        "stepper_brushless_motor_capable",
+        "stepper_brushless_motor_variable_capable",
+        "stepper_brushless_motor_on",
+        "stepper_brushless_motor_pulse_us",
+        "stepper_brushless_motor_setpoint_us",
         "stepper_control_owner",
         "stepper_control_mode",
         "stepper_homed",
@@ -436,6 +444,8 @@ class SimulatedStepperSource:
         self._control_mode = "web_position"
         self._homed = False
         self._estop_latched = False
+        self._brushless_motor_on = False
+        self._brushless_motor_setpoint_us = DEFAULT_BRUSHLESS_PULSE_US
 
     @staticmethod
     def _finite_number(value: object, field: str) -> float:
@@ -558,11 +568,39 @@ class SimulatedStepperSource:
         """Latch the simulated software stop and inhibit all motion."""
 
         self._estop_latched = True
+        self._brushless_motor_on = False
         self._moving = False
         self._velocity_mm_s = 0.0
         self._target_mm = self._position_mm
         self._state = "emergency_stop"
         self._fault = "emergency_stop"
+        self._next_due_s = 0.0
+        return self.status()
+
+    def set_brushless_motor(
+        self,
+        on: object,
+    ) -> dict[str, float | int | bool | str | None]:
+        """Select the simulated ESC off/on state."""
+
+        if not isinstance(on, bool):
+            raise ValueError("brushless motor state must be true or false")
+        if on and self._estop_latched:
+            raise RuntimeError(
+                "reset the software E-STOP before starting the brushless motor"
+            )
+        self._brushless_motor_on = on
+        self._next_due_s = 0.0
+        return self.status()
+
+    def set_brushless_pulse_us(
+        self,
+        pulse_us: object,
+    ) -> dict[str, float | int | bool | str | None]:
+        """Configure the simulated ESC ON pulse width."""
+
+        pulse = UsbStepperSource._brushless_pulse_us(pulse_us)
+        self._brushless_motor_setpoint_us = pulse
         self._next_due_s = 0.0
         return self.status()
 
@@ -655,6 +693,17 @@ class SimulatedStepperSource:
             "stepper_home_capable": True,
             "stepper_estop_capable": True,
             "stepper_estop_latched": self._estop_latched,
+            "stepper_brushless_motor_capable": True,
+            "stepper_brushless_motor_variable_capable": True,
+            "stepper_brushless_motor_on": self._brushless_motor_on,
+            "stepper_brushless_motor_pulse_us": (
+                self._brushless_motor_setpoint_us
+                if self._brushless_motor_on
+                else MIN_BRUSHLESS_PULSE_US
+            ),
+            "stepper_brushless_motor_setpoint_us": (
+                self._brushless_motor_setpoint_us
+            ),
             "stepper_control_owner": "supervisor",
             "stepper_control_mode": self._control_mode,
             "stepper_homed": self._homed,
@@ -756,6 +805,7 @@ class UsbStepperSource:
         self._next_command_id = 1
         self._command_names: dict[int, str] = {}
         self.pending_command_id: str | None = None
+        self.pending_command_error: str | None = None
         self._command_lock = threading.Lock()
 
     @staticmethod
@@ -940,6 +990,30 @@ class UsbStepperSource:
         estop_latched = (
             cls._wire_level(payload, "e") == 1 if estop_capable else False
         )
+        brushless_motor_capable = "bo" in payload
+        brushless_motor_on = (
+            cls._wire_level(payload, "bo") == 1
+            if brushless_motor_capable
+            else False
+        )
+        brushless_motor_variable_capable = "bp" in payload
+        if brushless_motor_variable_capable and not brushless_motor_capable:
+            raise ValueError("USB stepper field bp requires brushless field bo")
+        if brushless_motor_variable_capable:
+            brushless_motor_setpoint_us = cls._brushless_pulse_us(
+                payload.get("bp")
+            )
+        else:
+            # The first D12 firmware revision had a fixed 1200 us ON pulse.
+            brushless_motor_setpoint_us = (
+                DEFAULT_BRUSHLESS_PULSE_US
+                if brushless_motor_capable
+                else None
+            )
+        if estop_latched and brushless_motor_on:
+            raise ValueError(
+                "USB stepper cannot report brushless motor ON while E-STOP is latched"
+            )
 
         driver_enable_capable = "en" in payload
         driver_enabled = (
@@ -1080,6 +1154,20 @@ class UsbStepperSource:
             "stepper_home_capable": position_command_capable,
             "stepper_estop_capable": estop_capable,
             "stepper_estop_latched": estop_latched,
+            "stepper_brushless_motor_capable": brushless_motor_capable,
+            "stepper_brushless_motor_variable_capable": (
+                brushless_motor_variable_capable
+            ),
+            "stepper_brushless_motor_on": brushless_motor_on,
+            "stepper_brushless_motor_pulse_us": (
+                brushless_motor_setpoint_us
+                if brushless_motor_on
+                else MIN_BRUSHLESS_PULSE_US if brushless_motor_capable
+                else None
+            ),
+            "stepper_brushless_motor_setpoint_us": (
+                brushless_motor_setpoint_us
+            ),
             "stepper_control_owner": (
                 (
                     f"web_position_{transport_owner}"
@@ -1224,6 +1312,9 @@ class UsbStepperSource:
             values["stepper_home_capable"] = False
             values["stepper_estop_capable"] = False
             values["stepper_estop_latched"] = False
+            values["stepper_brushless_motor_capable"] = False
+            values["stepper_brushless_motor_variable_capable"] = False
+            values["stepper_brushless_motor_on"] = False
             values["stepper_control_owner"] = "manual_switches"
         values["stepper_transport_error"] = self.last_error
         return values
@@ -1244,6 +1335,20 @@ class UsbStepperSource:
                 f"{DEFAULT_STEPPER_MAX_SPEED_MM_S:g}"
             )
         return int(round(speed * DEFAULT_STEPPER_STEPS_PER_MM))
+
+    @staticmethod
+    def _brushless_pulse_us(pulse_us: object) -> int:
+        if isinstance(pulse_us, bool):
+            raise ValueError("pulse_us must be an integer from 1000 through 2000")
+        try:
+            pulse = int(pulse_us)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "pulse_us must be an integer from 1000 through 2000"
+            ) from exc
+        if pulse != pulse_us or not MIN_BRUSHLESS_PULSE_US <= pulse <= MAX_BRUSHLESS_PULSE_US:
+            raise ValueError("pulse_us must be an integer from 1000 through 2000")
+        return pulse
 
     @staticmethod
     def _finite_number(value: object, field: str) -> float:
@@ -1270,6 +1375,7 @@ class UsbStepperSource:
         # cross-source poll lock, so it may race another HTTP command at this
         # boundary; each line must still reach the firmware intact.
         with self._command_lock:
+            self.pending_command_error = None
             if self._fd is None:
                 raise RuntimeError("USB stepper is not connected")
             try:
@@ -1344,6 +1450,47 @@ class UsbStepperSource:
         if not values.get("stepper_estop_capable"):
             raise RuntimeError("Yún firmware does not support software E-STOP")
         self._write_command(b"V1 E1\n", "software E-STOP")
+        return self.status()
+
+    def set_brushless_motor(
+        self,
+        on: object,
+    ) -> Mapping[str, float | int | bool | str | None]:
+        """Select D12 ESC OFF/ON output without changing stepper motion."""
+
+        if not isinstance(on, bool):
+            raise ValueError("brushless motor state must be true or false")
+        values = self._require_connected()
+        if not values.get("stepper_brushless_motor_capable"):
+            raise RuntimeError(
+                "Yún firmware does not support brushless motor control"
+            )
+        if on and values.get("stepper_estop_latched"):
+            raise RuntimeError(
+                "reset the software E-STOP before starting the brushless motor"
+            )
+        self._write_command(
+            b"V1 B1\n" if on else b"V1 B0\n",
+            "brushless motor",
+        )
+        return self.status()
+
+    def set_brushless_pulse_us(
+        self,
+        pulse_us: object,
+    ) -> Mapping[str, float | int | bool | str | None]:
+        """Configure the D12 ESC ON pulse width."""
+
+        pulse = self._brushless_pulse_us(pulse_us)
+        values = self._require_connected()
+        if not values.get("stepper_brushless_motor_variable_capable"):
+            raise RuntimeError(
+                "Yún firmware does not support brushless pulse-width control"
+            )
+        self._write_command(
+            f"V1 P{pulse}\n".encode("ascii"),
+            "brushless pulse width",
+        )
         return self.status()
 
     def reset_emergency_stop(self) -> Mapping[str, float | int | bool | str | None]:
@@ -1451,6 +1598,11 @@ class UsbStepperSource:
         while b"\n" in self._buffer:
             raw_line, self._buffer = self._buffer.split(b"\n", 1)
             line = raw_line.decode("utf-8", errors="replace").strip()
+            if line.startswith("Command rejected:"):
+                self.pending_command_error = line.removeprefix(
+                    "Command rejected:"
+                ).strip()
+                continue
             if not line.startswith("{"):
                 continue
             try:
@@ -1509,6 +1661,7 @@ class NetworkStepperSource(UsbStepperSource):
         self._next_command_id = 1
         self._command_names: dict[int, str] = {}
         self.pending_command_id: str | None = None
+        self.pending_command_error: str | None = None
         self._command_lock = threading.Lock()
         self._opener = build_opener(ProxyHandler({}))
         self._state_lock = threading.Lock()
@@ -1595,6 +1748,9 @@ class NetworkStepperSource(UsbStepperSource):
                 values["stepper_home_capable"] = False
                 values["stepper_estop_capable"] = False
                 values["stepper_estop_latched"] = False
+                values["stepper_brushless_motor_capable"] = False
+                values["stepper_brushless_motor_variable_capable"] = False
+                values["stepper_brushless_motor_on"] = False
                 values["stepper_control_owner"] = "none"
             values["stepper_transport_error"] = self.last_error
         return values
@@ -1613,6 +1769,7 @@ class NetworkStepperSource(UsbStepperSource):
             method="POST",
         )
         with self._command_lock:
+            self.pending_command_error = None
             try:
                 with self._opener.open(request, timeout=self.timeout) as response:
                     body = response.read(1024).decode(

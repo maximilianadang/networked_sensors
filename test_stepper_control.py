@@ -171,6 +171,13 @@ class SimulatedStepperSourceTests(unittest.TestCase):
             self.stepper.move(-1.0, 1.0)
 
     def test_software_estop_latches_stops_and_requires_reset(self) -> None:
+        self.stepper.set_brushless_pulse_us(1750)
+        self.stepper.set_brushless_motor(True)
+        self.assertTrue(self.stepper.status()["stepper_brushless_motor_on"])
+        self.assertEqual(
+            self.stepper.status()["stepper_brushless_motor_pulse_us"],
+            1750,
+        )
         self.stepper.move(5.0, 2.0)
         self.stepper.poll(0.2)
         stopped = self.stepper.emergency_stop()
@@ -178,12 +185,21 @@ class SimulatedStepperSourceTests(unittest.TestCase):
         self.assertTrue(stopped["stepper_blocked"])
         self.assertEqual(stopped["stepper_state"], "emergency_stop")
         self.assertFalse(stopped["stepper_moving"])
+        self.assertFalse(stopped["stepper_brushless_motor_on"])
+        self.assertEqual(stopped["stepper_brushless_motor_pulse_us"], 1000)
+        self.assertEqual(
+            stopped["stepper_brushless_motor_setpoint_us"],
+            1750,
+        )
+        with self.assertRaisesRegex(RuntimeError, "E-STOP"):
+            self.stepper.set_brushless_motor(True)
         with self.assertRaisesRegex(RuntimeError, "E-STOP"):
             self.stepper.move(1.0, 1.0)
 
         reset = self.stepper.reset_emergency_stop()
         self.assertFalse(reset["stepper_estop_latched"])
         self.assertEqual(reset["stepper_state"], "ready")
+        self.assertFalse(reset["stepper_brushless_motor_on"])
         self.assertTrue(self.stepper.move(1.0, 1.0)["stepper_moving"])
 
     def test_merger_keeps_stepper_health_and_status_shape(self) -> None:
@@ -237,6 +253,14 @@ class UsbStepperSourceTests(unittest.TestCase):
         '{"v":1,"t":"s","q":23,"d4":0,"d5":1,"d6":1,"d8":1,'
         '"lp":0,"ln":0,"b":1,"r":"emergency_stop","sps":0,"csps":378,"ds":1,"en":0,'
         '"m":0,"h":0,"a":1,"e":1,"mv":0,"st":9,"p":0,"g":0,"c":0}'
+    )
+    BRUSHLESS_OFF_READY = POSITION_LOCAL_OFF[:-1] + ',"bo":0}'
+    BRUSHLESS_ON_READY = POSITION_LOCAL_OFF[:-1] + ',"bo":1}'
+    BRUSHLESS_VARIABLE_OFF_READY = (
+        POSITION_LOCAL_OFF[:-1] + ',"bo":0,"bp":1200}'
+    )
+    BRUSHLESS_VARIABLE_ON_READY = (
+        POSITION_LOCAL_OFF[:-1] + ',"bo":1,"bp":1750}'
     )
     FILTERED_RAW_D6_GLITCH = (
         '{"v":1,"t":"s","q":24,"d4":1,"d5":1,"d6":0,"d8":1,'
@@ -299,6 +323,23 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertIn("const unsigned int STATUS_FRAME_SIZE = 384;", firmware)
         self.assertIn("const int PIN_DRO_CLOCK = 10;", firmware)
         self.assertIn("const int PIN_DRO_DATA = 11;", firmware)
+        self.assertIn("const int PIN_ESC_SIGNAL = 12;", firmware)
+        self.assertIn("const unsigned int ESC_OFF_PULSE_US = 1000U;", firmware)
+        self.assertIn(
+            "const unsigned int ESC_DEFAULT_ON_PULSE_US = 1200U;",
+            firmware,
+        )
+        self.assertIn("const unsigned int ESC_MAX_PULSE_US = 2000U;", firmware)
+        self.assertIn("ISR(TIMER3_OVF_vect)", firmware)
+        self.assertIn("ISR(TIMER3_COMPA_vect)", firmware)
+        self.assertIn("TCCR3B = _BV(WGM33) | _BV(WGM32) | _BV(CS31);", firmware)
+        self.assertIn('strcmp(commandBuffer, "V1 B1") == 0', firmware)
+        self.assertIn('strncmp(commandBuffer, "V1 P", 4) == 0', firmware)
+        self.assertIn("strlen(commandBuffer) != 8", firmware)
+        self.assertIn("void setBrushlessPulseWidth", firmware)
+        self.assertIn("setBrushlessMotor(false);", firmware)
+        self.assertIn('\\"bo\\":%d', firmware)
+        self.assertIn('\\"bp\\":%u', firmware)
         self.assertIn("ISR(PCINT0_vect)", firmware)
         self.assertIn("PCMSK0 |= _BV(PCINT6);", firmware)
         self.assertIn("if (portB & _BV(PB6)) return;", firmware)
@@ -483,7 +524,7 @@ class UsbStepperSourceTests(unittest.TestCase):
             '"aps":2147483647,"ds":1,"en":1,"ut":1,"dc":1,"df":1,'
             '"dr":-2147483648,"dd":-2147483648,"da":2147483647,'
             '"dq":4294967295,"dx":65535,"m":1,"h":1,"a":1,'
-            '"e":1,"mv":1,"st":9,"p":-2147483648,"g":-2147483648,'
+            '"e":1,"bo":0,"bp":2000,"mv":1,"st":9,"p":-2147483648,"g":-2147483648,'
             '"c":65535,"o":2}'
         )
         self.assertLessEqual(len(frame) + 2, 384)
@@ -642,6 +683,40 @@ class UsbStepperSourceTests(unittest.TestCase):
             os.close(master_fd)
             os.close(slave_fd)
 
+    def test_captures_usb_firmware_command_rejection_text(self) -> None:
+        master_fd, slave_fd = pty.openpty()
+        source = UsbStepperSource(port=os.ttyname(slave_fd))
+        try:
+            self.assertIsNone(source.poll(0.0))
+            os.write(
+                master_fd,
+                (self.WEB_UNHOMED_REVERSE_ARMED + "\r\n").encode(),
+            )
+            self.assertIsNotNone(source.poll(0.1))
+
+            source.move(-1.0, 1.0)
+            self.assertEqual(os.read(master_fd, 64), b"V1 G-252,252,1\n")
+            os.write(
+                master_fd,
+                b"Command rejected: test interlock.\r\n"
+                + (
+                    self.WEB_UNHOMED_REVERSE_ARMED.replace(
+                        '"q":21',
+                        '"q":22',
+                    )
+                    + "\r\n"
+                ).encode(),
+            )
+            self.assertIsNotNone(source.poll(0.2))
+            self.assertEqual(
+                source.pending_command_error,
+                "test interlock.",
+            )
+        finally:
+            source.close()
+            os.close(master_fd)
+            os.close(slave_fd)
+
 
     def test_missing_usb_port_is_disconnected_not_fatal(self) -> None:
         source = UsbStepperSource(port="/dev/this-stepper-port-does-not-exist")
@@ -771,6 +846,88 @@ class UsbStepperSourceTests(unittest.TestCase):
             self.assertIsNotNone(source.poll(0.3))
             source.reset_emergency_stop()
             self.assertEqual(os.read(master_fd, 32), b"V1 E0\n")
+        finally:
+            source.close()
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_decodes_and_writes_fixed_brushless_motor_contract(self) -> None:
+        off = UsbStepperSource.decode_status_line(self.BRUSHLESS_OFF_READY)
+        self.assertTrue(off["stepper_brushless_motor_capable"])
+        self.assertFalse(off["stepper_brushless_motor_on"])
+        self.assertEqual(off["stepper_brushless_motor_pulse_us"], 1000)
+        on = UsbStepperSource.decode_status_line(self.BRUSHLESS_ON_READY)
+        self.assertTrue(on["stepper_brushless_motor_on"])
+        self.assertEqual(on["stepper_brushless_motor_pulse_us"], 1200)
+        self.assertFalse(on["stepper_brushless_motor_variable_capable"])
+        self.assertEqual(
+            on["stepper_brushless_motor_setpoint_us"],
+            1200,
+        )
+
+        variable_off = UsbStepperSource.decode_status_line(
+            self.BRUSHLESS_VARIABLE_OFF_READY
+        )
+        self.assertTrue(
+            variable_off["stepper_brushless_motor_variable_capable"]
+        )
+        self.assertEqual(
+            variable_off["stepper_brushless_motor_setpoint_us"],
+            1200,
+        )
+        self.assertEqual(
+            variable_off["stepper_brushless_motor_pulse_us"],
+            1000,
+        )
+        variable_on = UsbStepperSource.decode_status_line(
+            self.BRUSHLESS_VARIABLE_ON_READY
+        )
+        self.assertEqual(
+            variable_on["stepper_brushless_motor_setpoint_us"],
+            1750,
+        )
+        self.assertEqual(
+            variable_on["stepper_brushless_motor_pulse_us"],
+            1750,
+        )
+        for invalid in (
+            self.POSITION_LOCAL_OFF[:-1] + ',"bp":1200}',
+            self.BRUSHLESS_OFF_READY[:-1] + ',"bp":999}',
+            self.BRUSHLESS_OFF_READY[:-1] + ',"bp":2001}',
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    UsbStepperSource.decode_status_line(invalid)
+
+        impossible = self.ESTOP_LOCAL_ON[:-1] + ',"bo":1}'
+        with self.assertRaisesRegex(ValueError, "while E-STOP is latched"):
+            UsbStepperSource.decode_status_line(impossible)
+
+        master_fd, slave_fd = pty.openpty()
+        source = UsbStepperSource(port=os.ttyname(slave_fd))
+        try:
+            self.assertIsNone(source.poll(0.0))
+            os.write(master_fd, (self.BRUSHLESS_OFF_READY + "\r\n").encode())
+            self.assertIsNotNone(source.poll(0.1))
+            source.set_brushless_motor(True)
+            self.assertEqual(os.read(master_fd, 32), b"V1 B1\n")
+
+            os.write(master_fd, (self.BRUSHLESS_ON_READY + "\r\n").encode())
+            self.assertIsNotNone(source.poll(0.2))
+            source.set_brushless_motor(False)
+            self.assertEqual(os.read(master_fd, 32), b"V1 B0\n")
+
+            os.write(
+                master_fd,
+                (self.BRUSHLESS_VARIABLE_OFF_READY + "\r\n").encode(),
+            )
+            self.assertIsNotNone(source.poll(0.3))
+            source.set_brushless_pulse_us(1750)
+            self.assertEqual(os.read(master_fd, 32), b"V1 P1750\n")
+            for invalid in (999, 2001, 1200.5, True, "1200"):
+                with self.subTest(invalid=invalid):
+                    with self.assertRaises(ValueError):
+                        source.set_brushless_pulse_us(invalid)
         finally:
             source.close()
             os.close(master_fd)
@@ -959,12 +1116,19 @@ class NetworkStepperSourceTests(unittest.TestCase):
         bridge_source = Path(__file__).with_name("yun_stepper_bridge.py").read_bytes()
         bridge_source.decode("ascii")
         self.assertEqual(validate_command(" V1 E1\n"), "V1 E1")
+        self.assertEqual(validate_command(" V1 B0\n"), "V1 B0")
+        self.assertEqual(validate_command("V1 B1"), "V1 B1")
+        self.assertEqual(validate_command("V1 P1000"), "V1 P1000")
+        self.assertEqual(validate_command("V1 P2000"), "V1 P2000")
         for command in (
             "V1 Q",
             "V1 D0",
             "V1 D1",
             "V1 G1,2",
             "V2 E1",
+            "V1 P999",
+            "V1 P2001",
+            "V1 P+1000",
             "V1 S" + "1" * 60,
         ):
             with self.subTest(command=command):
@@ -1042,8 +1206,20 @@ class UsbStepperDashboardTests(unittest.TestCase):
     def test_control_mode_uses_explicit_radio_choices(self) -> None:
         self.assertIn('id="stepperModeLocal"', INDEX_HTML)
         self.assertIn('value="local_velocity" checked', INDEX_HTML)
+        self.assertIn(">Local Speed</label>", INDEX_HTML)
         self.assertIn('id="stepperModeWeb"', INDEX_HTML)
         self.assertIn('value="web_position"', INDEX_HTML)
+        self.assertIn(
+            'id="stepperApplySpeed" type="button">Apply Motor Speed</button>',
+            INDEX_HTML,
+        )
+        self.assertIn(
+            'class="visually-hidden" id="stepperMessage"',
+            INDEX_HTML,
+        )
+        self.assertNotIn('class="pill" id="stepperMessage"', INDEX_HTML)
+        self.assertNotIn("Local Velocity", INDEX_HTML)
+        self.assertNotIn("Local Velocity", STEPPER_JS)
         self.assertEqual(INDEX_HTML.count('name="stepper_control_mode"'), 2)
         self.assertNotIn('role="switch"', INDEX_HTML)
         self.assertIn(
@@ -1069,6 +1245,70 @@ class UsbStepperDashboardTests(unittest.TestCase):
         self.assertIn('let motionRequestPending = false;', STEPPER_JS)
         self.assertIn('motionRequestPending = "move";', STEPPER_JS)
         self.assertIn('motionRequestPending = "stop";', STEPPER_JS)
+        self.assertIn('id="stepperCommandFeedback"', INDEX_HTML)
+        self.assertIn("function setCommandFeedback", STEPPER_JS)
+        self.assertIn(
+            "setCommandFeedback(`Move failed: ${error.message}`)",
+            STEPPER_JS,
+        )
+        self.assertIn(
+            "if (motionRequestPending === \"move\") "
+            "motionRequestPending = false;",
+            STEPPER_JS,
+        )
+        self.assertIn(".stepper-command-feedback", DASHBOARD_CSS)
+        self.assertIn("async function responseError(response)", API_JS)
+        self.assertIn(
+            'typeof payload.error === "string"',
+            API_JS,
+        )
+
+    def test_brushless_motor_has_compact_guarded_m_toggle(self) -> None:
+        self.assertIn('id="brushlessMotorToggle"', INDEX_HTML)
+        self.assertIn('aria-keyshortcuts="M"', INDEX_HTML)
+        self.assertIn('id="brushlessMotorState"', INDEX_HTML)
+        self.assertIn("D12 Pulse Timer: --", INDEX_HTML)
+        self.assertIn(
+            "`D12 Pulse Timer: ${brushlessPulseUs.toFixed(0)} µs`",
+            STEPPER_JS,
+        )
+        control_mode_start = INDEX_HTML.index('<fieldset class="mode-options">')
+        control_mode_end = INDEX_HTML.index("</fieldset>", control_mode_start)
+        brushless_control = INDEX_HTML.index('class="brushless-control"')
+        self.assertLess(control_mode_start, brushless_control)
+        self.assertLess(control_mode_end, brushless_control)
+        self.assertLess(
+            INDEX_HTML.index('id="stepperApplySpeed"'),
+            brushless_control,
+        )
+        self.assertLess(brushless_control, INDEX_HTML.index("<h3>Interlocks</h3>"))
+        self.assertIn('id="brushlessPulseWidth"', INDEX_HTML)
+        self.assertIn('min="1000" max="2000" step="1" value="1200"', INDEX_HTML)
+        self.assertIn('id="brushlessApplyPulse"', INDEX_HTML)
+        self.assertIn('stepperMotorToggle: "/api/stepper/motor/toggle"', API_JS)
+        self.assertIn('stepperMotorPulse: "/api/stepper/motor/pulse"', API_JS)
+        self.assertIn("function requestBrushlessPulse()", STEPPER_JS)
+        self.assertIn("{pulse_us: pulseUs}", STEPPER_JS)
+        self.assertIn(
+            'const motorPressed = event.code === "KeyM" || '
+            'event.key.toLowerCase() === "m";',
+            APP_JS,
+        )
+        self.assertLess(
+            APP_JS.index("if (shortcutTargetIsGuarded(event)) return;"),
+            APP_JS.index("const motorPressed"),
+        )
+        self.assertIn("function handleMotorShortcut()", STEPPER_JS)
+        self.assertIn("void requestBrushlessToggle();", STEPPER_JS)
+        self.assertIn(
+            "return {render, handleSpaceShortcut, handleMotorShortcut};",
+            STEPPER_JS,
+        )
+        self.assertIn(".brushless-control", DASHBOARD_CSS)
+        self.assertIn(
+            "grid-template-columns: minmax(0, 1fr) auto auto",
+            DASHBOARD_CSS,
+        )
 
     def test_dashboard_separates_scheduled_and_measured_step_output(self) -> None:
         self.assertIn("Scheduled speed", INDEX_HTML)
@@ -1120,6 +1360,18 @@ class UsbStepperDashboardTests(unittest.TestCase):
         self.assertNotIn('id="stepperDroDisplacement"', INDEX_HTML)
         self.assertIn("stepper_dro_fresh", STEPPER_JS)
         self.assertIn("stepper_dro_valid_frame_count", STEPPER_JS)
+
+    def test_dashboard_does_not_call_a_disconnected_yun_unsafe_legacy(self) -> None:
+        message_block = STEPPER_JS.split(
+            'if (!messageSticky && ["usb", "network"].includes',
+            1,
+        )[1].split("updateControls();", 1)[0]
+        self.assertIn('!connected\n        ? "Yún disconnected"', message_block)
+        self.assertIn("!directionCalibrationSafe", message_block)
+        self.assertLess(
+            message_block.index('!connected\n        ? "Yún disconnected"'),
+            message_block.index("!directionCalibrationSafe"),
+        )
 
     def test_dashboard_promotes_live_dro_piston_visual_and_compacts_readouts(self) -> None:
         self.assertIn('class="control-panel stepper-panel"', INDEX_HTML)
@@ -1192,6 +1444,44 @@ class UsbStepperDashboardTests(unittest.TestCase):
             DASHBOARD_CSS,
         )
         self.assertIn(".piston-head", DASHBOARD_CSS)
+        self.assertIn('id="stepperDirectionIndicator"', INDEX_HTML)
+        self.assertIn('id="stepperDirectionArrow"', INDEX_HTML)
+        self.assertIn('id="stepperDirectionLabel"', INDEX_HTML)
+        self.assertIn('id="stepperDirectionBlocked"', INDEX_HTML)
+        self.assertIn('id="stepperDirectionBlockLabel"', INDEX_HTML)
+        self.assertIn(".piston-direction-indicator", DASHBOARD_CSS)
+        self.assertIn(
+            'arrowDirection === "down" ? "↓" : arrowDirection === "up" ? "↑" : ""',
+            STEPPER_JS,
+        )
+        self.assertIn('"D5 FWD · D6 BOTTOM"', STEPPER_JS)
+        self.assertIn('"D5 REV · D8 TOP"', STEPPER_JS)
+        self.assertIn(
+            "const hasD5Direction = connected &&",
+            STEPPER_JS,
+        )
+        self.assertIn(
+            'latest.stepper_positive_limit_active === true',
+            STEPPER_JS,
+        )
+        self.assertIn(
+            'latest.stepper_negative_limit_active === true',
+            STEPPER_JS,
+        )
+        self.assertIn(
+            '"is-blocked",\n      blockedLimit !== null',
+            STEPPER_JS,
+        )
+        self.assertIn(
+            ".piston-direction-indicator.is-blocked "
+            ".piston-direction-blocked",
+            DASHBOARD_CSS,
+        )
+        self.assertIn(
+            ".piston-direction-indicator.is-unavailable "
+            ".piston-direction-block-label",
+            DASHBOARD_CSS,
+        )
         self.assertIn("min-height: 500px", DASHBOARD_CSS)
         self.assertIn("grid-template-rows: auto minmax(320px, 1fr)", DASHBOARD_CSS)
         self.assertNotIn(".piston-live-strip", DASHBOARD_CSS)
@@ -1440,10 +1730,21 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 "home_speed_mm_s": DEFAULT_STEPPER_HOME_SPEED_MM_S,
             },
         )
+        motor_on = runtime.toggle_stepper_brushless_motor()
+        self.assertTrue(motor_on["confirmed"])
+        self.assertTrue(motor_on["stepper"]["stepper_brushless_motor_on"])
+        self.assertEqual(motor_on["pulse_us"], 1200)
         stopped = runtime.emergency_stop_stepper()
         self.assertTrue(stopped["confirmed"])
         self.assertTrue(stopped["stepper"]["stepper_estop_latched"])
         self.assertFalse(stopped["stepper"]["stepper_moving"])
+        self.assertFalse(stopped["stepper"]["stepper_brushless_motor_on"])
+        self.assertEqual(
+            stopped["stepper"]["stepper_brushless_motor_pulse_us"],
+            1000,
+        )
+        with self.assertRaisesRegex(RuntimeError, "E-STOP"):
+            runtime.toggle_stepper_brushless_motor()
         with self.assertRaisesRegex(RuntimeError, "E-STOP"):
             runtime.move_stepper({"distance_mm": 1.0, "speed_mm_s": 1.0})
         reset = runtime.reset_stepper_emergency_stop()
@@ -1523,6 +1824,131 @@ class UsbStepperDashboardTests(unittest.TestCase):
             self.assertEqual(reset_command, [b"V1 E0\n"])
             self.assertTrue(reset["confirmed"])
             self.assertFalse(reset["stepper"]["stepper_estop_latched"])
+        finally:
+            runtime.stop()
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_runtime_requires_fresh_usb_brushless_motor_acknowledgement(self) -> None:
+        master_fd, slave_fd = pty.openpty()
+        runtime = DashboardRuntime(
+            scenario="healthy",
+            rate_hz=10.0,
+            drop_after_s=2.0,
+            stale_after_s=5.0,
+            history_limit=10,
+            record_dir=Path("/tmp/stepper-dashboard-brushless-usb-test-recordings"),
+            esp32_source="sim",
+            dxmr90_source="sim",
+            stepper_source="usb",
+            stepper_port=os.ttyname(slave_fd),
+            stepper_baud=9600,
+            dxmr90_host="127.0.0.1",
+            dxmr90_port=502,
+            dxmr90_unit_id=1,
+            dxmr90_timeout=0.1,
+            dxmr90_addressing="one-based",
+            dxmr90_word_order="high-low",
+            dxmr90_data_path="direct",
+            dxmr90_rate_hz=10.0,
+        )
+        try:
+            os.write(
+                master_fd,
+                (UsbStepperSourceTests.BRUSHLESS_OFF_READY + "\r\n").encode(),
+            )
+            stepper = next(
+                source for source in runtime.sources if source.name == "stepper"
+            )
+            self.assertIsNotNone(stepper.poll(0.1))
+            runtime.start()
+
+            command: list[bytes] = []
+
+            def acknowledge_motor_on() -> None:
+                command.append(os.read(master_fd, 32))
+                status = UsbStepperSourceTests.BRUSHLESS_ON_READY.replace(
+                    '"q":20',
+                    '"q":21',
+                )
+                os.write(master_fd, (status + "\r\n").encode())
+
+            responder = threading.Thread(target=acknowledge_motor_on)
+            responder.start()
+            result = runtime.toggle_stepper_brushless_motor()
+            responder.join(timeout=1.0)
+            self.assertEqual(command, [b"V1 B1\n"])
+            self.assertTrue(result["confirmed"])
+            self.assertTrue(result["on"])
+            self.assertEqual(result["pulse_us"], 1200)
+            self.assertTrue(result["stepper"]["stepper_brushless_motor_on"])
+        finally:
+            runtime.stop()
+            os.close(master_fd)
+            os.close(slave_fd)
+
+    def test_runtime_sets_and_confirms_usb_brushless_pulse_width(self) -> None:
+        master_fd, slave_fd = pty.openpty()
+        runtime = DashboardRuntime(
+            scenario="healthy",
+            rate_hz=10.0,
+            drop_after_s=2.0,
+            stale_after_s=5.0,
+            history_limit=10,
+            record_dir=Path("/tmp/stepper-dashboard-brushless-pulse-test-recordings"),
+            esp32_source="off",
+            dxmr90_source="off",
+            stepper_source="usb",
+            stepper_port=os.ttyname(slave_fd),
+            stepper_baud=9600,
+            dxmr90_host="127.0.0.1",
+            dxmr90_port=502,
+            dxmr90_unit_id=1,
+            dxmr90_timeout=0.1,
+            dxmr90_addressing="one-based",
+            dxmr90_word_order="high-low",
+            dxmr90_data_path="direct",
+            dxmr90_rate_hz=10.0,
+        )
+        try:
+            os.write(
+                master_fd,
+                (
+                    UsbStepperSourceTests.BRUSHLESS_VARIABLE_OFF_READY
+                    + "\r\n"
+                ).encode(),
+            )
+            stepper = next(
+                source for source in runtime.sources if source.name == "stepper"
+            )
+            self.assertIsNotNone(stepper.poll(0.1))
+            runtime.start()
+
+            command: list[bytes] = []
+
+            def acknowledge_pulse() -> None:
+                command.append(os.read(master_fd, 32))
+                status = (
+                    UsbStepperSourceTests.BRUSHLESS_VARIABLE_OFF_READY
+                    .replace('"q":20', '"q":21')
+                    .replace('"bp":1200', '"bp":1750')
+                )
+                os.write(master_fd, (status + "\r\n").encode())
+
+            responder = threading.Thread(target=acknowledge_pulse)
+            responder.start()
+            result = runtime.set_stepper_brushless_pulse(
+                {"pulse_us": 1750}
+            )
+            responder.join(timeout=1.0)
+            self.assertEqual(command, [b"V1 P1750\n"])
+            self.assertTrue(result["confirmed"])
+            self.assertEqual(result["setpoint_us"], 1750)
+            self.assertEqual(result["pulse_us"], 1000)
+            self.assertEqual(
+                result["stepper"]["stepper_brushless_motor_setpoint_us"],
+                1750,
+            )
         finally:
             runtime.stop()
             os.close(master_fd)
@@ -1702,14 +2128,45 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 time.sleep(0.02)
             self.assertEqual(stepper.status()["stepper_status_sequence"], 24)
 
+            rejected_move_command: list[bytes] = []
+
+            def reject_move() -> None:
+                rejected_move_command.append(os.read(master_fd, 64))
+                status = ready_reverse.replace('"q":24', '"q":25')
+                os.write(
+                    master_fd,
+                    b"Command rejected: test interlock.\r\n"
+                    + status.encode(),
+                )
+
+            responder = threading.Thread(target=reject_move)
+            responder.start()
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "Yún rejected the move: test interlock",
+            ):
+                runtime.move_stepper(
+                    {
+                        "distance_mm": 1.0,
+                        "speed_mm_s": 1.0,
+                        "command_id": "expected-rejection",
+                    }
+                )
+            responder.join(timeout=1.0)
+            self.assertFalse(responder.is_alive())
+            self.assertEqual(
+                rejected_move_command,
+                [b"V1 G-252,252,1\n"],
+            )
+
             move_command: list[bytes] = []
 
             def acknowledge_move() -> None:
                 move_command.append(os.read(master_fd, 64))
                 status = (
-                    '{"v":1,"t":"s","q":25,"d4":0,"d5":0,"d6":1,"d8":1,'
+                    '{"v":1,"t":"s","q":26,"d4":0,"d5":0,"d6":1,"d8":1,'
                     '"lp":0,"ln":0,"b":0,"r":"none","sps":-1,"csps":504,"ds":1,'
-                    '"m":1,"h":0,"a":1,"mv":1,"st":4,"p":10000,"g":9750,"c":1}\r\n'
+                    '"m":1,"h":0,"a":1,"mv":1,"st":4,"p":10000,"g":9750,"c":2}\r\n'
                 )
                 os.write(master_fd, status.encode())
 
@@ -1724,7 +2181,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
             )
             responder.join(timeout=1.0)
             self.assertFalse(responder.is_alive())
-            self.assertEqual(move_command, [b"V1 G-630,504,1\n"])
+            self.assertEqual(move_command, [b"V1 G-630,504,2\n"])
             self.assertEqual(payload["travel_mm"], 2.5)
             self.assertEqual(payload["resolved_direction"], "reverse")
             self.assertEqual(payload["signed_distance_mm"], -2.5)

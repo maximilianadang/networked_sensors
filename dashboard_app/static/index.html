@@ -95,7 +95,7 @@
 
   <section class="lower-grid">
     <article class="control-panel stepper-panel">
-      <div class="panel-head"><h2>Yún Stepper Motion</h2><span class="pill" id="stepperState">Unknown</span></div>
+      <div class="panel-head"><h2>Yún Motor Control</h2><span class="pill" id="stepperState">Unknown</span></div>
       <div class="stepper-layout">
         <section id="stepperPistonVisual" class="piston-visual is-unavailable"
           aria-label="Read-only piston head position measured by the DRO">
@@ -127,6 +127,16 @@
           <div class="piston-stage" aria-hidden="true">
             <div id="stepperDroMinLabel" class="piston-end-label piston-end-start">D6 bottom −137.18 mm</div>
             <div id="stepperDroMaxLabel" class="piston-end-label piston-end-finish">D8 top 0 mm</div>
+            <div id="stepperDirectionIndicator"
+              class="piston-direction-indicator is-unavailable">
+              <span id="stepperDirectionLabel" class="piston-direction-label">D5 unavailable</span>
+              <span id="stepperDirectionArrow" class="piston-direction-arrow"></span>
+              <span id="stepperDirectionBlocked" class="piston-direction-blocked">
+                <span class="piston-prohibition-symbol"></span>
+                <span id="stepperDirectionBlockLabel"
+                  class="piston-direction-block-label">Limit blocked</span>
+              </span>
+            </div>
             <div class="piston-axis">
               <div class="piston-rod"></div>
               <div class="piston-head"><span>HEAD</span></div>
@@ -141,7 +151,7 @@
             <div class="form-grid">
               <fieldset class="mode-options">
                 <legend>Control mode</legend>
-                <label class="radio-option"><input id="stepperModeLocal" name="stepper_control_mode" type="radio" value="local_velocity" checked>Local Velocity</label>
+                <label class="radio-option"><input id="stepperModeLocal" name="stepper_control_mode" type="radio" value="local_velocity" checked>Local Speed</label>
                 <label class="radio-option"><input id="stepperModeWeb" name="stepper_control_mode" type="radio" value="web_position">Web Position</label>
               </fieldset>
               <label id="stepperDistanceField" hidden>Distance (mm)<input id="stepperDistance" name="distance_mm" type="number" required disabled></label>
@@ -151,9 +161,28 @@
               <button id="stepperMove" class="primary" type="submit" aria-keyshortcuts="Space" hidden>Move <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
               <button id="stepperHome" type="button" hidden>Home to D8 (top)</button>
               <button id="stepperStop" class="stop" type="button" aria-keyshortcuts="Space" hidden>Stop <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
-              <button id="stepperApplySpeed" type="button">Apply Local Velocity Speed</button>
-              <span class="pill" id="stepperMessage" aria-live="polite">Simulation only</span>
+              <button id="stepperApplySpeed" type="button">Apply Motor Speed</button>
+              <span class="visually-hidden" id="stepperMessage" role="status" aria-live="polite"></span>
+              <span id="stepperCommandFeedback" class="stepper-command-feedback"
+                role="alert" hidden></span>
             </div>
+            <fieldset class="brushless-control">
+              <legend>Brushless motor</legend>
+              <div class="brushless-summary">
+                <span id="brushlessMotorState" class="pill" aria-live="polite">Unknown</span>
+                <small id="brushlessMotorDetail">D12 Pulse Timer: --</small>
+              </div>
+              <label class="brushless-pulse-field">Pulse width (µs)
+                <input id="brushlessPulseWidth" name="brushless_pulse_us"
+                  type="number" min="1000" max="2000" step="1" value="1200"
+                  inputmode="numeric">
+              </label>
+              <button id="brushlessApplyPulse" type="button">Apply pulse</button>
+              <button id="brushlessMotorToggle" type="button" aria-keyshortcuts="M">
+                <span id="brushlessMotorAction">Turn on</span>
+                <kbd class="shortcut-key" aria-hidden="true">M</kbd>
+              </button>
+            </fieldset>
           </form>
 
           <section class="source-row stepper-interlocks">

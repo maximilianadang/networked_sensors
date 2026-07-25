@@ -23,6 +23,8 @@ try:
         DEFAULT_STEPPER_NETWORK_URL,
         DEFAULT_STEPPER_STEPS_PER_MM,
         ESP32_SOLENOID_COUNT,
+        MAX_BRUSHLESS_PULSE_US,
+        MIN_BRUSHLESS_PULSE_US,
         SourceMerger,
         make_sources,
     )
@@ -39,6 +41,8 @@ except ImportError:  # pragma: no cover - direct dashboard.py execution
         DEFAULT_STEPPER_NETWORK_URL,
         DEFAULT_STEPPER_STEPS_PER_MM,
         ESP32_SOLENOID_COUNT,
+        MAX_BRUSHLESS_PULSE_US,
+        MIN_BRUSHLESS_PULSE_US,
         SourceMerger,
         make_sources,
     )
@@ -554,6 +558,25 @@ class DashboardRuntime:
             raise RuntimeError("stepper source does not support software E-STOP")
         return stepper
 
+    def _stepper_brushless_locked(self) -> object:
+        stepper = next(
+            (source for source in self.sources if source.name == "stepper"),
+            None,
+        )
+        if stepper is None or not hasattr(stepper, "set_brushless_motor"):
+            raise RuntimeError(
+                "stepper source does not support brushless motor control"
+            )
+        return stepper
+
+    def _stepper_brushless_pulse_locked(self) -> object:
+        stepper = self._stepper_brushless_locked()
+        if not hasattr(stepper, "set_brushless_pulse_us"):
+            raise RuntimeError(
+                "stepper source does not support brushless pulse-width control"
+            )
+        return stepper
+
     def _stepper_payload_locked(self) -> dict[str, object]:
         stepper = next(
             (source for source in self.sources if source.name == "stepper"),
@@ -666,6 +689,15 @@ class DashboardRuntime:
                 deadline = time.monotonic() + 1.5
                 while True:
                     payload = self._stepper_payload_locked()
+                    command_error = getattr(
+                        stepper,
+                        "pending_command_error",
+                        None,
+                    )
+                    if command_error:
+                        raise RuntimeError(
+                            f"Yún rejected the move: {command_error}"
+                        )
                     if (
                         payload.get("stepper_status_sequence") != before_sequence
                         and payload.get("stepper_command_id") == expected_id
@@ -744,6 +776,10 @@ class DashboardRuntime:
                         payload.get("stepper_status_sequence") != before_sequence
                         and payload.get("stepper_estop_latched") is True
                         and payload.get("stepper_moving") is False
+                        and (
+                            payload.get("stepper_brushless_motor_capable") is not True
+                            or payload.get("stepper_brushless_motor_on") is False
+                        )
                     ):
                         break
                     remaining = deadline - time.monotonic()
@@ -757,6 +793,127 @@ class DashboardRuntime:
             return {
                 "confirmed": True,
                 "stepper": self._stepper_payload_locked(),
+                "sample": self.latest,
+            }
+
+    def toggle_stepper_brushless_motor(self) -> dict[str, object]:
+        """Toggle the D12 ESC between OFF and its configured ON pulse."""
+
+        with self._condition:
+            stepper = self._stepper_brushless_locked()
+            current = self._stepper_payload_locked()
+            if current.get("stepper_brushless_motor_capable") is not True:
+                raise RuntimeError(
+                    "Yún firmware does not support brushless motor control"
+                )
+            requested_on = current.get("stepper_brushless_motor_on") is not True
+            if requested_on and current.get("stepper_estop_latched") is True:
+                raise RuntimeError(
+                    "reset the software E-STOP before starting the brushless motor"
+                )
+            before_sequence = current.get("stepper_status_sequence")
+            stepper.set_brushless_motor(requested_on)  # type: ignore[attr-defined]
+            elapsed_s = time.monotonic() - self.monotonic0
+            self._poll_locked(elapsed_s)
+            if getattr(stepper, "mode", None) in ("usb", "network"):
+                deadline = time.monotonic() + 1.5
+                while True:
+                    payload = self._stepper_payload_locked()
+                    if (
+                        payload.get("stepper_status_sequence") != before_sequence
+                        and payload.get("stepper_brushless_motor_on")
+                        == requested_on
+                    ):
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError(
+                            "Yún did not confirm brushless motor state "
+                            "within 1.5 seconds"
+                        )
+                    self._condition.wait(timeout=min(remaining, 0.1))
+            confirmed = self._stepper_payload_locked()
+            return {
+                "confirmed": True,
+                "on": requested_on,
+                "pulse_us": confirmed.get(
+                    "stepper_brushless_motor_pulse_us"
+                ),
+                "stepper": confirmed,
+                "sample": self.latest,
+            }
+
+    def set_stepper_brushless_pulse(
+        self,
+        values: dict[str, object],
+    ) -> dict[str, object]:
+        """Set and confirm the configured 1000..2000 us brushless ON pulse."""
+
+        with self._condition:
+            if "pulse_us" not in values:
+                raise ValueError("pulse_us is required")
+            raw_pulse = values["pulse_us"]
+            if isinstance(raw_pulse, bool):
+                raise ValueError(
+                    "pulse_us must be an integer from 1000 through 2000"
+                )
+            try:
+                requested_pulse = int(raw_pulse)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "pulse_us must be an integer from 1000 through 2000"
+                ) from exc
+            if (
+                requested_pulse != raw_pulse
+                or not MIN_BRUSHLESS_PULSE_US
+                <= requested_pulse
+                <= MAX_BRUSHLESS_PULSE_US
+            ):
+                raise ValueError(
+                    "pulse_us must be an integer from 1000 through 2000"
+                )
+            stepper = self._stepper_brushless_pulse_locked()
+            current = self._stepper_payload_locked()
+            if (
+                current.get("stepper_brushless_motor_variable_capable")
+                is not True
+            ):
+                raise RuntimeError(
+                    "Yún firmware does not support brushless pulse-width control"
+                )
+            before_sequence = current.get("stepper_status_sequence")
+            stepper.set_brushless_pulse_us(  # type: ignore[attr-defined]
+                requested_pulse
+            )
+            elapsed_s = time.monotonic() - self.monotonic0
+            self._poll_locked(elapsed_s)
+            if getattr(stepper, "mode", None) in ("usb", "network"):
+                deadline = time.monotonic() + 1.5
+                while True:
+                    payload = self._stepper_payload_locked()
+                    if (
+                        payload.get("stepper_status_sequence") != before_sequence
+                        and payload.get("stepper_brushless_motor_setpoint_us")
+                        == requested_pulse
+                    ):
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError(
+                            "Yún did not confirm brushless pulse width "
+                            "within 1.5 seconds"
+                        )
+                    self._condition.wait(timeout=min(remaining, 0.1))
+            confirmed = self._stepper_payload_locked()
+            return {
+                "confirmed": True,
+                "pulse_us": confirmed.get(
+                    "stepper_brushless_motor_pulse_us"
+                ),
+                "setpoint_us": confirmed.get(
+                    "stepper_brushless_motor_setpoint_us"
+                ),
+                "stepper": confirmed,
                 "sample": self.latest,
             }
 

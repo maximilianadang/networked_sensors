@@ -104,7 +104,7 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertIn('themeColor(item.color)', CHARTS_JS)
         self.assertNotIn('ctx.fillStyle = "#12161b"', CHARTS_JS)
         self.assertNotIn("background: #242a32", DASHBOARD_CSS)
-        stepper_panel = INDEX_HTML.index("<h2>Yún Stepper Motion</h2>")
+        stepper_panel = INDEX_HTML.index("<h2>Yún Motor Control</h2>")
         metadata_panel = INDEX_HTML.index("<h2>Test Metadata</h2>")
         sources_panel = INDEX_HTML.index("<span>Source details</span>")
         self.assertLess(stepper_panel, metadata_panel)
@@ -142,12 +142,17 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
             DASHBOARD_CSS,
         )
         self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", DASHBOARD_CSS)
-        self.assertIn("height: 100dvh", DASHBOARD_CSS)
+        self.assertIn("min-height: 100dvh", DASHBOARD_CSS)
         self.assertIn(
-            "grid-template-rows: 86px 99px minmax(0, 1fr) 486px",
+            "grid-template-rows: 86px 99px minmax(0, 1fr) minmax(486px, auto)",
             DASHBOARD_CSS,
         )
-        self.assertIn("overflow: hidden", DASHBOARD_CSS)
+        self.assertEqual(DASHBOARD_CSS.count("overflow: hidden"), 3)
+        self.assertIn("overflow: hidden !important", DASHBOARD_CSS)
+        self.assertIn(
+            "never conceal a layout failure with overflow clipping",
+            DASHBOARD_CSS,
+        )
         self.assertIn("max-width: 300px", DASHBOARD_CSS)
         self.assertIn("min-height: 76px", DASHBOARD_CSS)
         self.assertIn("font-size: 1.25rem", DASHBOARD_CSS)

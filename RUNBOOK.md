@@ -15,8 +15,13 @@ compiled, uploaded, and operator-confirmed for Local Velocity. It uses Timer1
 for Local Velocity pulses, controls DM542T `ENA-` from D9, and fixes stale
 opposite-limit history. The exact-image two-endpoint retreat/D9 matrix and Web
 Position timing qualification remain.
-The page's **E-STOP** control inhibits
-STEP output through the laptop/USB/Yún-firmware chain. D9 removes holding
+The installed D12 brushless-ESC revision is upload-verified and reports 1000 us
+OFF. The repository's newer variable-pulse revision is compile-verified but is
+not uploaded because the ESC remains powered. It keeps 1000 us OFF and adds an
+integer 1000..2000 us ON setpoint, defaulting to 1200 us. Guarded keyboard key
+**M** toggles OFF/ON using that setpoint. The page's **E-STOP** control inhibits
+STEP output and forces the brushless output OFF through the
+laptop/USB/Yún-firmware chain. D9 removes holding
 current, but it does not isolate the 24 V driver supply and is not a hardwired,
 safety-rated emergency stop.
 Yún `network` is implemented; the repository bridge must be redeployed to the
@@ -224,13 +229,15 @@ Useful endpoints:
 | `/api/run/start`, `/api/run/stop` | disk-backed recording lifecycle |
 | `/api/metadata` | in-memory metadata save |
 | `/api/solenoid/toggle?n=0..3` | serialized simulated or real ESP32 control outside the merge lock; index 3 is GPIO 10 |
-| `/api/stepper/status` | mode, D4/D5 authority, fixed physical direction, D6/D8 limits, D9/ENA driver output, command, speed, and transport health; open-loop position fields are null |
+| `/api/stepper/status` | stepper/DRO state plus D12 brushless capability, variable-pulse capability, OFF/ON state, active pulse, and ON setpoint |
 | `/api/stepper/control-mode` | `{"web_position": true|false}`; D4 must be OFF and motion stopped |
 | `/api/stepper/home` | optional move to the D8 limit at fixed 1.5 mm/s; Web Position, D4 armed, D5 Reverse |
 | `/api/stepper/move` | positive relative travel magnitude and speed; D5 selects direction; fixed acceleration; simulation and T5 USB |
 | `/api/stepper/stop` | immediate Web Position motion abort; simulation and T5 USB |
-| `/api/stepper/estop` | latch the software E-STOP in either control mode; waits for fresh Yún confirmation |
+| `/api/stepper/estop` | latch software E-STOP, stop the stepper, and force brushless OFF; waits for fresh Yún confirmation |
 | `/api/stepper/estop/reset` | reset the latch while stopped with physical D4 OFF; waits for fresh Yún confirmation |
+| `/api/stepper/motor/toggle` | toggle D12 brushless output between 1000 us OFF and the configured ON pulse |
+| `/api/stepper/motor/pulse` | set integer `pulse_us` from 1000 through 2000; applies immediately if ON |
 | `/api/stepper/speed` | USB/network Local Velocity speed setpoint; `{"speed_mm_s": 3.0}`, D4 must be OFF; success waits for a fresh Yún configured-speed echo |
 | `/api/recordings` | completed recordings and active recording status |
 | `/api/export/latest` | latest completed export CSV; the page downloads it without navigating away from the live dashboard |
@@ -412,8 +419,16 @@ The coordinate uses 251.96850394 pulses/mm. Confirm it empirically with a short
 known pulse count and DRO-measured displacement in both directions before
 accepting dimensional accuracy. Changing DM542T SW5-SW8 invalidates it.
 
+The Yún Stepper Motion control card presents all stepper controls first, then
+the brushless block last. Enter an integer **Pulse width (us)** from 1000
+through 2000 and click **Apply pulse**. The setting is used the next time the
+motor turns ON, or applies immediately if it is already ON. Click the toggle or
+press **M** while no field/control is focused. Keys typed into input fields do
+nothing globally.
+
 The red **E-STOP** near the top is deliberately a one-click action: it
-sends `V1 E1`, aborts bounded motion or continuous Local Velocity, and remains
+sends `V1 E1`, aborts bounded motion or continuous Local Velocity, forces the
+brushless output to 1000 us OFF, and remains
 latched in the ATmega if the browser disconnects. While latched, the page
 disables motion controls. To reset, first put physical D4 OFF, then use
 **Reset E-STOP** and confirm; the Yún accepts `V1 E0` only while stopped with D4
@@ -651,6 +666,14 @@ uses D10/PB6/PCINT6 for the level-shifted scale clock and D11/PB7 for
 level-shifted data. It samples data on falling clock edges, validates the full
 52-bit frame, and never feeds a DRO value into motion, limits, homing, or the
 software E-STOP.
+
+### D12 brushless ESC pulse bring-up
+
+Before uploading, disconnect the ESC battery. After upload, verify D12 to GND
+using an oscilloscope or logic analyzer: 20 ms frame, 1000 us at boot and OFF,
+the selected 1000..2000 us width after one button/M toggle, live changes after
+**Apply pulse**, then 1000 us after E-STOP. Keep the motor mechanically unloaded
+for the first powered test.
 
 Run the existing dashboard with only the USB-backed Yún source:
 

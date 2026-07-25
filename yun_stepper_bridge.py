@@ -45,6 +45,8 @@ COMMAND_PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
         r"^V1 E[01]$",
+        r"^V1 B[01]$",
+        r"^V1 P(?:1[0-9]{3}|2000)$",
         r"^V1 S[0-9]{1,4}$",
         r"^V1 M[01]$",
         r"^V1 H$",
