@@ -633,6 +633,84 @@ when runnable behavior changes.
     ESP32/DXMR90 plots, merged recording, metadata, or export.
   - Reuse the T2 API and ownership rules; do not create another motion engine.
 
+- [ ] **T11 - describe the field dashboard with one declarative JSON manifest.**
+  - Make ordinary dashboard composition readable and editable from one
+    versioned local JSON file. The manifest order is the visual and keyboard
+    order: rows are top-to-bottom, and each row's children are left-to-right.
+    Keep the existing offline workflow: no Node, bundler, CDN, generated
+    frontend, or internet access is required to edit and reload the page.
+  - Use JSON rather than YAML for the first implementation because Python and
+    browsers already parse it without another field dependency. Include a
+    schema version and a documented example covering the complete current page.
+  - Define percentage semantics explicitly:
+    - top-level row `height_percent` values total 100% of the landing page's
+      usable `100dvh` area after browser chrome;
+    - panel `width_percent` values total 100% of their row;
+    - nested row/column groups use percentages relative to their immediate
+      parent;
+    - the renderer removes configured gaps before dividing the remaining track
+      space, so padding and gaps cannot silently make the page overflow;
+    - overlays such as Source Details declare their own bounded dimensions and
+      consume no landing-page row height.
+  - Represent the approved page as five named rows: system status, operator
+    controls, live metrics, equal-width plots, and the Stepper/Test Metadata
+    row. Preserve the current single-screen desktop behavior and explicit
+    responsive stacking order.
+  - Support recursive, human-readable layout groups. The initial manifest must
+    be able to express:
+    - the status row with stream, source-health, run, timestamp, and Source
+      Details drawer trigger;
+    - the Start/Stop/Export group, centered E-STOP/Reset/status group, and a
+      repeated Solenoid button group;
+    - metric cards and chart panels with labels, units, precision, colors, and
+      ordered data-series bindings;
+    - the 50/50 Yún Stepper Motion and Test Metadata panels;
+    - the Stepper panel's 50/50 piston and console split, with the DRO
+      value/zero controls above the remaining-height piston animation and
+      motion/interlocks stacked beside it;
+    - metadata field rows, widths, input types, and the Save action.
+  - Add a small component registry rather than encoding raw HTML in JSON.
+    Registered types should include status pills, control groups, metric cards,
+    charts, piston animation, stepper controls/interlocks, metadata fields, and
+    drawers. Layout and read-only data binding are declarative; tested component
+    modules continue to own interaction behavior.
+  - Make adding a read-only measurement a manifest-only edit once its field
+    already exists in the supervisor's merged sample: select the field, label,
+    unit, precision, panel type, series color, and placement. Allow only named,
+    tested reducers/formatters; do not evaluate arbitrary JSON expressions.
+    Derived operational values should remain authoritative backend fields.
+  - Preserve the safety boundary. The manifest may place and label E-STOP,
+    stepper, solenoid, and recording components, but it cannot create endpoints,
+    weaken Python/firmware limits, change command guards, or bypass fresh-device
+    acknowledgements. Adding a physical sensor still requires its source
+    adapter, merged schema, recording/export fields, and tests before the
+    manifest can display it.
+  - Validate the complete manifest at startup and in tests: schema version,
+    unique IDs, known component types, allowed data fields, recursive percentage
+    totals, valid overlay targets, and supported actions. Report a precise
+    location and reason for an invalid block; do not silently omit it or render
+    a blank dashboard.
+  - Migrate without a visual redesign:
+    1. define the schema and transcribe the existing page exactly;
+    2. add the recursive layout renderer and component registry;
+    3. drive status, metrics, charts, metadata, and repeated source/solenoid
+       elements from the manifest;
+    4. retain dedicated code behind safety-critical controls;
+    5. remove superseded layout markup/constants only after parity tests pass.
+  - Update `DASHBOARD-CODE-MAP.md` with a copy/edit/reload workflow and examples
+    for adding a metric, chart series, source status, metadata field, and panel.
+    Keep controller-enforced limits and backend schema locations conspicuous.
+  - Verification: schema/validator unit tests, manifest-to-DOM behavior tests,
+    all existing command/safety regressions, protocol drift check, and Firefox
+    visual comparison at the approved desktop content viewport plus laptop and
+    narrow responsive sizes. Confirm the desktop page still has no scrollbar
+    and Source Details remains a bounded overlay.
+  - **Gate:** a maintainer working offline can use one manifest to explain the
+    complete landing-page geometry, rearrange panels, and add an already
+    available measurement without editing HTML, CSS, or component JavaScript.
+    The rendered dashboard matches the approved layout, invalid manifests fail
+    clearly, and no operational or safety authority has moved into JSON.
+
 ## Acceptance definition
 
 This work is complete when the same laptop webpage operates in both supported
