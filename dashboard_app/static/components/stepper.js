@@ -1,3 +1,6 @@
+// PANEL: Motor Control — controls, DRO piston and Brushless motor.
+// Also owns Interlocks, E-STOP, and motion telemetry inside Source details.
+// Markup: index.html; appearance: dashboard.css (search the same panel name).
 import {API, postJson} from "../api.js";
 import {UI_CONFIG} from "../config.js";
 import {elements, numberValue, setText} from "../dom.js";
@@ -7,8 +10,10 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     "emergencyStop", "emergencyReset", "emergencyState", "stepperForm",
     "stepperDistanceField", "stepperDistance", "stepperSpeed", "stepperSpeedLabel",
     "stepperModeLocal", "stepperModeWeb", "stepperCommandField",
+    "stepperSoftwareDirection", "stepperDirectionForward", "stepperDirectionReverse",
     "stepperCommandInput", "stepperMove", "stepperHome", "stepperStop",
     "stepperApplySpeed", "stepperMessage", "stepperCommandFeedback",
+    "stepperSoftwareRun", "stepperRunReverse", "stepperRunStop", "stepperRunForward",
     "stepperState", "stepperConfiguredSpeed",
     "stepperEffectiveSpeed", "stepperMeasuredSpeed", "stepperPulseEngine",
     "stepperCommand", "stepperOwner", "stepperModeStatus", "stepperLocal",
@@ -21,7 +26,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     "stepperDroRawPosition", "stepperDroZeroDiagnostic", "stepperDroFrames",
     "stepperD5Label", "stepperManualDirection", "stepperDirectionStatus",
     "stepperDriverOutput", "stepperPositiveLimit", "stepperNegativeLimit",
-    "stepperLimitFilter", "stepperBlocked", "stepperSequence", "stepperTransport",
+    "stepperLimitFilter", "stepperBlocked", "stepperInterlocks", "stepperSequence", "stepperTransport",
     "brushlessMotorState", "brushlessMotorDetail", "brushlessMotorToggle",
     "brushlessMotorAction", "brushlessPulseWidth", "brushlessApplyPulse"
   ]);
@@ -68,11 +73,27 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   setText(els.stepperDroMaxLabel, "D8 top 0 mm");
   const modeInputs = [els.stepperModeLocal, els.stepperModeWeb];
 
+  function formatSetpoint(value, digits) {
+    return value.toFixed(digits).replace(/\.?0+$/, "");
+  }
+
+  function applyMotionPlan({speedMmS, distanceMm}) {
+    if (Number.isFinite(speedMmS)) {
+      els.stepperSpeed.value = formatSetpoint(speedMmS, 3);
+    }
+    if (Number.isFinite(distanceMm)) {
+      els.stepperDistance.value = formatSetpoint(distanceMm, 2);
+    }
+    setCommandFeedback();
+    updateControls();
+  }
+
   function updateControls() {
     const latest = getLatest();
     const distance = Number(els.stepperDistance.value);
     const speed = Number(els.stepperSpeed.value);
     const connected = latest && latest.stepper_connected === true;
+    const controllino = latest && latest.stepper_mode === "controllino";
     const enabled = latest && latest.stepper_local_enabled === true;
     const d4Off = latest && latest.stepper_d4_raw === "HIGH";
     const commandCapable = latest && latest.stepper_command_capable === true;
@@ -86,7 +107,9 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     const authorizedDirection = latest && latest.stepper_authorized_direction;
     // The operator enters a positive magnitude. Physical D5 supplies direction;
     // "both" is the simulator's forward default because it has no D5 input.
-    const selectedDirection = authorizedDirection === "both" ? "forward" : authorizedDirection;
+    const selectedDirection = controllino
+      ? (els.stepperDirectionReverse.checked ? "reverse" : "forward")
+      : authorizedDirection === "both" ? "forward" : authorizedDirection;
     const signedDistance = selectedDirection === "reverse"
       ? -distance
       : selectedDirection === "forward" ? distance : Number.NaN;
@@ -169,14 +192,24 @@ export function createStepperComponent({getLatest, applySample, limits}) {
         : "Reset the software latch; this does not start motion";
 
     els.stepperDistanceField.hidden = !webPositionMode;
+    els.stepperSoftwareDirection.hidden = !webPositionMode || !controllino;
     els.stepperCommandField.hidden = !webPositionMode;
     els.stepperMove.hidden = !webPositionMode;
     els.stepperHome.hidden = !webPositionMode;
     els.stepperStop.hidden = !webPositionMode;
     els.stepperApplySpeed.hidden = webPositionMode;
+    // D4/D5/D6/D8 do not exist on this Controllino installation; keeping an
+    // empty interlock block visible only wastes the height needed by controls.
+    els.stepperInterlocks.hidden = controllino;
+    els.stepperSoftwareRun.hidden = webPositionMode || !controllino;
+    els.stepperRunReverse.disabled = !connected || estopLatched || moving;
+    els.stepperRunForward.disabled = !connected || estopLatched || moving;
+    els.stepperRunStop.disabled = !connected || !moving;
     els.stepperDistance.disabled = !webPositionMode;
     els.stepperDistance.title = webPositionMode
-      ? "Positive travel magnitude; physical D5 selects Forward or Reverse"
+      ? controllino
+        ? "Positive travel magnitude; choose Forward or Reverse above"
+        : "Positive travel magnitude; physical D5 selects Forward or Reverse"
       : "Available only in Web Position mode";
     els.stepperCommandInput.disabled = !webPositionMode;
     els.stepperCommandInput.title = webPositionMode
@@ -439,7 +472,9 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     }[manualDirection] || manualDirection;
     const d5Raw = latest.stepper_d5_raw || "--";
     setText(els.stepperManualDirection, `${compactDirection} · ${d5Raw}`);
-    els.stepperManualDirection.title = `${manualDirection} / ${d5Raw}`;
+    const d5Qualified = latest.stepper_d5_qualified || d5Raw;
+    els.stepperManualDirection.title =
+      `${manualDirection} / raw ${d5Raw} / qualified ${d5Qualified}`;
     const hasD5Direction = connected &&
       ["HIGH", "LOW"].includes(d5Raw) &&
       ["forward", "reverse"].includes(manualDirection);
@@ -517,9 +552,17 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     setText(els.stepperNegativeLimit, `${negativeState} · ${d8Raw}${negativeLatch ? " · LATCHED" : ""}`);
     els.stepperPositiveLimit.title = `${positiveState} / raw ${latest.stepper_d6_raw || "--"}${positiveLatch}`;
     els.stepperNegativeLimit.title = `${negativeState} / raw ${latest.stepper_d8_raw || "--"}${negativeLatch}`;
-    setText(els.stepperLimitFilter, latest.stepper_limit_filter_capable === true
-      ? `${numberValue(latest, "stepper_limit_qualification_ms", 0)} ms qualification; rejected D6=${latest.stepper_positive_limit_glitch_count ?? "--"}, D8=${latest.stepper_negative_limit_glitch_count ?? "--"}`
-      : "Unavailable — firmware update required");
+    const directionFilterDetail =
+      latest.stepper_direction_filter_capable === true
+        ? `D5 ${numberValue(latest, "stepper_direction_qualification_ms", 0)} ms, rejected=${latest.stepper_direction_glitch_count ?? "--"}`
+        : "D5 unqualified";
+    const limitFilterDetail = latest.stepper_limit_filter_capable === true
+      ? `D6/D8 ${numberValue(latest, "stepper_limit_qualification_ms", 0)} ms, rejected=${latest.stepper_positive_limit_glitch_count ?? "--"}/${latest.stepper_negative_limit_glitch_count ?? "--"}`
+      : "D6/D8 unqualified";
+    setText(
+      els.stepperLimitFilter,
+      `${directionFilterDetail}; ${limitFilterDetail}`,
+    );
     const decisionReason = latest.stepper_blocked_reason || "none";
     const decisionText = estopLatched
       ? "E-STOP LATCHED: motion inhibited"
@@ -548,16 +591,21 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     setText(els.stepperSequence, latest.stepper_status_sequence ?? "--");
     setText(els.stepperTransport, latest.stepper_transport_error ||
       (connected ? "Connected" : "Waiting for status"));
-    if (!messageSticky && ["usb", "network"].includes(latest.stepper_mode)) {
-      const transportLabel = latest.stepper_mode === "network" ? "LAN" : "USB";
+    if (!messageSticky && ["usb", "network", "controllino"].includes(latest.stepper_mode)) {
+      const transportLabel = latest.stepper_mode === "usb" ? "USB" : "LAN";
+      const controllino = latest.stepper_mode === "controllino";
       setText(els.stepperMessage, !connected
-        ? "Yún disconnected"
+        ? "Motion controller disconnected"
         : !directionCalibrationSafe
           ? `${transportLabel} unsafe legacy direction mapping; upload fixed-direction firmware before motion`
           : commandCapable
             ? webPositionMode
-              ? "Web Position ready; D4 arms, D5 selects direction, and D6/D8 stop travel"
-              : "Local Speed: D4 runs/stops and D5 selects direction"
+              ? controllino
+                ? "Web Position ready; signed commands select direction (no limit switches connected)"
+                : "Web Position ready; D4 arms, D5 selects direction, and D6/D8 stop travel"
+              : controllino
+                ? "Local Speed uses software run/direction commands"
+                : "Local Speed: D4 runs/stops and D5 selects direction"
             : latest.stepper_speed_command_capable
               ? `${transportLabel} speed tuning ready; upload position-capable firmware for Home and Move`
               : `${transportLabel} diagnostics only; upload T4B firmware for speed tuning`);
@@ -570,9 +618,11 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     const latest = getLatest();
     const distance = Number(els.stepperDistance.value);
     const speed = Number(els.stepperSpeed.value);
-    const selectedDirection = latest?.stepper_authorized_direction === "both"
-      ? "forward"
-      : latest?.stepper_authorized_direction;
+    const selectedDirection = latest?.stepper_mode === "controllino"
+      ? (els.stepperDirectionReverse.checked ? "reverse" : "forward")
+      : latest?.stepper_authorized_direction === "both"
+        ? "forward"
+        : latest?.stepper_authorized_direction;
     if (selectedDirection !== "forward" && selectedDirection !== "reverse") {
       setText(els.stepperMessage, "Rejected: D5 direction is unavailable");
       setCommandFeedback("Move rejected: D5 direction is unavailable.");
@@ -582,6 +632,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     if ((Math.abs(distance) > confirmAt.distanceMm || speed > confirmAt.speedMmS) &&
         !window.confirm(`Confirm ${selectedDirection} move: ${distance} mm at ${speed} mm/s?`)) return false;
     const body = {distance_mm: distance, speed_mm_s: speed};
+    if (latest?.stepper_mode === "controllino") body.direction = selectedDirection;
     const commandId = els.stepperCommandInput.value.trim();
     if (commandId) body.command_id = commandId;
     motionRequestPending = "move";
@@ -867,6 +918,28 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       updateControls();
     }
   });
+  async function requestLocalRun(direction) {
+    messageSticky = true;
+    try {
+      const payload = await postJson(API.stepperLocalRun, {direction});
+      if (payload.sample) applySample(payload.sample);
+      setText(els.stepperMessage, direction === 0
+        ? "Local motion stopped"
+        : `Local ${direction > 0 ? "Forward" : "Reverse"} running`);
+    } catch (error) {
+      setText(els.stepperMessage, `Software run rejected: ${error.message}`);
+    } finally {
+      updateControls();
+    }
+  }
+  els.stepperRunReverse.addEventListener("click", () => void requestLocalRun(-1));
+  els.stepperRunStop.addEventListener("click", () => void requestLocalRun(0));
+  els.stepperRunForward.addEventListener("click", () => void requestLocalRun(1));
 
-  return {render, handleSpaceShortcut, handleMotorShortcut};
+  return {
+    render,
+    handleSpaceShortcut,
+    handleMotorShortcut,
+    applyMotionPlan
+  };
 }

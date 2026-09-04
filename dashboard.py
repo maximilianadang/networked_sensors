@@ -111,7 +111,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--stepper-source",
         choices=STEPPER_SOURCE_MODES,
         default="sim",
-        help="Yún stepper source mode",
+        help="stepper transport: Yún USB/bridge or direct Controllino Ethernet",
     )
     parser.add_argument(
         "--stepper-port",
@@ -127,13 +127,13 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--stepper-url",
         default=DEFAULT_STEPPER_NETWORK_URL,
-        help="Yún Linux bridge base URL when --stepper-source network",
+        help="Yún bridge or Controllino base URL for a network stepper source",
     )
     parser.add_argument(
         "--stepper-timeout",
         type=float,
         default=DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
-        help="Yún network status/command timeout in seconds",
+        help="stepper network status/command timeout in seconds",
     )
     parser.add_argument(
         "--dxmr90-host",

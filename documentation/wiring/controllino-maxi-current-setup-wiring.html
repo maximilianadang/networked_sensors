@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CONTROLLINO MAXI Automation motion-control wiring</title>
+<style>
+  :root{--v24:#e53935;--v5:#ef5350;--v33:#f58220;--gnd:#202326;--clock:#1976d2;--data:#7e57c2;--step:#149c63;--dir:#d39b00;--ena:#0097a7;--esc:#ef6c00;--input:#667984;--muted:#687178}
+  *{box-sizing:border-box} html,body{margin:0;background:#e9edef;font-family:Arial,Helvetica,sans-serif;color:#252a2e}
+  .page{position:relative;width:3000px;height:1700px;margin:0;background:#fff;border:1px solid #bcc3c7;overflow:hidden}
+  h1{position:absolute;left:55px;top:35px;margin:0;font-size:38px;letter-spacing:.2px}
+  .sub{position:absolute;left:58px;top:86px;font-size:17px;font-weight:700;letter-spacing:1.2px;color:#666}
+  .hardware{position:absolute;object-fit:contain;z-index:2;user-select:none}
+  .dro{left:35px;top:155px;width:540px;height:520px}.reader{left:555px;top:150px;width:470px;height:210px;border:2px solid #333}.breakout{left:720px;top:380px;width:330px;height:280px}.shifter{left:1025px;top:250px;width:410px;height:370px}.x1plug{left:1500px;top:170px;width:600px;height:675px}.controller{left:2100px;top:180px;width:800px;height:800px}.driver{left:880px;top:1080px;width:520px;height:335px}.esc{left:80px;top:1120px;width:600px;height:370px}
+  .label{position:absolute;z-index:12;background:#fff;padding:3px 7px;font-size:19px;font-weight:800;letter-spacing:.5px}.label small{display:block;color:#687178;font-size:14px;margin-top:3px}.dro-l{left:55px;top:125px}.reader-l{left:555px;top:118px}.breakout-l{left:735px;top:350px}.shifter-l{left:1030px;top:212px}.x1-l{left:1490px;top:120px}.control-l{left:2180px;top:145px}.driver-l{left:900px;top:1045px}.esc-l{left:105px;top:1082px}
+  .key{position:absolute;right:45px;top:35px;width:760px;border:2px solid #333;background:#fff;padding:12px 18px;z-index:15;text-align:center}.key h2{margin:0 0 8px;font-size:23px}.key span{font-size:16px;font-weight:900;margin:0 9px;white-space:nowrap}
+  .contract{position:absolute;left:55px;top:700px;width:770px;z-index:14}.contract h2{font-size:24px;margin:0 0 12px}.contract p{font-size:16px;line-height:1.35;margin:7px 0;font-weight:700}.contract b{display:inline-block;min-width:150px}.warning{position:absolute;left:55px;bottom:45px;width:755px;border-left:8px solid #f2b600;background:#fff7d6;padding:14px 18px;z-index:14;font-size:15px;line-height:1.38;font-weight:700}
+  .field-note{position:absolute;left:2050px;top:1080px;width:855px;border:2px solid #b8c0c5;background:#fff;padding:16px 20px;z-index:14}.field-note h2{font-size:22px;margin:0 0 9px}.field-note p{font-size:16px;line-height:1.38;margin:6px 0;font-weight:700}
+  svg{position:absolute;inset:0;width:3000px;height:1700px;z-index:7;pointer-events:none}.wire{fill:none;stroke-width:5;stroke-linejoin:round;stroke-linecap:square;filter:url(#halo)}.v24{stroke:var(--v24)}.v5{stroke:var(--v5)}.v33{stroke:var(--v33)}.gnd{stroke:var(--gnd)}.clock{stroke:var(--clock)}.data{stroke:var(--data)}.step{stroke:var(--step)}.dir{stroke:var(--dir)}.ena{stroke:var(--ena)}.escw{stroke:var(--esc)}.input{stroke:var(--input);stroke-width:4}.c-v24{color:var(--v24)}.c-v5{color:var(--v5)}.c-v33{color:var(--v33)}.c-gnd{color:var(--gnd)}.c-clock{color:var(--clock)}.c-data{color:var(--data)}.c-step{color:var(--step)}.c-dir{color:var(--dir)}.c-ena{color:var(--ena)}.c-esc{color:var(--esc)}.c-input{color:var(--input)}
+  .source{position:absolute;right:45px;bottom:18px;color:#848b90;font-size:11px;z-index:15}
+</style>
+</head>
+<body><main class="page">
+  <h1>CONTROLLINO MAXI AUTOMATION — PROPOSED MOTION-CONTROL WIRING</h1>
+  <div class="sub">100.101.00 · PHYSICAL PORT-TO-PORT MIGRATION FROM limit_switch_palas.ino</div>
+  <section class="key"><h2>KEY</h2><span class="c-v24">24V</span><span class="c-v33">3.3V</span><span class="c-v5">5V</span><span class="c-gnd">GND</span><span class="c-clock">CLOCK</span><span class="c-data">DATA</span><span class="c-step">STEP</span><span class="c-dir">DIR</span><span class="c-ena">ENA</span><span class="c-esc">ESC</span><span class="c-input">FIELD INPUT</span></section>
+
+  <img class="hardware dro" src="assets/igaging-single-axis.jpg" alt="iGaging AbsoluteDRO Plus">
+  <img class="hardware reader" src="assets/absolute-dro-reader-pads.png" alt="Opened DRO reader head">
+  <img class="hardware breakout" src="assets/micro-usb-female-terminal-cable-tight.png" alt="Micro-B breakout cable">
+  <img class="hardware shifter" src="assets/sparkfun-bob-12009-aligned-crop.png" alt="SparkFun BOB-12009 logic level shifter">
+  <img class="hardware x1plug" src="assets/controllino-26-position-terminal-plug-tight.png" alt="Official Controllino screwless 26-position terminal plug for X1">
+  <img class="hardware controller" src="assets/controllino-maxi-automation-top.jpg" alt="CONTROLLINO MAXI Automation top view with X1 and screw terminals">
+  <img class="hardware driver" src="assets/dm542t-logic-terminals.png" alt="DM542T logic terminals">
+  <img class="hardware esc" src="assets/badass-renegade-receiver-terminal.png" alt="BadAss Renegade ESC receiver connector">
+
+  <div class="label dro-l">iGAGING ABSOLUTEDRO PLUS<small>Post-surgery REQ → verified PCB GND</small></div>
+  <div class="label reader-l">OPENED READER HEAD</div>
+  <div class="label breakout-l">FEMALE MICRO-B BREAKOUT</div>
+  <div class="label shifter-l">BOB-12009 LEVEL SHIFTER<small>LV 3.3 V · HV 5 V</small></div>
+  <div class="label x1-l">X1 SCREWLESS TERMINAL PLUG · 99.900.04<small>Press orange button; insert stripped conductor into adjacent round port</small></div>
+  <div class="label control-l">CONTROLLINO MAXI AUTOMATION 100.101.00</div>
+  <div class="label driver-l">DM542T STEPPER DRIVER<small>5 V common-anode interface</small></div>
+  <div class="label esc-l">BADASS RENEGADE 130A HV OPTO ESC</div>
+
+  <section class="contract">
+    <h2>PROPOSED TERMINAL ASSIGNMENTS</h2>
+    <p><b>DRO BREAKOUT</b> + → LV · D− → LV1 · D+ → LV2 · − → GND · S unused</p>
+    <p><b>LEVEL SHIFTER</b> HV1 → X1 D51 · HV2 → X1 D50 · HV → X1 5V · GND → X1 GND · LV → X1 3V3</p>
+    <p><b>DM542T</b> X1 D3 → PUL− · X1 D2 → DIR− · X1 D4 → ENA− · X1 5V → PUL+/DIR+/ENA+</p>
+    <p><b>BRUSHLESS ESC</b> X1 D5 → receiver signal · X1 GND → receiver return</p>
+    <p><b>24 V INPUTS</b> AI0 RUN · AI1 DIRECTION · AI2 BOTTOM LIMIT · AI3 TOP LIMIT</p>
+  </section>
+
+  <section class="field-note">
+    <h2>24 V FIELD SWITCH HARNESS — ENDPOINT PHOTOS REQUIRED</h2>
+    <p>Power the MAXI Automation from regulated 24 VDC at the pictured 24V and GND supply terminals.</p>
+    <p>Rewire each dry contact to source fused +24 V into AI0–AI3. The former Yún contacts-to-GND / INPUT_PULLUP arrangement is not retained.</p>
+    <p>Fit the included orientation adapter into X1, then install terminal plug 99.900.04. Every discrete wire shown lands in the plug—not directly on the controller header pins.</p>
+  </section>
+
+  <div class="warning">POWER OFF ALL SUPPLIES BEFORE WIRING. This is a proposed migration allocation and requires matching ATmega2560/Controllino firmware. The MAXI Automation product page specifies a 24 VDC supply. Retain the physical limit switches as independent travel protection; DRO feedback remains diagnostic until separately qualified.</div>
+
+  <svg viewBox="0 0 3000 1700" aria-label="Proposed physical wiring routes">
+    <defs><filter id="halo" x="-10%" y="-10%" width="120%" height="120%"><feMorphology in="SourceAlpha" operator="dilate" radius="1.6" result="e"/><feFlood flood-color="#fff" result="w"/><feComposite in="w" in2="e" operator="in" result="o"/><feMerge><feMergeNode in="o"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+    <!-- Breakout to low side; endpoints remain on the verified component holes. -->
+    <path class="wire v33" d="M755 591 V680 H1315 V434"/>
+    <path class="wire clock" d="M766 591 V700 H1281 V531"/>
+    <path class="wire data" d="M778 591 V720 H1298 V482"/>
+    <path class="wire gnd" d="M789 591 V740 H1333 V386"/>
+
+    <!-- Shifter high side to calibrated X1 rows: D51/D50, 5V/GND, 3V3. -->
+    <path class="wire clock" d="M1077 531 H1450 V578 H1978"/>
+    <path class="wire data" d="M1094 482 H1430 V547 H2000"/>
+    <path class="wire v5" d="M1111 434 H1410 V369 H1728"/>
+    <path class="wire gnd" d="M1128 386 H1390 V337 H1750"/>
+    <path class="wire v33" d="M1315 434 V765 H1470 V568 H2025"/>
+
+    <!-- X1 raw GPIO to DM542T and ESC. -->
+    <path class="wire step" d="M1878 494 H1460 V990 H1480 V1240 H1380"/>
+    <path class="wire dir" d="M1875 442 H2140 V1015 H1505 V1283 H1380"/>
+    <path class="wire ena" d="M1900 463 H2160 V1040 H1530 V1327 H1380"/>
+    <path class="wire v5" d="M1728 369 H1600 V1065 H1555 V1218 H1380 M1555 1218 V1261 H1380 M1555 1261 V1305 H1380"/>
+    <path class="wire escw" d="M1903 515 H1440 V1080 H725 V1320 H660"/>
+    <path class="wire gnd" d="M1750 337 H2180 V1105 H750 V1343 H665"/>
+
+    <!-- 24 V controller supply; external PSU endpoints intentionally not invented. -->
+    <path class="wire gnd" d="M2569 298 V95 H2860"/>
+    <path class="wire v24" d="M2675 298 V75 H2860"/>
+
+    <!-- AI0..AI3 field inputs terminate at their photographed screw heads; remote switch ends await photos. -->
+    <path class="wire input" d="M2267 753 V1030 H2320"/>
+    <path class="wire input" d="M2297 753 V1010 H2340"/>
+    <path class="wire input" d="M2328 753 V990 H2360"/>
+    <path class="wire input" d="M2359 753 V970 H2380"/>
+  </svg>
+  <div class="source">Sources: CONTROLLINO MAXI Automation official product photo and Pinout V1.1 · current project wiring assets · proposed mapping requires firmware migration</div>
+</main></body></html>

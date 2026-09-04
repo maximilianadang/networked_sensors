@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from http.client import HTTPException
 from typing import BinaryIO, Iterator, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import ProxyHandler, Request, build_opener
 
 try:
@@ -71,7 +71,7 @@ SIMULATION_SCENARIOS = (
     "all_stale",
 )
 SOURCE_MODES = ("sim", "real", "off")
-STEPPER_SOURCE_MODES = ("sim", "usb", "network", "off")
+STEPPER_SOURCE_MODES = ("sim", "usb", "network", "controllino", "off")
 DXMR90_DATA_PATHS = ("direct", "republished")
 DEFAULT_STEPPER_USB_PORT = "/dev/ttyACM0"
 DEFAULT_STEPPER_USB_BAUD = 9600
@@ -82,6 +82,7 @@ DEFAULT_STEPPER_STEPS_PER_MM = 1.0 / DEFAULT_STEPPER_MM_PER_PULSE
 DEFAULT_STEPPER_TRAVEL_MM = 137.18
 DEFAULT_STEPPER_HOME_SPEED_MM_S = 1.5
 DEFAULT_STEPPER_LIMIT_QUALIFICATION_MS = 5.0
+DEFAULT_STEPPER_DIRECTION_QUALIFICATION_MS = 10.0
 DEFAULT_BRUSHLESS_PULSE_US = 1200
 MIN_BRUSHLESS_PULSE_US = 1000
 MAX_BRUSHLESS_PULSE_US = 2000
@@ -398,10 +399,14 @@ class SimulatedStepperSource:
         "stepper_limit_qualification_ms",
         "stepper_positive_limit_glitch_count",
         "stepper_negative_limit_glitch_count",
+        "stepper_direction_filter_capable",
+        "stepper_direction_qualification_ms",
+        "stepper_direction_glitch_count",
         "stepper_d6_raw",
         "stepper_d8_raw",
         "stepper_d4_raw",
         "stepper_d5_raw",
+        "stepper_d5_qualified",
         "stepper_manual_direction",
         "stepper_direction_mapping",
         "stepper_blocked",
@@ -738,10 +743,16 @@ class SimulatedStepperSource:
             "stepper_limit_qualification_ms": DEFAULT_STEPPER_LIMIT_QUALIFICATION_MS,
             "stepper_positive_limit_glitch_count": 0,
             "stepper_negative_limit_glitch_count": 0,
+            "stepper_direction_filter_capable": True,
+            "stepper_direction_qualification_ms": (
+                DEFAULT_STEPPER_DIRECTION_QUALIFICATION_MS
+            ),
+            "stepper_direction_glitch_count": 0,
             "stepper_d6_raw": "LOW" if self._positive_limit_active else "HIGH",
             "stepper_d8_raw": "LOW" if self._negative_limit_active else "HIGH",
             "stepper_d4_raw": "LOW" if self._local_enabled else "HIGH",
             "stepper_d5_raw": "HIGH",
+            "stepper_d5_qualified": "HIGH",
             "stepper_manual_direction": "not_applicable",
             "stepper_direction_mapping": "not_applicable",
             "stepper_blocked": self._state in ("limit_blocked", "emergency_stop"),
@@ -845,9 +856,26 @@ class UsbStepperSource:
                 isinstance(limit_diagnostics_value, bool)
                 or not isinstance(limit_diagnostics_value, int)
                 or limit_diagnostics_value < 0
-                or limit_diagnostics_value > 0x3FFFF
+                or limit_diagnostics_value > 0xFFFFFFF
             ):
-                raise ValueError("USB stepper field lx must be in 0..262143")
+                raise ValueError("USB stepper field lx must be in 0..268435455")
+            direction_filter_capable = bool(
+                limit_diagnostics_value & (1 << 27)
+            )
+            if limit_diagnostics_value > 0x3FFFF and not direction_filter_capable:
+                raise ValueError(
+                    "USB stepper field lx extended bits require D5 capability"
+                )
+            direction_qualified_high = (
+                bool(limit_diagnostics_value & (1 << 26))
+                if direction_filter_capable
+                else d5 == 1
+            )
+            direction_glitch_count = (
+                (limit_diagnostics_value >> 18) & 0xFF
+                if direction_filter_capable
+                else None
+            )
             positive_active = bool(limit_diagnostics_value & (1 << 17))
             negative_active = bool(limit_diagnostics_value & (1 << 16))
             positive_limit_glitch_count = (limit_diagnostics_value >> 8) & 0xFF
@@ -859,6 +887,9 @@ class UsbStepperSource:
             negative_active = d8 == 0
             positive_limit_glitch_count = None
             negative_limit_glitch_count = None
+            direction_filter_capable = False
+            direction_qualified_high = d5 == 1
+            direction_glitch_count = None
         positive_latched = cls._wire_level(payload, "lp") == 1
         negative_latched = cls._wire_level(payload, "ln") == 1
         blocked = cls._wire_level(payload, "b") == 1
@@ -1108,7 +1139,9 @@ class UsbStepperSource:
             boot_armed = True
 
         local_enabled = d4 == 0 and boot_armed and not estop_latched
-        manual_direction = "reverse" if d5 == 0 else "forward"
+        manual_direction = (
+            "forward" if direction_qualified_high else "reverse"
+        )
         logical_speed_sps = speed_sps * direction_sign
         if estop_latched:
             moving = False
@@ -1232,10 +1265,20 @@ class UsbStepperSource:
             ),
             "stepper_positive_limit_glitch_count": positive_limit_glitch_count,
             "stepper_negative_limit_glitch_count": negative_limit_glitch_count,
+            "stepper_direction_filter_capable": direction_filter_capable,
+            "stepper_direction_qualification_ms": (
+                DEFAULT_STEPPER_DIRECTION_QUALIFICATION_MS
+                if direction_filter_capable
+                else None
+            ),
+            "stepper_direction_glitch_count": direction_glitch_count,
             "stepper_d6_raw": "LOW" if d6 == 0 else "HIGH",
             "stepper_d8_raw": "LOW" if d8 == 0 else "HIGH",
             "stepper_d4_raw": "LOW" if d4 == 0 else "HIGH",
             "stepper_d5_raw": "LOW" if d5 == 0 else "HIGH",
+            "stepper_d5_qualified": (
+                "HIGH" if direction_qualified_high else "LOW"
+            ),
             "stepper_manual_direction": manual_direction,
             "stepper_direction_mapping": (
                 "inverted" if direction_sign == -1 else "normal"
@@ -1533,25 +1576,9 @@ class UsbStepperSource:
             raise RuntimeError("Yún firmware does not support bounded moves")
         if values.get("stepper_control_mode") != "web_position":
             raise RuntimeError("select Web Position mode before moving")
-        if not values.get("stepper_local_enabled"):
-            raise RuntimeError("turn D4 ON to arm the move")
         if values.get("stepper_moving"):
             raise RuntimeError("stepper is busy")
-        requested_direction = "forward" if delta_steps > 0 else "reverse"
-        if values.get("stepper_authorized_direction") != requested_direction:
-            raise RuntimeError(
-                f"D5 must authorize {requested_direction.title()} for this move"
-            )
-        if delta_steps > 0 and (
-            values.get("stepper_positive_limit_active")
-            or values.get("stepper_positive_limit_latched")
-        ):
-            raise RuntimeError("positive limit blocks positive motion")
-        if delta_steps < 0 and (
-            values.get("stepper_negative_limit_active")
-            or values.get("stepper_negative_limit_latched")
-        ):
-            raise RuntimeError("negative limit blocks negative motion")
+        self._validate_move_authority(values, delta_steps)
 
         if command_id is None:
             resolved_name = f"{self.mode}-{self._next_command_id:05d}"
@@ -1566,6 +1593,36 @@ class UsbStepperSource:
         command = f"V1 G{delta_steps},{speed_sps},{wire_id}\n".encode("ascii")
         self._write_command(command, "move")
         return self.status()
+
+    def _validate_move_authority(
+        self,
+        values: Mapping[str, float | int | bool | str | None],
+        delta_steps: int,
+    ) -> None:
+        """Apply the physical Yún direction/limit interlocks before a move."""
+
+        if not values.get("stepper_local_enabled"):
+            raise RuntimeError("turn D4 ON to arm the move")
+        requested_direction = "forward" if delta_steps > 0 else "reverse"
+        if values.get("stepper_authorized_direction") != requested_direction:
+            raise RuntimeError(
+                f"D5 must authorize {requested_direction.title()} for this move"
+            )
+        self._validate_directional_limits(values, delta_steps)
+
+    @staticmethod
+    def _validate_directional_limits(values: Mapping[str, object], delta_steps: int) -> None:
+        """Respect reported directional limits for either controller transport."""
+        if delta_steps > 0 and (
+            values.get("stepper_positive_limit_active")
+            or values.get("stepper_positive_limit_latched")
+        ):
+            raise RuntimeError("positive limit blocks positive motion")
+        if delta_steps < 0 and (
+            values.get("stepper_negative_limit_active")
+            or values.get("stepper_negative_limit_latched")
+        ):
+            raise RuntimeError("negative limit blocks negative motion")
 
     def stop(self) -> Mapping[str, float | int | bool | str | None]:
         values = self._require_connected()
@@ -1639,6 +1696,8 @@ class NetworkStepperSource(UsbStepperSource):
     """
 
     mode = "network"
+    status_path = "/v1/status"
+    command_path = "/v1/command"
 
     def __init__(
         self,
@@ -1670,6 +1729,36 @@ class NetworkStepperSource(UsbStepperSource):
         self._generation = 0
         self._emitted_generation = 0
 
+    def _decode_network_status(
+        self, body: str
+    ) -> dict[str, float | int | bool | str | None]:
+        return self.decode_status_line(body)
+
+    def _command_request(self, command_text: str) -> Request:
+        return Request(
+            f"{self.base_url}{self.command_path}",
+            data=command_text.encode("ascii"),
+            headers={
+                "Accept": "application/json",
+                "Cache-Control": "no-store",
+                "Content-Type": "text/plain; charset=us-ascii",
+            },
+            method="POST",
+        )
+
+    @staticmethod
+    def _acknowledgement_error(payload: object) -> str | None:
+        if (
+            isinstance(payload, dict)
+            and payload.get("v") == 1
+            and payload.get("type") == "ack"
+            and payload.get("accepted") is True
+        ):
+            return None
+        if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+            return str(payload["error"])
+        return "invalid acknowledgement"
+
     def _transport_connected(self) -> bool:
         with self._state_lock:
             return self._last_values is not None and self.last_error is None
@@ -1680,7 +1769,7 @@ class NetworkStepperSource(UsbStepperSource):
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._run,
-            name="yun-stepper-network-source",
+            name=f"{self.mode}-stepper-network-source",
             daemon=True,
         )
         self._thread.start()
@@ -1690,7 +1779,7 @@ class NetworkStepperSource(UsbStepperSource):
             self.last_error = message
 
     def _fetch_status(self) -> None:
-        url = f"{self.base_url}/v1/status"
+        url = f"{self.base_url}{self.status_path}"
         request = Request(
             url,
             headers={"Accept": "application/json", "Cache-Control": "no-store"},
@@ -1699,7 +1788,7 @@ class NetworkStepperSource(UsbStepperSource):
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 body = response.read(4096).decode("utf-8", errors="replace").strip()
-            values = self.decode_status_line(body)
+            values = self._decode_network_status(body)
         except (
             HTTPError,
             URLError,
@@ -1712,11 +1801,10 @@ class NetworkStepperSource(UsbStepperSource):
             return
 
         decoded_command_id = values.get("stepper_command_id")
-        if isinstance(decoded_command_id, str) and decoded_command_id.startswith(
-            "network-"
-        ):
+        prefix = f"{self.mode}-"
+        if isinstance(decoded_command_id, str) and decoded_command_id.startswith(prefix):
             try:
-                wire_id = int(decoded_command_id[8:])
+                wire_id = int(decoded_command_id[len(prefix):])
             except ValueError:
                 wire_id = 0
             resolved_name = self._command_names.get(wire_id)
@@ -1757,17 +1845,8 @@ class NetworkStepperSource(UsbStepperSource):
 
     def _write_command(self, command: bytes, description: str) -> None:
         command_text = command.decode("ascii").strip()
-        url = f"{self.base_url}/v1/command"
-        request = Request(
-            url,
-            data=command_text.encode("ascii"),
-            headers={
-                "Accept": "application/json",
-                "Cache-Control": "no-store",
-                "Content-Type": "text/plain; charset=us-ascii",
-            },
-            method="POST",
-        )
+        request = self._command_request(command_text)
+        url = request.full_url
         with self._command_lock:
             self.pending_command_error = None
             try:
@@ -1801,14 +1880,12 @@ class NetworkStepperSource(UsbStepperSource):
                     f"network stepper {description} command failed: {exc}"
                 ) from exc
 
-            if (
-                not isinstance(acknowledgement, dict)
-                or acknowledgement.get("v") != 1
-                or acknowledgement.get("type") != "ack"
-                or acknowledgement.get("accepted") is not True
-            ):
+            acknowledgement_error = self._acknowledgement_error(acknowledgement)
+            if acknowledgement_error is not None:
+                self.pending_command_error = acknowledgement_error
                 raise RuntimeError(
-                    f"network stepper {description} returned an invalid acknowledgement"
+                    f"network stepper {description} command rejected: "
+                    f"{acknowledgement_error}"
                 )
             self._set_error(None)
 
@@ -1828,6 +1905,112 @@ class NetworkStepperSource(UsbStepperSource):
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=max(1.0, self.timeout + self.period_s))
+
+
+class ControllinoStepperSource(NetworkStepperSource):
+    """Direct Ethernet transport for the Controllino MAXI motion firmware."""
+
+    mode = "controllino"
+    status_path = "/status"
+    command_path = "/command"
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        self._synthetic_sequence = 0
+
+    def _command_request(self, command_text: str) -> Request:
+        url = f"{self.base_url}{self.command_path}?value={quote(command_text, safe='')}"
+        return Request(
+            url,
+            data=b"",
+            headers={"Accept": "application/json", "Cache-Control": "no-store"},
+            method="POST",
+        )
+
+    @staticmethod
+    def _acknowledgement_error(payload: object) -> str | None:
+        if (
+            isinstance(payload, dict)
+            and payload.get("v") == 1
+            and payload.get("t") == "a"
+        ):
+            if payload.get("ok") in (1, True):
+                return None
+            error = payload.get("e")
+            return str(error) if isinstance(error, str) and error else "rejected"
+        return "invalid acknowledgement"
+
+    def _decode_network_status(
+        self, body: str
+    ) -> dict[str, float | int | bool | str | None]:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Controllino status is not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Controllino status must be a JSON object")
+
+        # The Controllino truthfully uses -1/0 for absent switches and DRO.
+        # Adapt those unavailable inputs to the legacy decoder, then explicitly
+        # remove their capabilities from the dashboard-facing result.
+        self._synthetic_sequence += 1
+        payload.setdefault("q", self._synthetic_sequence)
+        absent_limits = []
+        for pin, side in (("d6", "positive"), ("d8", "negative")):
+            level = payload.get(pin)
+            if type(level) is not int or level not in (-1, 0, 1):
+                raise ValueError(f"Controllino {pin} must be -1, 0, or 1")
+            if level == -1:
+                absent_limits.append((pin, side))
+                payload[pin] = 1
+        if absent_limits:
+            payload.pop("lx", None)
+        if payload.get("dc") == 0:
+            for key in ("dc", "df", "dr", "dd", "da", "dq", "dx"):
+                payload.pop(key, None)
+        values = self.decode_status_line(json.dumps(payload))
+        values.update(
+            {
+                "stepper_local_enabled": not bool(values["stepper_estop_latched"]),
+                "stepper_authorized_direction": "both",
+                "stepper_home_capable": False,
+                "stepper_control_owner": (
+                    str(values["stepper_control_owner"]).replace(
+                        "manual_d4_d5+", "software_local_speed+"
+                    )
+                ),
+            }
+        )
+        for pin, side in absent_limits:
+            values[f"stepper_{pin}_raw"] = None
+            values[f"stepper_{side}_limit_active"] = None
+            values[f"stepper_{side}_limit_latched"] = None
+        return values
+
+    def _validate_move_authority(
+        self,
+        values: Mapping[str, float | int | bool | str | None],
+        delta_steps: int,
+    ) -> None:
+        # Signed commands supply direction authority; preserve any limits
+        # reported by newer firmware, even though this installation lacks them.
+        self._validate_directional_limits(values, delta_steps)
+
+    def set_local_run(
+        self, direction: object
+    ) -> Mapping[str, float | int | bool | str | None]:
+        if isinstance(direction, bool) or direction not in (-1, 0, 1):
+            raise ValueError("direction must be -1, 0, or 1")
+        values = self._require_connected()
+        if values.get("stepper_control_mode") != "local_velocity":
+            raise RuntimeError("select Local Speed mode before using software run")
+        if direction and values.get("stepper_estop_latched"):
+            raise RuntimeError("reset the software E-STOP before running")
+        self._write_command(
+            f"V1 R{int(direction)}\n".encode("ascii"),
+            "software run",
+        )
+        return self.status()
 
 
 class RealEsp32Source:
@@ -2519,6 +2702,11 @@ def make_sources(
         stepper = UsbStepperSource(port=stepper_port, baud=stepper_baud)
     elif stepper_source == "network":
         stepper = NetworkStepperSource(
+            base_url=stepper_network_url,
+            timeout=stepper_network_timeout,
+        )
+    elif stepper_source == "controllino":
+        stepper = ControllinoStepperSource(
             base_url=stepper_network_url,
             timeout=stepper_network_timeout,
         )

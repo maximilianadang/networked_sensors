@@ -13,8 +13,16 @@ from typing import Any
 
 
 SYSTEM_CONFIG_VERSION = 1
+DEFAULT_POWDER_MASS_PER_STEPPER_TRAVEL_G_PER_MM = 2.4
 DEFAULT_SYSTEM_CONFIG: dict[str, object] = {
     "version": SYSTEM_CONFIG_VERSION,
+    "geometry": {
+        # Equivalent to (g/s) / (mm/s). Powder flow divided by this value
+        # gives the required linear stepper speed.
+        "powder_mass_per_stepper_travel_g_per_mm": (
+            DEFAULT_POWDER_MASS_PER_STEPPER_TRAVEL_G_PER_MM
+        ),
+    },
     "stepper": {
         "dro_zero_raw_mm": None,
     },
@@ -47,8 +55,35 @@ class SystemConfig:
             raise ValueError(
                 f"system config {self.path} must contain a stepper object"
             )
-        self._validate_dro_zero(stepper.get("dro_zero_raw_mm"))
-        return payload
+        dro_zero_raw_mm = self._validate_dro_zero(
+            stepper.get("dro_zero_raw_mm")
+        )
+        geometry = payload.get("geometry")
+        if geometry is None:
+            # Version-1 files created before geometry was added remain valid.
+            geometry = deepcopy(DEFAULT_SYSTEM_CONFIG["geometry"])
+        if not isinstance(geometry, dict):
+            raise ValueError(
+                f"system config {self.path} must contain a geometry object"
+            )
+        powder_mass_per_travel = self._validate_positive_finite(
+            geometry.get(
+                "powder_mass_per_stepper_travel_g_per_mm",
+                DEFAULT_POWDER_MASS_PER_STEPPER_TRAVEL_G_PER_MM,
+            ),
+            "geometry.powder_mass_per_stepper_travel_g_per_mm",
+        )
+
+        normalized = deepcopy(payload)
+        normalized_stepper = deepcopy(stepper)
+        normalized_stepper["dro_zero_raw_mm"] = dro_zero_raw_mm
+        normalized_geometry = deepcopy(geometry)
+        normalized_geometry[
+            "powder_mass_per_stepper_travel_g_per_mm"
+        ] = powder_mass_per_travel
+        normalized["stepper"] = normalized_stepper
+        normalized["geometry"] = normalized_geometry
+        return normalized
 
     @staticmethod
     def _validate_dro_zero(value: object) -> float | None:
@@ -61,12 +96,31 @@ class SystemConfig:
             raise ValueError("stepper.dro_zero_raw_mm must be finite or null")
         return parsed
 
+    @staticmethod
+    def _validate_positive_finite(value: object, key: str) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be a positive finite number")
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0:
+            raise ValueError(f"{key} must be a positive finite number")
+        return parsed
+
     @property
     def stepper_dro_zero_raw_mm(self) -> float | None:
         with self._lock:
             stepper = self._values["stepper"]
             assert isinstance(stepper, dict)
             return self._validate_dro_zero(stepper.get("dro_zero_raw_mm"))
+
+    @property
+    def powder_mass_per_stepper_travel_g_per_mm(self) -> float:
+        with self._lock:
+            geometry = self._values["geometry"]
+            assert isinstance(geometry, dict)
+            return self._validate_positive_finite(
+                geometry.get("powder_mass_per_stepper_travel_g_per_mm"),
+                "geometry.powder_mass_per_stepper_travel_g_per_mm",
+            )
 
     def set_stepper_dro_zero_raw_mm(self, value: float) -> float:
         parsed = self._validate_dro_zero(value)

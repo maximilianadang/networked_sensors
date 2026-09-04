@@ -1,3 +1,6 @@
+// SHARED PANELS: Pressure (bar), ESP32 Mass Flow (g/min), SICK Mass Flow (g/min).
+// Shared drawing engine. Edit each panel's series in config.js, its heading
+// and legend in index.html, and its appearance in dashboard.css.
 import {UI_CONFIG} from "./config.js";
 
 function themeColor(name) {

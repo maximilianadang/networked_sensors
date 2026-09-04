@@ -1,0 +1,4 @@
+interface:
+  display_name: "Physical Wiring Layout"
+  short_description: "Build clear photo-based hardware wiring sheets"
+  default_prompt: "Use $physical-wiring-layout to create a single-page physical wiring layout for this hardware."

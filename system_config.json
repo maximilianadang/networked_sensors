@@ -1,6 +1,9 @@
 {
+  "geometry": {
+    "powder_mass_per_stepper_travel_g_per_mm": 2.4
+  },
   "stepper": {
-    "dro_zero_raw_mm": 133.45
+    "dro_zero_raw_mm": 137.18
   },
   "version": 1
 }

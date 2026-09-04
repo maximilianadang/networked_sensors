@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
@@ -21,6 +22,7 @@ from networked_sensors.dashboard import (
     load_dashboard_asset,
     parse_args,
 )
+from networked_sensors.recorder import FlowRunRecorder
 from networked_sensors.supervisor_core import (
     RealEsp32Source,
     SimulatedDxmr90Source,
@@ -36,6 +38,7 @@ CHARTS_JS = load_dashboard_asset("charts.js")
 CONFIG_JS = load_dashboard_asset("config.js")
 DOM_JS = load_dashboard_asset("dom.js")
 METRICS_JS = load_dashboard_asset("components/metrics.js")
+METADATA_JS = load_dashboard_asset("components/metadata.js")
 SOURCES_JS = load_dashboard_asset("components/sources.js")
 TOOLBAR_JS = load_dashboard_asset("components/toolbar.js")
 
@@ -104,19 +107,47 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertIn('themeColor(item.color)', CHARTS_JS)
         self.assertNotIn('ctx.fillStyle = "#12161b"', CHARTS_JS)
         self.assertNotIn("background: #242a32", DASHBOARD_CSS)
-        stepper_panel = INDEX_HTML.index("<h2>Yún Motor Control</h2>")
+        stepper_panel = INDEX_HTML.index("<h2>Motor Control</h2>")
         metadata_panel = INDEX_HTML.index("<h2>Test Metadata</h2>")
         sources_panel = INDEX_HTML.index("<span>Source details</span>")
         self.assertLess(stepper_panel, metadata_panel)
         self.assertLess(stepper_panel, sources_panel)
+        self.assertLess(metadata_panel, sources_panel)
+        self.assertLess(
+            INDEX_HTML.index("</section>", metadata_panel),
+            sources_panel,
+        )
         self.assertIn('<article class="control-panel stepper-panel">', INDEX_HTML)
         self.assertIn('<article class="metadata-panel">', INDEX_HTML)
         self.assertIn('<details class="source-panel source-drawer">', INDEX_HTML)
+        source_drawer_rule = DASHBOARD_CSS.split(".source-drawer {", 1)[1].split(
+            "}",
+            1,
+        )[0]
+        source_body_rule = DASHBOARD_CSS.split(
+            ".source-drawer .source-body {",
+            1,
+        )[1].split("}", 1)[0]
+        self.assertNotIn("position: fixed", source_drawer_rule)
+        self.assertIn("width: 100%", source_drawer_rule)
+        self.assertIn("position: static", source_body_rule)
+        self.assertNotIn("padding-right: 265px", DASHBOARD_CSS)
         self.assertIn(
-            '<label>Powder flow rate<input name="powder_flow_rate_g_per_min"',
+            '<label>Powder flow rate (g/s)<input name="powder_flow_rate_g_per_s"',
             INDEX_HTML,
         )
-        self.assertIn('<label>Description<input name="description"', INDEX_HTML)
+        self.assertIn(
+            '<label>Desired test duration (s)<input name="test_duration_s"',
+            INDEX_HTML,
+        )
+        self.assertLess(
+            INDEX_HTML.index('name="powder_flow_rate_g_per_s"'),
+            INDEX_HTML.index('name="test_duration_s"'),
+        )
+        self.assertIn(
+            '<label class="wide">Description<input name="description"',
+            INDEX_HTML,
+        )
         self.assertIn('class="wide metadata-notes"', INDEX_HTML)
         self.assertIn(
             ".lower-grid {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(0, 1fr));",
@@ -130,6 +161,24 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertNotIn('id="recordingText"', INDEX_HTML)
         self.assertNotIn('class="readout"', INDEX_HTML)
         self.assertIn('id="clockText" class="clock-text"', INDEX_HTML)
+        self.assertIn("Dashboard connecting", INDEX_HTML)
+        self.assertIn("Motion controller", INDEX_HTML)
+        self.assertIn("Not recording", INDEX_HTML)
+        self.assertIn(
+            "`Dashboard ${label.toLowerCase()}`",
+            APP_JS,
+        )
+        self.assertIn(
+            'stepperMode === "controllino" ? "Controllino MAXI" : "Arduino Yun"',
+            SOURCES_JS,
+        )
+        self.assertIn(
+            'recording ? "Recording" : "Not recording"',
+            TOOLBAR_JS,
+        )
+        self.assertIn("date.toISOString()", TOOLBAR_JS)
+        self.assertIn('} UTC`', TOOLBAR_JS)
+        self.assertNotIn("date.toLocaleString", TOOLBAR_JS)
         self.assertIn("font-size: 1.25rem", DASHBOARD_CSS)
         self.assertIn(">E-STOP</button>", INDEX_HTML)
         self.assertNotIn("SOFTWARE E-STOP", INDEX_HTML)
@@ -144,9 +193,12 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertIn("grid-template-columns: repeat(4, minmax(0, 1fr))", DASHBOARD_CSS)
         self.assertIn("min-height: 100dvh", DASHBOARD_CSS)
         self.assertIn(
-            "grid-template-rows: 86px 99px minmax(0, 1fr) minmax(486px, auto)",
+            "clamp(56px, 8dvh, 72px)",
             DASHBOARD_CSS,
         )
+        self.assertIn("clamp(60px, 8dvh, 82px)", DASHBOARD_CSS)
+        self.assertIn("minmax(105px, 2fr)", DASHBOARD_CSS)
+        self.assertIn("minmax(375px, 3fr)", DASHBOARD_CSS)
         self.assertEqual(DASHBOARD_CSS.count("overflow: hidden"), 3)
         self.assertIn("overflow: hidden !important", DASHBOARD_CSS)
         self.assertIn(
@@ -199,7 +251,7 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
 
     def test_dashboard_metric_grid_uses_channel_and_open_line_summaries(self) -> None:
         self.assertIn(
-            "grid-template-columns: repeat(5, minmax(150px, 1fr))",
+            "grid-template-columns: repeat(6, minmax(140px, 1fr))",
             DASHBOARD_CSS,
         )
         self.assertIn("<label>ESP32 Pressure</label>", INDEX_HTML)
@@ -219,6 +271,16 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
             'numberValue(sample, "esp32_open_flow_gmin", digits.massFlow)',
             METRICS_JS,
         )
+        self.assertIn("<label>Air:Powder Ratio</label>", INDEX_HTML)
+        self.assertIn('id="mAirPowderRatio"', INDEX_HTML)
+        self.assertIn(
+            "airFlowGPerMin / (powderFlowGPerS * 60)",
+            METRICS_JS,
+        )
+        self.assertLess(
+            INDEX_HTML.index("<label>Open-Line Air Flow</label>"),
+            INDEX_HTML.index("<label>Air:Powder Ratio</label>"),
+        )
 
         self.assertIn("<label>SICK Flow · Solenoid 4</label>", INDEX_HTML)
         self.assertIn(
@@ -227,6 +289,19 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         )
         self.assertIn("<label>Heartbeat</label>", INDEX_HTML)
         self.assertNotIn("<label>P combined</label>", INDEX_HTML)
+
+    def test_powder_metadata_derives_web_position_setpoints(self) -> None:
+        self.assertIn(
+            "geometry.powder_mass_per_stepper_travel_g_per_mm",
+            METADATA_JS,
+        )
+        self.assertIn(
+            "const speedMmS = powderFlowGPerS / powderMassPerTravel;",
+            METADATA_JS,
+        )
+        self.assertIn("speedMmS * durationS", METADATA_JS)
+        self.assertIn("applyMotionPlan({speedMmS, distanceMm});", METADATA_JS)
+        self.assertIn("onPowderFlowChange(powderFlowGPerS);", METADATA_JS)
 
 
 class DashboardAssetServingTests(unittest.TestCase):
@@ -308,6 +383,28 @@ class OpenFlowSummaryTests(unittest.TestCase):
             two_esp32_lines["esp32_f1_gmin"] + two_esp32_lines["esp32_f2_gmin"],
             places=2,
         )
+
+
+class PowderMetadataRecordingTests(unittest.TestCase):
+    def test_export_preserves_g_per_s_and_converts_legacy_g_per_min(self) -> None:
+        with TemporaryDirectory() as directory:
+            recorder = FlowRunRecorder(
+                record_dir=Path(directory),
+                metadata={
+                    "sample_number": "powder-plan",
+                    "sub_number": "1",
+                    "powder_flow_rate_g_per_s": "6.0",
+                    "test_duration_s": "4.0",
+                },
+                run_config={},
+                source_fields={},
+            )
+            summary = recorder.finish()
+            export_path = Path(summary["paths"]["export_csv"])
+            export_text = export_path.read_text(encoding="utf-8")
+            self.assertIn("# powder_flow_rate_g_per_min:,360.000", export_text)
+            self.assertIn("# powder_flow_rate_g_per_s:,6.0", export_text)
+            self.assertIn("# test_duration_s:,4.0", export_text)
 
 
 class _Esp32ContractServer(ThreadingHTTPServer):

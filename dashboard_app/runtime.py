@@ -8,7 +8,7 @@ import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     from ..recorder import FlowRunRecorder, list_recordings, resolve_artifact
@@ -351,6 +351,9 @@ class DashboardRuntime:
             "stepper_dro_zero_raw_mm": (
                 self.system_config.stepper_dro_zero_raw_mm
             ),
+            "powder_mass_per_stepper_travel_g_per_mm": (
+                self.system_config.powder_mass_per_stepper_travel_g_per_mm
+            ),
         }
 
     def run_state_locked(self) -> dict[str, object]:
@@ -400,6 +403,11 @@ class DashboardRuntime:
                 "max_speed_mm_s": DEFAULT_STEPPER_MAX_SPEED_MM_S,
                 "default_speed_mm_s": DEFAULT_STEPPER_HOME_SPEED_MM_S,
                 "home_speed_mm_s": DEFAULT_STEPPER_HOME_SPEED_MM_S,
+            },
+            "geometry": {
+                "powder_mass_per_stepper_travel_g_per_mm": (
+                    self.system_config.powder_mass_per_stepper_travel_g_per_mm
+                ),
             },
         }
 
@@ -536,6 +544,17 @@ class DashboardRuntime:
             raise RuntimeError("stepper source does not support control modes")
         return stepper
 
+    def _stepper_local_run_locked(self) -> object:
+        stepper = next(
+            (source for source in self.sources if source.name == "stepper"),
+            None,
+        )
+        if stepper is None or not hasattr(stepper, "set_local_run"):
+            raise RuntimeError(
+                "software run controls require the Controllino Ethernet source"
+            )
+        return stepper
+
     def _stepper_home_locked(self) -> object:
         stepper = next(
             (source for source in self.sources if source.name == "stepper"),
@@ -642,6 +661,31 @@ class DashboardRuntime:
                 "sample": latest,
             }
 
+    def _confirm_stepper_locked(
+        self, stepper: object, before_sequence: object, description: str,
+        matches: Callable[[dict[str, object]], bool],
+    ) -> dict[str, object]:
+        """Wait under the condition lock for a fresh matching status.
+
+        Condition.wait releases the lock so polling and E-STOP can proceed.
+        Each caller supplies its explicit success predicate; a command write
+        or acknowledgement alone never proves the requested state was reached.
+        """
+        deadline = time.monotonic() + 1.5
+        while True:
+            payload = self._stepper_payload_locked()
+            error = getattr(stepper, "pending_command_error", None)
+            if error:
+                raise RuntimeError(f"motion controller rejected {description}: {error}")
+            if payload.get("stepper_status_sequence") != before_sequence and matches(payload):
+                return payload
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"motion controller did not confirm {description} within 1.5 seconds"
+                )
+            self._condition.wait(timeout=min(remaining, 0.1))
+
     def move_stepper(self, values: dict[str, object]) -> dict[str, object]:
         with self._condition:
             stepper = self._stepper_locked()
@@ -666,12 +710,16 @@ class DashboardRuntime:
             # USB adapter and firmware both re-check D5, so a selector change
             # during this handoff rejects or aborts instead of reversing.
             current = self._stepper_payload_locked()
-            selected_direction = current.get("stepper_authorized_direction")
+            selected_direction = (
+                values.get("direction")
+                if getattr(stepper, "mode", None) == "controllino"
+                else current.get("stepper_authorized_direction")
+            )
             if selected_direction == "both":
                 # Simulation has no physical D5 input; use Forward by default.
                 selected_direction = "forward"
             if selected_direction not in ("forward", "reverse"):
-                raise RuntimeError("D5 direction is unavailable")
+                raise RuntimeError("move direction is unavailable")
             signed_distance_mm = (
                 -travel_mm if selected_direction == "reverse" else travel_mm
             )
@@ -685,32 +733,15 @@ class DashboardRuntime:
             expected_id = getattr(stepper, "pending_command_id", None)
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network"):
-                deadline = time.monotonic() + 1.5
-                while True:
-                    payload = self._stepper_payload_locked()
-                    command_error = getattr(
-                        stepper,
-                        "pending_command_error",
-                        None,
-                    )
-                    if command_error:
-                        raise RuntimeError(
-                            f"Yún rejected the move: {command_error}"
-                        )
-                    if (
-                        payload.get("stepper_status_sequence") != before_sequence
-                        and payload.get("stepper_command_id") == expected_id
+            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
+                self._confirm_stepper_locked(
+                    stepper, before_sequence, "the move",
+                    lambda payload: (
+                        payload.get("stepper_command_id") == expected_id
                         and payload.get("stepper_state")
                         in ("moving", "completed", "limit_blocked")
-                    ):
-                        break
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError(
-                            "Yún did not confirm the move within 1.5 seconds"
-                        )
-                    self._condition.wait(timeout=min(remaining, 0.1))
+                    ),
+                )
             return {
                 "stepper": self._stepper_payload_locked(),
                 "sample": self.latest,
@@ -728,21 +759,13 @@ class DashboardRuntime:
             stepper.stop()  # type: ignore[attr-defined]
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network"):
-                deadline = time.monotonic() + 1.5
-                while True:
-                    payload = self._stepper_payload_locked()
-                    if (
-                        payload.get("stepper_status_sequence") != before_sequence
-                        and payload.get("stepper_moving") is False
-                    ):
-                        break
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError(
-                            "Yún did not confirm Stop within 1.5 seconds"
-                        )
-                    self._condition.wait(timeout=min(remaining, 0.1))
+            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
+                self._confirm_stepper_locked(
+                    stepper, before_sequence, "Stop",
+                    lambda payload: (
+                        payload.get("stepper_moving") is False
+                    ),
+                )
             return {
                 "stepper": self._stepper_payload_locked(),
                 "sample": self.latest,
@@ -768,26 +791,18 @@ class DashboardRuntime:
 
         with self._condition:
             elapsed_s = time.monotonic() - self.monotonic0
-            if getattr(stepper, "mode", None) in ("usb", "network"):
-                deadline = time.monotonic() + 1.5
-                while True:
-                    payload = self._stepper_payload_locked()
-                    if (
-                        payload.get("stepper_status_sequence") != before_sequence
-                        and payload.get("stepper_estop_latched") is True
+            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
+                self._confirm_stepper_locked(
+                    stepper, before_sequence, "software E-STOP",
+                    lambda payload: (
+                        payload.get("stepper_estop_latched") is True
                         and payload.get("stepper_moving") is False
                         and (
                             payload.get("stepper_brushless_motor_capable") is not True
                             or payload.get("stepper_brushless_motor_on") is False
                         )
-                    ):
-                        break
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError(
-                            "Yún did not confirm software E-STOP within 1.5 seconds"
-                        )
-                    self._condition.wait(timeout=min(remaining, 0.1))
+                    ),
+                )
             else:
                 self._poll_locked(elapsed_s)
             return {
@@ -815,23 +830,14 @@ class DashboardRuntime:
             stepper.set_brushless_motor(requested_on)  # type: ignore[attr-defined]
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network"):
-                deadline = time.monotonic() + 1.5
-                while True:
-                    payload = self._stepper_payload_locked()
-                    if (
-                        payload.get("stepper_status_sequence") != before_sequence
-                        and payload.get("stepper_brushless_motor_on")
+            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
+                self._confirm_stepper_locked(
+                    stepper, before_sequence, "brushless motor state",
+                    lambda payload: (
+                        payload.get("stepper_brushless_motor_on")
                         == requested_on
-                    ):
-                        break
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError(
-                            "Yún did not confirm brushless motor state "
-                            "within 1.5 seconds"
-                        )
-                    self._condition.wait(timeout=min(remaining, 0.1))
+                    ),
+                )
             confirmed = self._stepper_payload_locked()
             return {
                 "confirmed": True,
@@ -887,23 +893,14 @@ class DashboardRuntime:
             )
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network"):
-                deadline = time.monotonic() + 1.5
-                while True:
-                    payload = self._stepper_payload_locked()
-                    if (
-                        payload.get("stepper_status_sequence") != before_sequence
-                        and payload.get("stepper_brushless_motor_setpoint_us")
+            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
+                self._confirm_stepper_locked(
+                    stepper, before_sequence, "brushless pulse width",
+                    lambda payload: (
+                        payload.get("stepper_brushless_motor_setpoint_us")
                         == requested_pulse
-                    ):
-                        break
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError(
-                            "Yún did not confirm brushless pulse width "
-                            "within 1.5 seconds"
-                        )
-                    self._condition.wait(timeout=min(remaining, 0.1))
+                    ),
+                )
             confirmed = self._stepper_payload_locked()
             return {
                 "confirmed": True,
@@ -928,22 +925,14 @@ class DashboardRuntime:
             stepper.reset_emergency_stop()  # type: ignore[attr-defined]
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network"):
-                deadline = time.monotonic() + 1.5
-                while True:
-                    payload = self._stepper_payload_locked()
-                    if (
-                        payload.get("stepper_status_sequence") != before_sequence
-                        and payload.get("stepper_estop_latched") is False
+            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
+                self._confirm_stepper_locked(
+                    stepper, before_sequence, "E-STOP reset",
+                    lambda payload: (
+                        payload.get("stepper_estop_latched") is False
                         and payload.get("stepper_moving") is False
-                    ):
-                        break
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError(
-                            "Yún did not confirm E-STOP reset within 1.5 seconds"
-                        )
-                    self._condition.wait(timeout=min(remaining, 0.1))
+                    ),
+                )
             return {
                 "confirmed": True,
                 "stepper": self._stepper_payload_locked(),
@@ -968,26 +957,42 @@ class DashboardRuntime:
             stepper.set_control_mode(requested)  # type: ignore[attr-defined]
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network"):
-                deadline = time.monotonic() + 1.5
-                while True:
-                    payload = self._stepper_payload_locked()
-                    if (
-                        payload.get("stepper_status_sequence") != before_sequence
-                        and payload.get("stepper_control_mode") == expected_mode
-                    ):
-                        break
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError(
-                            "Yún did not confirm the control mode within 1.5 seconds"
-                        )
-                    self._condition.wait(timeout=min(remaining, 0.1))
+            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
+                self._confirm_stepper_locked(
+                    stepper, before_sequence, "the control mode",
+                    lambda payload: (
+                        payload.get("stepper_control_mode") == expected_mode
+                    ),
+                )
             return {
                 "confirmed": True,
                 "requested_control_mode": expected_mode,
                 "stepper": self._stepper_payload_locked(),
                 "sample": self.latest,
+            }
+
+    def set_stepper_local_run(self, values: dict[str, object]) -> dict[str, object]:
+        with self._condition:
+            stepper = self._stepper_local_run_locked()
+            direction = values.get("direction")
+            if isinstance(direction, bool) or direction not in (-1, 0, 1):
+                raise ValueError("direction must be -1, 0, or 1")
+            before_sequence = self._stepper_payload_locked().get(
+                "stepper_status_sequence"
+            )
+            stepper.set_local_run(direction)  # type: ignore[attr-defined]
+            expected_direction = "positive" if direction == 1 else "negative"
+            payload = self._confirm_stepper_locked(
+                stepper, before_sequence, "software run",
+                lambda status: (
+                    status.get("stepper_moving") is False if direction == 0 else
+                    status.get("stepper_moving") is True
+                    and status.get("stepper_direction") == expected_direction
+                ),
+            )
+            return {
+                "confirmed": True, "direction": direction,
+                "stepper": payload, "sample": self.latest,
             }
 
     def home_stepper(self) -> dict[str, object]:
@@ -999,21 +1004,13 @@ class DashboardRuntime:
             stepper.home()  # type: ignore[attr-defined]
             elapsed_s = time.monotonic() - self.monotonic0
             self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network"):
-                deadline = time.monotonic() + 1.5
-                while True:
-                    payload = self._stepper_payload_locked()
-                    if (
-                        payload.get("stepper_status_sequence") != before_sequence
-                        and payload.get("stepper_state") in ("homing", "ready")
-                    ):
-                        break
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError(
-                            "Yún did not confirm Home within 1.5 seconds"
-                        )
-                    self._condition.wait(timeout=min(remaining, 0.1))
+            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
+                self._confirm_stepper_locked(
+                    stepper, before_sequence, "Home",
+                    lambda payload: (
+                        payload.get("stepper_state") in ("homing", "ready")
+                    ),
+                )
             return {
                 "confirmed": True,
                 "stepper": self._stepper_payload_locked(),
@@ -1041,34 +1038,18 @@ class DashboardRuntime:
             )
             stepper.set_speed(values["speed_mm_s"])  # type: ignore[attr-defined]
 
-            # A successful serial write only proves that bytes entered the USB
-            # driver. Do not tell the browser the change succeeded until a new
-            # firmware status frame echoes the requested configured speed.
-            deadline = time.monotonic() + 1.5
-            while True:
-                payload = self._stepper_payload_locked()
-                echoed_speed = payload.get("stepper_command_speed_mm_s")
-                echoed_sequence = payload.get("stepper_status_sequence")
-                if (
-                    isinstance(echoed_speed, (int, float))
-                    and not isinstance(echoed_speed, bool)
-                    and abs(float(echoed_speed) - expected_speed) < 0.0001
-                    and echoed_sequence != before_sequence
-                ):
-                    return {
-                        "confirmed": True,
-                        "requested_speed_mm_s": expected_speed,
-                        "stepper": payload,
-                        "sample": self.latest,
-                    }
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RuntimeError(
-                        "Yún did not confirm the requested speed within 1.5 seconds"
-                    )
-                # Condition.wait releases the runtime lock, allowing the 10 Hz
-                # source thread to ingest the firmware acknowledgement.
-                self._condition.wait(timeout=min(remaining, 0.1))
+            payload = self._confirm_stepper_locked(
+                stepper, before_sequence, "the requested speed",
+                lambda status: (
+                    isinstance(status.get("stepper_command_speed_mm_s"), (int, float))
+                    and not isinstance(status.get("stepper_command_speed_mm_s"), bool)
+                    and abs(status["stepper_command_speed_mm_s"] - expected_speed) < 0.0001
+                ),
+            )
+            return {
+                "confirmed": True, "requested_speed_mm_s": expected_speed,
+                "stepper": payload, "sample": self.latest,
+            }
 
     def recordings_payload(self) -> dict[str, object]:
         with self._condition:

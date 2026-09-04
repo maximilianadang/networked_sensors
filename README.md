@@ -4,6 +4,43 @@ The exported notes describe a Banner DXMR90-4k reading SICK flow sensors over
 IO-Link, converting the raw two-register IEEE-754 values with ScriptBasic, and
 republishing the useful measurements into DXM local registers.
 
+## USB firmware uploads
+
+Use [`firmware_upload.ipynb`](firmware_upload.ipynb) to compile and upload a
+controller sketch over USB. Its configuration cell selects the target,
+payload `.ino`, and port:
+
+| Target | Arduino FQBN | Default payload |
+| --- | --- | --- |
+| `controllino` | `CONTROLLINO_Boards:avr:controllino_maxi_automation` | `controllino_ethernet_diagnostic.ino` |
+| `esp32` | `esp32:esp32:adafruit_feather_esp32s3_nopsram` | `Flow_management_unit_sch1.ino` |
+| `yun` | `arduino:avr:yun` | `limit_switch_palas.ino` |
+
+Start Jupyter from this directory, open the notebook, run its preflight cells,
+and set `SAFETY_CONFIRMED = True` only after completing the printed hardware
+check. The uploader stages a hash-checked temporary sketch directory, including
+existing local quoted includes such as the ignored `wifi_credentials.h`,
+compiles, selects only an unambiguous exact-FQBN USB match when `PORT = "auto"`,
+uploads, and requests verification. An explicit port can be used when board
+discovery does not report an FQBN.
+
+The notebook automatically uses the downloaded workspace Arduino CLI under
+`../tools/arduino-cli-*` and the isolated `.arduino-build/arduino-cli.yaml`
+configuration. That toolchain currently contains ESP32 core 3.3.10, Arduino
+AVR core 1.8.8, Controllino AVR core 3.1.3, Ethernet 2.0.2, Adafruit
+ADS1X15/BusIO, ESP Async WebServer, and Async TCP. If the
+workspace toolchain is absent, it falls back to `arduino-cli` on `PATH`; the
+configuration cell also accepts explicit CLI and config paths. The Yún sketch
+has no external library dependency.
+
+Keep the Yún DM542T motor supply off, disconnect the brushless ESC battery, and
+set D4 OFF before upload. Stop any dashboard or serial monitor currently holding
+the selected USB port.
+
+On the Yún, this USB workflow updates only the ATmega32U4 `.ino` firmware.
+`yun_stepper_bridge.py` runs on the separate Linux processor and must still be
+deployed over SSH with `provision_yun.sh`.
+
 ## Network setup
 
 1. Put the laptop Ethernet interface on the same subnet as the DXM, for example
@@ -112,7 +149,17 @@ for its Linux/Wi-Fi side to boot, and run:
 networked_sensors/run_lan_dashboard.sh
 ```
 
-That wrapper defaults to the network Yún at `http://arduino.local:8080`, the
+For the Controllino MAXI direct-Ethernet motion transport, run:
+
+```bash
+networked_sensors/run_controllino_dashboard.sh
+```
+
+It defaults to `http://10.77.0.10`; override that with
+`CONTROLLINO_URL=http://CONTROLLER_IP` when needed. This runtime transport is
+independent of the Ethernet firmware-upload workflow.
+
+The Yún wrapper defaults to the network Yún at `http://arduino.local:8080`, the
 real DXMR90 at `192.168.0.1`, and the real ESP32 at
 `http://testbench.local`. Each source remains independent; an unavailable
 device reports disconnected without preventing the other sources from running.

@@ -9,24 +9,24 @@ before hardware is connected.
 The local dashboard/API and disk-backed recorder/exporter run without hardware.
 ESP32, DXMR90, and Yún stepper sources are simulated by default. Real ESP32
 HTTP/SSE input, real DXMR90 Modbus input, and Yún `usb` mode are implemented.
-The stepper USB path has Local Velocity, Web Position, optional D8-limit seek,
-move, Stop, and calibration controls. The current fixed-direction image is
-compiled, uploaded, and operator-confirmed for Local Velocity. It uses Timer1
-for Local Velocity pulses, controls DM542T `ENA-` from D9, and fixes stale
-opposite-limit history. The exact-image two-endpoint retreat/D9 matrix and Web
-Position timing qualification remain.
-The installed D12 brushless-ESC revision is upload-verified and reports 1000 us
-OFF. The repository's newer variable-pulse revision is compile-verified but is
-not uploaded because the ESC remains powered. It keeps 1000 us OFF and adds an
+The stepper USB and network paths have Local Velocity, Web Position, optional
+D8-limit seek, move, Stop, and calibration controls. The current image was
+compiled and uploaded over the Yún LAN, then read back and verified by avrdude.
+Post-reboot network status confirms the new D5 10 ms qualification capability,
+qualified Reverse/LOW state, zero rejected transitions, fresh DRO frames, and
+stopped output. It uses Timer1 for stepper pulses, controls DM542T `ENA-` from
+D9, fixes stale opposite-limit history, and retains separate 5 ms D6/D8 limit
+qualification. Repeating the formerly failing physical direction-change move
+remains the final D5 transient qualification.
+The installed D12 brushless-ESC revision reports 1000 us OFF and supports an
 integer 1000..2000 us ON setpoint, defaulting to 1200 us. Guarded keyboard key
 **M** toggles OFF/ON using that setpoint. The page's **E-STOP** control inhibits
 STEP output and forces the brushless output OFF through the
 laptop/USB/Yún-firmware chain. D9 removes holding
 current, but it does not isolate the 24 V driver supply and is not a hardwired,
 safety-rated emergency stop.
-Yún `network` is implemented; the repository bridge must be redeployed to the
-Yún Linux side after this firmware revision before LAN motion testing. Start
-the all-simulated dashboard with:
+Yún `network` is implemented and the installed Linux bridge returned the new
+firmware status after the LAN upload. Start the all-simulated dashboard with:
 
 ```bash
 python3 networked_sensors/dashboard.py --host 127.0.0.1 --port 8000 --record-dir networked_sensors/recordings
@@ -205,29 +205,53 @@ The page, stylesheet, and JavaScript modules are all served from local files in
 installation, and a frontend build step are not required. Save a field edit and
 reload the browser; dashboard assets use `Cache-Control: no-store`.
 
-At 100% zoom, a content viewport at least 1121 px wide and 900 px tall uses the
-single-screen desktop layout. The status strip, controls, metrics, equal-width
-charts, and side-by-side Stepper/Test Metadata row fit the CSS viewport without
-page scrolling; CSS viewport units automatically exclude Firefox/Zen toolbar
-chrome. The Stepper panel keeps the vertical piston on its left and mode,
-motion controls, and condensed interlocks on its right. Open **Source details**
-at the upper right for full source health, stepper telemetry, and the optional
-Command ID. That overlay scrolls internally when needed and does not add height
-to the primary page. Narrower or shorter windows use the responsive layout and
-may return to normal document scrolling.
+At 100% zoom, a content viewport at least 1121 px wide and 900 px tall keeps
+the primary status strip, controls, metrics, equal-width charts, and
+side-by-side Stepper/Test Metadata row compact. CSS viewport units
+automatically exclude Firefox/Zen toolbar chrome. The Stepper panel keeps the
+vertical piston on its left and mode, motion controls, and condensed
+interlocks on its right. **Source details** is collapsed in normal document
+flow below the primary panels; scroll to the bottom and expand it for full
+source health, stepper telemetry, and the optional Command ID.
+
+The first status pill reports the browser's connection to the dashboard API:
+**Dashboard live** means the SSE sample stream is open, **Dashboard polling**
+means the page is using `/api/latest` as a fallback, and **Dashboard offline**
+means that fallback request failed. It does not independently prove every
+hardware source is connected. **Not recording** means no run artifact is
+currently being written; it changes to **Recording** after Start. The displayed
+sample timestamp is explicitly formatted in UTC.
+
+The **Powder flow rate (g/s)** and **Desired test duration (s)** metadata
+fields derive, but do not send, the Web Position setpoints:
+
+```text
+stepper speed (mm/s) = powder flow (g/s) / geometry (g/mm)
+travel (mm) = stepper speed (mm/s) × duration (s)
+```
+
+The machine geometry is
+`geometry.powder_mass_per_stepper_travel_g_per_mm` in
+`system_config.json`; its default is `2.4`. Edit that positive finite value
+while the dashboard is stopped, then restart the dashboard to load it. Derived
+values outside the controller's `0.1..10.0 mm/s` speed or `0.01..137.18 mm`
+travel limits are displayed but rejected rather than clamped. The adjacent
+**AIR:POWDER RATIO** card divides live `esp32_open_flow_gmin` by the requested
+powder flow after converting the latter from g/s to g/min; it shows `--` until
+the requested powder flow is valid.
 
 Useful endpoints:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `/` | local browser dashboard with three ESP32 pressure values, maximum parallel-SICK pressure, Solenoid 1–3-gated ESP32 flow sum, Solenoid 4-gated SICK flow sum, heartbeat, one combined pressure plot, and individual ESP32/SICK mass-flow plots with always-visible open-line SUM overlays |
-| `/api/config` | read-only history, solenoid-count, and stepper input limits used by the local page; authoritative command limits remain in Python |
+| `/` | local browser dashboard with three ESP32 pressure values, maximum parallel-SICK pressure, Solenoid 1–3-gated ESP32 flow sum, requested-flow AIR:POWDER ratio, Solenoid 4-gated SICK flow sum, heartbeat, one combined pressure plot, and individual ESP32/SICK mass-flow plots with always-visible open-line SUM overlays |
+| `/api/config` | read-only history, solenoid-count, stepper input limits, and powder mass-per-travel geometry used by the local page; authoritative command limits and validated machine geometry remain in Python |
 | `/api/state` | latest sample, run state/config, metadata, history size |
 | `/api/latest` | latest sample and run state; 10 Hz browser fallback when SSE is unavailable |
 | `/api/history?limit=240` | recent in-memory merged samples |
 | `/api/events` | SSE live stream with `state` and `sample` events |
 | `/api/run/start`, `/api/run/stop` | disk-backed recording lifecycle |
-| `/api/metadata` | in-memory metadata save |
+| `/api/metadata` | in-memory metadata save, including requested powder flow in g/s and desired test duration in seconds |
 | `/api/solenoid/toggle?n=0..3` | serialized simulated or real ESP32 control outside the merge lock; index 3 is GPIO 10 |
 | `/api/stepper/status` | stepper/DRO state plus D12 brushless capability, variable-pulse capability, OFF/ON state, active pulse, and ON setpoint |
 | `/api/stepper/control-mode` | `{"web_position": true|false}`; D4 must be OFF and motion stopped |
@@ -334,6 +358,14 @@ state: during an armed Local Velocity or Web Position departure, firmware
 repeatedly clears only the endpoint behind the commanded direction, while the
 destination stop continues to use the current 5 ms-qualified input.
 
+D5 uses separate symmetric 10 ms qualification: either new selector level must
+remain continuous for 10 ms before it may authorize motion, change Local
+Velocity direction, or abort Web Position. A shorter transition is rejected and
+increments the saturating D5 diagnostic counter shown beside the D6/D8 counters.
+A maintained switch change still aborts an active Web Position move and never
+reverses it. At the 10 mm/s firmware maximum, the qualification interval permits
+at most 0.1 mm of continued travel.
+
 The firmware receives `V1 S25..2520`, where the integer is driver pulses/s.
 The calibrated conversion is 251.96850394 pulses/mm: the motor datasheet gives
 0.00396875 mm per 1.8-degree full step, and the photographed DM542T SW5-SW8
@@ -398,8 +430,9 @@ no STEP pulses until D4 is cycled OFF.
   stopped setpoint.
 - **Web Position** makes D4 an arm/immediate-abort and D5 the direction selector
   for the next positive travel magnitude. D5 Forward commands downward toward
-  D6/bottom; D5 Reverse commands upward toward D8/top. Changing D5 during
-  motion aborts and never reverses the active command.
+  D6/bottom; D5 Reverse commands upward toward D8/top. A new D5 state must
+  remain stable for 10 ms; a maintained change during motion aborts and never
+  reverses the active command.
 
 The optional D8-limit action is not a prerequisite for Move:
 
@@ -411,9 +444,9 @@ The optional D8-limit action is not a prerequisite for Move:
 
 For any relative move, enter a positive travel distance and positive speed,
 select Forward or Reverse with D5, and arm D4. No prior Home is required and no
-open-loop absolute target is checked. **Stop Motion**, D4 OFF, a D5 change, or
-the destination limit aborts motion in the ATmega loop. Acceleration is fixed
-at 5 mm/s² and is intentionally absent from the webpage.
+open-loop absolute target is checked. **Stop Motion**, D4 OFF, a 10-ms-qualified
+D5 change, or the destination limit aborts motion in the ATmega loop.
+Acceleration is fixed at 5 mm/s² and is intentionally absent from the webpage.
 
 The coordinate uses 251.96850394 pulses/mm. Confirm it empirically with a short
 known pulse count and DRO-measured displacement in both directions before
@@ -598,7 +631,8 @@ Network assumptions:
 | simulated supervisor | `python3 networked_sensors/supervisor.py --samples 12` | JSONL contains source modes, connected flags, age fields |
 | stale scenario | `python3 networked_sensors/supervisor.py --scenario dxmr90_stale --samples 45 --drop-after-s 1 --stale-after-s 1` | `dxmr90_connected` flips false after age threshold |
 | missing scenario | `python3 networked_sensors/supervisor.py --scenario dxmr90_missing --samples 3` | DXMR90 fields are present as `null` |
-| stepper contract | `python3 -m unittest -v networked_sensors.test_stepper_control` | 37 tests cover fixed physical direction, D9 state, D5-selected travel, mode, D8 seek, Stop, latched software E-STOP/reset, limits, USB/network bytes/acks, ownership, rejection/timeout, nonblocking UART reads, fresh runtime acknowledgements, legacy status, and merged schema |
+| stepper contract | `python3 -m unittest -v networked_sensors.test_stepper_control` | the current suite covers fixed physical direction, 10 ms D5 qualification/diagnostics, D9 state, D5-selected travel, mode, D8 seek, Stop, latched software E-STOP/reset, limits, USB/network bytes/acks, ownership, rejection/timeout, nonblocking UART reads, fresh runtime acknowledgements, legacy status, and merged schema |
+| current Yún LAN compile/upload | persistent Arduino CLI 1.4.0 and AVR core 1.8.8, `arduino:avr:yun` | 22,776 bytes/79% flash and 1,700 bytes/66% RAM; SSH transfer plus `/usr/bin/run-avrdude` wrote and read-back verified 22,776 bytes; post-reboot `lx` capability bit confirms the 10 ms D5 firmware is running |
 | Yún T5A compile/upload | temporary official CLI/core/library, `arduino:avr:yun` | 65% flash/28% RAM; 18,652 bytes uploaded and read back, fresh D4-off stopped latch/reset confirmed; moving-stop checks pending |
 | Yún T6 network compile/upload | same Yún toolchain | 20,794 bytes/72% flash and 1,399 bytes/54% RAM; upload and Linux service install pass; AsteraMesh health/status report owner none, D4 OFF, clear limits/E-STOP, and zero motion; motion qualification pending |
 | Yún fixed-direction Timer1 compile/upload | same Yún toolchain, `arduino:avr:yun`, `/dev/ttyACM0` | 22,620 bytes/78% flash and 1,453 bytes/56% RAM; verified upload, stopped status, and operator-confirmed Local Velocity motion pass; exact two-endpoint D9 retreat matrix and Web Position timing remain |
@@ -643,21 +677,28 @@ arduino-cli core install arduino:avr
 ```
 
 Arduino requires the main `.ino` name to match its sketch directory. Stage an
-unchanged temporary copy of the repository source, then compile:
+unchanged copy under the repository's ignored persistent build directory, then
+compile:
 
 ```bash
-mkdir -p /tmp/limit_switch_palas /tmp/limit_switch_build
-cp networked_sensors/limit_switch_palas.ino /tmp/limit_switch_palas/limit_switch_palas.ino
-arduino-cli compile --fqbn arduino:avr:yun --output-dir /tmp/limit_switch_build /tmp/limit_switch_palas
+mkdir -p networked_sensors/.arduino-build/yun/limit_switch_palas networked_sensors/.arduino-build/yun/build
+cp networked_sensors/limit_switch_palas.ino networked_sensors/.arduino-build/yun/limit_switch_palas/limit_switch_palas.ino
+arduino-cli compile --fqbn arduino:avr:yun --output-dir networked_sensors/.arduino-build/yun/build networked_sensors/.arduino-build/yun/limit_switch_palas
 ```
 
 Find the current port with `arduino-cli board list`, then upload the compiled
 artifact. `/dev/ttyACM0` was the observed port but may change after reconnecting:
 
 ```bash
-arduino-cli upload --fqbn arduino:avr:yun --port /dev/ttyACM0 --input-dir /tmp/limit_switch_build --verify /tmp/limit_switch_palas
+arduino-cli upload --fqbn arduino:avr:yun --port /dev/ttyACM0 --input-dir networked_sensors/.arduino-build/yun/build --verify networked_sensors/.arduino-build/yun/limit_switch_palas
 arduino-cli monitor --port /dev/ttyACM0 --config baudrate=9600
 ```
+
+When the Yún is available only over LAN, transfer the same compiled HEX to its
+Linux side and invoke its installed `/usr/bin/run-avrdude` helper over SSH. Use
+the discovered `_arduino._tcp` address, keep credentials out of scripts and
+shell history, and require avrdude's read-back verification before treating the
+upload as complete.
 
 ### AbsoluteDRO Plus read-only bring-up (T4G)
 
@@ -703,6 +744,10 @@ Open `http://127.0.0.1:8000/` and use the **DRO position** piston display:
 - Dashboard restarts and USB/LAN reconnections reload the saved zero. Use
   `--system-config PATH` only when intentionally selecting another machine
   configuration.
+- The same file stores the positive powder mass-per-stepper-travel geometry.
+  Saving a new DRO zero preserves that geometry; older version-1 files without
+  a geometry object load the `2.4 g/mm` default and acquire it on the next
+  atomic zero write.
 - **Move to zero** is intentionally disabled until T4H.2 implements and
   physically qualifies the local closed-loop controller. Setting zero does not
   send any motion command or STEP pulse.

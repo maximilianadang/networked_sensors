@@ -11,7 +11,7 @@ import {createToolbarComponent} from "./components/toolbar.js";
 const streamEls = elements(["streamDot", "streamStatus"]);
 
 function setStreamStatus(label, state) {
-  setText(streamEls.streamStatus, label);
+  setText(streamEls.streamStatus, `Dashboard ${label.toLowerCase()}`);
   setDot(streamEls.streamDot, state);
 }
 
@@ -30,12 +30,13 @@ async function startDashboard() {
   let pollRequestPending = false;
   let toolbar;
   let stepper;
+  let metadata;
 
   function renderAll() {
     toolbar.renderRun(state.run);
     if (!state.latest) return;
     toolbar.renderSample(state.latest);
-    renderMetrics(state.latest);
+    renderMetrics(state.latest, metadata?.powderFlowRateGPerS());
     renderSources(state.latest, state.history.length);
     stepper.render(state.latest);
     drawAllCharts(state.history);
@@ -55,7 +56,6 @@ async function startDashboard() {
     toolbar.renderRun(state.run);
   }
 
-  const metadata = createMetadataComponent();
   toolbar = createToolbarComponent({
     getState: () => state,
     applySample,
@@ -63,12 +63,21 @@ async function startDashboard() {
     setEspTransportMessage,
     solenoidCount: operationalConfig.solenoid_count
   });
+  const stepperLimits = {
+    ...operationalConfig.stepper,
+    min_distance_mm: UI_CONFIG.stepperInputs.minDistanceMm
+  };
   stepper = createStepperComponent({
     getLatest: () => state.latest,
     applySample,
-    limits: {
-      ...operationalConfig.stepper,
-      min_distance_mm: UI_CONFIG.stepperInputs.minDistanceMm
+    limits: stepperLimits
+  });
+  metadata = createMetadataComponent({
+    geometry: operationalConfig.geometry,
+    stepperLimits,
+    applyMotionPlan: plan => stepper.applyMotionPlan(plan),
+    onPowderFlowChange: powderFlowGPerS => {
+      if (state.latest) renderMetrics(state.latest, powderFlowGPerS);
     }
   });
 

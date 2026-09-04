@@ -117,6 +117,8 @@ def build_handler(runtime: DashboardRuntime, quiet: bool) -> type[BaseHTTPReques
                     self._send_json(
                         runtime.set_stepper_control_mode(parse_body(self))
                     )
+                elif path == "/api/stepper/local-run":
+                    self._send_json(runtime.set_stepper_local_run(parse_body(self)))
                 elif path == "/api/stepper/speed":
                     self._send_json(runtime.set_stepper_speed(parse_body(self)))
                 elif path == "/api/stepper/dro-zero":

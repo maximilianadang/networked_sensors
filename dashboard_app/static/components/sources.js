@@ -1,3 +1,5 @@
+// PANEL: Source details — ESP32 and DXMR90 diagnostics.
+// Shared with the top connection indicators; motion diagnostics live in stepper.js.
 import {ageText, elements, numberValue, setDot, setText} from "../dom.js";
 
 const els = elements([
@@ -24,7 +26,8 @@ export function renderSources(sample, historyLength) {
   const flowAdcReady = sample.esp32_flow_adc_ready === true;
   const esp = presentation("ESP32", espMode, espConnected);
   const dx = presentation("DXMR90", dxMode, dxConnected);
-  const stepper = presentation("Stepper", stepperMode, stepperConnected);
+  const controllerLabel = stepperMode === "controllino" ? "Controllino MAXI" : "Arduino Yun";
+  const stepper = presentation(controllerLabel, stepperMode, stepperConnected);
   if (espConnected && (!pressureAdcReady || !flowAdcReady)) {
     esp.label = "ESP32 live / ADC unavailable";
     esp.row = "Live / ADC partial";

@@ -370,10 +370,12 @@ button.emergency-reset {
   overflow-wrap: anywhere;
 }
 
-/* Live metric grid. */
+/* SHARED PANELS: ESP32 Pressure, SICK Pressure (max), Open-Line Air Flow,
+   Air:Powder Ratio, SICK Flow · Solenoid 4, Heartbeat.
+   Behavior: components/metrics.js; markup: index.html. */
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(150px, 1fr));
+  grid-template-columns: repeat(6, minmax(140px, 1fr));
   gap: 10px;
 }
 
@@ -428,7 +430,8 @@ button.emergency-reset {
   font-size: clamp(1.1rem, 1.8vw, 1.65rem);
 }
 
-/* Pressure and mass-flow chart row. */
+/* SHARED PANELS: Pressure (bar), ESP32 Mass Flow (g/min), SICK Mass Flow (g/min).
+   Behavior: charts.js; series: config.js; headings/legends: index.html. */
 .plot-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -496,7 +499,7 @@ canvas {
   background: var(--chart-bg);
 }
 
-/* Stepper/piston and test-metadata row. */
+/* SHARED ROW: Motor Control and Test Metadata. */
 .lower-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -504,6 +507,7 @@ canvas {
   align-items: stretch;
 }
 
+/* PANEL: Test Metadata — appearance; behavior: components/metadata.js. */
 .metadata-panel {
   display: grid;
   grid-template-rows: auto 1fr;
@@ -519,6 +523,16 @@ canvas {
 
 .metadata-panel .form-grid {
   gap: 10px 12px;
+}
+
+.metadata-motion-plan {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--muted);
+  padding: 8px 10px;
+  font-size: 1rem;
 }
 
 .metadata-notes {
@@ -549,6 +563,7 @@ canvas {
   gap: 8px;
 }
 
+/* PANEL: Motor Control — appearance; behavior: components/stepper.js. */
 .stepper-layout {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -618,6 +633,7 @@ canvas {
   overflow-wrap: anywhere;
 }
 
+/* SUBPANEL: Brushless motor (inside Motor Control). */
 .brushless-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -675,6 +691,7 @@ canvas {
   min-width: 0;
 }
 
+/* SUBPANEL: Interlocks (inside Motor Control). */
 .stepper-console .stepper-interlocks {
   gap: 4px;
   padding: 8px 10px;
@@ -1069,15 +1086,12 @@ canvas {
   text-align: right;
 }
 
-/* Secondary source and motion telemetry stays available without consuming
-   operator-dashboard height. */
+/* PANEL: Source details — components/sources.js and components/stepper.js.
+   Secondary source and motion telemetry stays collapsed in normal document
+   flow at the bottom of the page. */
 .source-drawer {
-  position: fixed;
-  top: 12px;
-  right: clamp(16px, 3vw, 32px);
-  z-index: 30;
-  width: 250px;
-  border-radius: 999px;
+  width: 100%;
+  border-radius: 8px;
   background: var(--surface);
 }
 
@@ -1113,44 +1127,53 @@ canvas {
 }
 
 .source-drawer .source-body {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  width: min(900px, calc(100vw - 32px));
-  max-height: calc(100dvh - 86px);
-  overflow: auto;
+  position: static;
+  width: auto;
+  max-height: none;
+  overflow: visible;
   display: grid;
   gap: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border-top: 1px solid var(--line);
   background: var(--surface);
-  box-shadow: 0 12px 32px rgb(15 23 42 / 24%);
+  box-shadow: none;
 }
 
-/* Desktop operator view: fit every primary surface into one browser viewport.
+/* SHARED RESPONSIVE OVERRIDES: all panels, including Motor Control,
+   Test Metadata, Source details and the graphs. Check here when changing
+   desktop sizing; the panel-specific base rules appear above.
+   Desktop operator view: fit every primary surface into one browser viewport.
    Primary containers must remain visible and scrollable if that fit regresses;
    never conceal a layout failure with overflow clipping. */
-@media (min-width: 1121px) and (min-height: 900px) {
+@media (min-width: 1121px) and (min-height: 700px) {
   body {
+    height: 100dvh;
     min-height: 100dvh;
   }
 
   .topbar {
     flex: 0 0 auto;
-    padding: 8px clamp(16px, 3vw, 32px);
+    padding: 5px clamp(16px, 3vw, 32px);
+  }
+
+  .status-strip .pill {
+    min-height: 36px;
   }
 
   .status-strip {
     gap: 8px;
-    padding-right: 265px;
   }
 
   main {
     flex: 1 1 auto;
     min-height: 0;
-    padding: 10px clamp(14px, 2.8vw, 32px) 12px;
-    gap: 8px;
-    grid-template-rows: 86px 99px minmax(0, 1fr) minmax(486px, auto);
+    padding: 7px clamp(14px, 2.8vw, 32px) 8px;
+    gap: 6px;
+    grid-template-rows:
+      clamp(56px, 8dvh, 72px)
+      clamp(60px, 8dvh, 82px)
+      minmax(105px, 2fr)
+      minmax(375px, 3fr)
+      auto;
   }
 
   .toolbar {
@@ -1257,14 +1280,14 @@ canvas {
   .stepper-layout {
     height: 100%;
     min-height: 0;
-    gap: 8px;
-    padding: 8px;
+    gap: 6px;
+    padding: 6px;
   }
 
   .piston-visual {
     height: 100%;
     min-height: 0;
-    padding: 8px;
+    padding: 6px;
     grid-template-rows: auto minmax(0, 1fr);
     gap: 6px;
   }
@@ -1289,6 +1312,43 @@ canvas {
     gap: 4px 8px;
   }
 
+  .stepper-console {
+    gap: 6px;
+  }
+
+  .stepper-control-form {
+    gap: 5px;
+    padding: 6px;
+  }
+
+  .stepper-control-form .form-grid {
+    gap: 5px 8px;
+  }
+
+  .stepper-control-form .form-actions {
+    gap: 4px;
+  }
+
+  .software-run {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .stepper-control-form .form-actions:has(.software-run:not([hidden])) #stepperApplySpeed {
+    grid-column: 1;
+  }
+
+  .stepper-control-form .form-actions:has(.software-run:not([hidden])) .software-run {
+    grid-column: 2 / -1;
+  }
+
+  .software-run button {
+    min-width: 0;
+    padding-inline: 4px;
+  }
+
   .interlock-item {
     min-width: 0;
     display: grid;
@@ -1307,11 +1367,23 @@ canvas {
   }
 
   .metadata-panel .form-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px 10px;
   }
 
+  .metadata-panel .wide {
+    grid-column: auto;
+  }
+
   .metadata-notes textarea {
-    min-height: 88px;
+    min-height: 38px;
+  }
+
+  .metadata-panel input,
+  .metadata-panel textarea,
+  .stepper-control-form input,
+  .stepper-control-form button {
+    min-height: 34px;
   }
 }
 

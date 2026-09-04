@@ -10,7 +10,8 @@ DEFAULT_METADATA = {
     "sub_number": "",
     "dispenser": "",
     "material": "",
-    "powder_flow_rate_g_per_min": "",
+    "powder_flow_rate_g_per_s": "",
+    "test_duration_s": "",
     "description": "",
     "notes": "",
 }

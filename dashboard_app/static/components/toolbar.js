@@ -1,3 +1,5 @@
+// TOOLBAR: Start, Stop, Export, Solenoid 1–4 and recording/UTC indicators.
+// E-STOP belongs to Motor Control in stepper.js; shared appearance: dashboard.css.
 import {API, downloadLatestExport, postJson} from "../api.js";
 import {elements, setDot, setText} from "../dom.js";
 
@@ -35,7 +37,7 @@ export function createToolbarComponent({
   function renderRun(run) {
     const recording = run.recording === true;
     const latestRecording = run.latest_recording || null;
-    setText(els.runStatus, recording ? "Recording" : "Idle");
+    setText(els.runStatus, recording ? "Recording" : "Not recording");
     setDot(els.runDot, recording ? "ok" : "warn");
     els.startRun.disabled = recording;
     els.stopRun.disabled = !recording;
@@ -48,15 +50,7 @@ export function createToolbarComponent({
     const date = new Date(timestamp);
     const compactTimestamp = Number.isNaN(date.getTime())
       ? (timestamp || "No timestamp")
-      : date.toLocaleString([], {
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-          hour12: false,
-        });
+      : `${date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "")} UTC`;
     setText(els.clockText, compactTimestamp);
     els.clockText.title = timestamp;
     for (let index = 0; index < solenoidCount; index += 1) {

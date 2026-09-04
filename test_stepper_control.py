@@ -11,9 +11,11 @@ import select
 import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
+from urllib.parse import parse_qs, urlparse
 
 from networked_sensors.dashboard import (
     DashboardRuntime,
@@ -21,11 +23,13 @@ from networked_sensors.dashboard import (
     load_dashboard_asset,
     parse_args,
 )
+from networked_sensors.dashboard_app.system_config import SystemConfig
 from networked_sensors.supervisor_core import (
     DEFAULT_STEPPER_HOME_SPEED_MM_S,
     DEFAULT_STEPPER_MAX_DISTANCE_MM,
     DEFAULT_STEPPER_MAX_SPEED_MM_S,
     DEFAULT_STEPPER_MIN_SPEED_MM_S,
+    ControllinoStepperSource,
     NetworkStepperSource,
     SimulatedStepperSource,
     SourceMerger,
@@ -214,6 +218,57 @@ class SimulatedStepperSourceTests(unittest.TestCase):
             self.assertIn(field, sample)
 
 
+class SystemConfigTests(unittest.TestCase):
+    def test_legacy_version_one_file_gets_default_geometry_on_next_write(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "system_config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "stepper": {"dro_zero_raw_mm": 12.34},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = SystemConfig(path)
+            self.assertEqual(
+                config.powder_mass_per_stepper_travel_g_per_mm,
+                2.4,
+            )
+            config.set_stepper_dro_zero_raw_mm(56.78)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["geometry"],
+                {
+                    "powder_mass_per_stepper_travel_g_per_mm": 2.4,
+                },
+            )
+
+    def test_rejects_nonpositive_or_nonfinite_geometry(self) -> None:
+        for value in (0, -1, float("inf"), True, "2.4"):
+            with self.subTest(value=value), TemporaryDirectory() as directory:
+                path = Path(directory) / "system_config.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "geometry": {
+                                "powder_mass_per_stepper_travel_g_per_mm": value,
+                            },
+                            "stepper": {"dro_zero_raw_mm": None},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "must be a positive finite number",
+                ):
+                    SystemConfig(path)
+
+
 class UsbStepperSourceTests(unittest.TestCase):
     FORWARD_BLOCKED = (
         '{"v":1,"t":"s","q":7,"d4":0,"d5":1,"d6":0,"d8":1,'
@@ -319,6 +374,27 @@ class UsbStepperSourceTests(unittest.TestCase):
         )
         self.assertIn("input->rejectedGlitches < 255", qualifier_body)
         self.assertNotIn("delay(", qualifier_body)
+        self.assertIn(
+            "const unsigned long DIRECTION_QUALIFY_US = 10000UL;",
+            firmware,
+        )
+        direction_qualifier_body = firmware.split(
+            "bool updateQualifiedDirection", 1
+        )[1].split("void updatePhysicalEndpointLatches", 1)[0]
+        self.assertIn(
+            "nowUs - input->transitionStartedUs >= DIRECTION_QUALIFY_US",
+            direction_qualifier_body,
+        )
+        self.assertIn(
+            "input->rejectedTransitions < 255",
+            direction_qualifier_body,
+        )
+        self.assertNotIn("delay(", direction_qualifier_body)
+        self.assertIn(
+            "bool d5AuthorizesPositive = directionInput.qualifiedHigh;",
+            firmware,
+        )
+        self.assertIn("bool d5Reverse = !directionHigh;", firmware)
         self.assertIn('\\"lx\\":%lu', firmware)
         self.assertIn("const unsigned int STATUS_FRAME_SIZE = 384;", firmware)
         self.assertIn("const int PIN_DRO_CLOCK = 10;", firmware)
@@ -514,12 +590,30 @@ class UsbStepperSourceTests(unittest.TestCase):
         )
         self.assertTrue(qualified["stepper_positive_limit_active"])
 
+    def test_qualified_d5_state_is_distinct_from_raw_and_counts_glitches(self) -> None:
+        # Extended lx: capability bit 27, qualified-HIGH bit 26, four rejected
+        # D5 transitions in bits 25..18, and the existing D6/D8 diagnostics.
+        line = self.FILTERED_RAW_D6_GLITCH.replace(
+            '"d5":1',
+            '"d5":0',
+        ).replace(
+            '"lx":515',
+            '"lx":202375683',
+        )
+        status = UsbStepperSource.decode_status_line(line)
+        self.assertTrue(status["stepper_direction_filter_capable"])
+        self.assertEqual(status["stepper_direction_qualification_ms"], 10.0)
+        self.assertEqual(status["stepper_direction_glitch_count"], 4)
+        self.assertEqual(status["stepper_d5_raw"], "LOW")
+        self.assertEqual(status["stepper_d5_qualified"], "HIGH")
+        self.assertEqual(status["stepper_manual_direction"], "forward")
+
     def test_compact_status_numeric_worst_case_fits_transport_frame(self) -> None:
         # Mirror the compact protocol's longest numeric representations. The
         # shared AVR buffer must still have room for newline and NUL.
         frame = (
             '{"v":1,"t":"s","q":4294967295,"d4":1,"d5":1,'
-            '"d6":1,"d8":1,"lx":262143,"lp":1,"ln":1,"b":1,'
+            '"d6":1,"d8":1,"lx":268435455,"lp":1,"ln":1,"b":1,'
             '"r":"negative_limit","sps":-2147483648,"csps":2520,'
             '"aps":2147483647,"ds":1,"en":1,"ut":1,"dc":1,"df":1,'
             '"dr":-2147483648,"dd":-2147483648,"da":2147483647,'
@@ -647,6 +741,10 @@ class UsbStepperSourceTests(unittest.TestCase):
             self.REVERSE_MOVING.replace('"aps":350', '"aps":-1'),
             self.FILTERED_RAW_D6_GLITCH.replace('"lx":515', '"lx":true'),
             self.FILTERED_RAW_D6_GLITCH.replace('"lx":515', '"lx":262144'),
+            self.FILTERED_RAW_D6_GLITCH.replace(
+                '"lx":515',
+                '"lx":268435456',
+            ),
             self.FILTERED_RAW_D6_GLITCH.replace('"ut":1', '"ut":0'),
             self.WEB_READY_FORWARD_ARMED.replace('"st":5', '"st":10'),
             self.WEB_READY_FORWARD_ARMED.replace('"p":1000', '"p":true'),
@@ -662,6 +760,9 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertIsNone(legacy["stepper_measured_speed_mm_s"])
         self.assertFalse(legacy["stepper_limit_filter_capable"])
         self.assertIsNone(legacy["stepper_positive_limit_glitch_count"])
+        self.assertFalse(legacy["stepper_direction_filter_capable"])
+        self.assertIsNone(legacy["stepper_direction_glitch_count"])
+        self.assertEqual(legacy["stepper_d5_qualified"], "HIGH")
         self.assertFalse(legacy["stepper_unified_timer_capable"])
 
     def test_reads_latest_status_from_usb_like_pseudo_terminal(self) -> None:
@@ -1033,6 +1134,103 @@ class NetworkStepperSourceTests(unittest.TestCase):
             os.close(master_fd)
             os.close(slave_fd)
 
+
+class ControllinoStepperSourceTests(unittest.TestCase):
+    STATUS = (
+        '{"v":1,"t":"s","d4":1,"d5":1,"d6":-1,"d8":-1,'
+        '"lx":0,"lp":0,"ln":0,"b":0,"r":"none","sps":0,'
+        '"csps":1000,"aps":0,"ds":1,"en":0,"ut":1,"dc":0,'
+        '"df":0,"dr":0,"dd":0,"da":-1,"dq":0,"dx":0,'
+        '"m":1,"h":0,"a":1,"e":0,"bo":0,"bp":1200,"mv":0,'
+        '"st":5,"p":0,"g":0,"c":0,"o":2}'
+    )
+
+    def test_cli_and_factory_enable_direct_controllino_mode(self) -> None:
+        args = parse_args(
+            [
+                "--stepper-source",
+                "controllino",
+                "--stepper-url",
+                "http://10.77.0.10",
+            ]
+        )
+        sources = make_sources(
+            esp32_source="off",
+            dxmr90_source="off",
+            stepper_source=args.stepper_source,
+            stepper_network_url=args.stepper_url,
+        )
+        stepper = next(source for source in sources if source.name == "stepper")
+        self.assertIsInstance(stepper, ControllinoStepperSource)
+        stepper.close()
+
+    def test_direct_status_and_signed_move_use_controllino_wire_contract(self) -> None:
+        commands: list[str] = []
+        status = self.STATUS
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args: object) -> None:
+                return
+
+            def _reply(self, body: str) -> None:
+                payload = body.encode("ascii")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self) -> None:  # noqa: N802
+                self._reply(status)
+
+            def do_POST(self) -> None:  # noqa: N802
+                query = parse_qs(urlparse(self.path).query)
+                commands.append(query["value"][0])
+                self._reply('{"v":1,"t":"a","ok":1,"e":"none"}')
+
+        server = ThreadedHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        host, port = server.server_address
+        source = ControllinoStepperSource(f"http://{host}:{port}", timeout=0.5)
+        try:
+            source._fetch_status()
+            values = source.status()
+            self.assertFalse(values["stepper_home_capable"])
+            self.assertFalse(values["stepper_dro_capable"])
+            self.assertEqual(values["stepper_authorized_direction"], "both")
+            source.move(-1.0, 1.0, "return")
+            self.assertEqual(commands, ["V1 G-252,252,1"])
+        finally:
+            source.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1.0)
+
+    def test_compact_rejection_surfaces_firmware_reason(self) -> None:
+        source = ControllinoStepperSource("http://10.77.0.10")
+        self.assertEqual(
+            source._acknowledgement_error(
+                {"v": 1, "t": "a", "ok": 0, "e": "wrong_mode"}
+            ),
+            "wrong_mode",
+        )
+
+    def test_software_switch_commands_replace_absent_d4_d5_inputs(self) -> None:
+        source = ControllinoStepperSource("http://10.77.0.10")
+        local_status = self.STATUS.replace('"m":1', '"m":0').replace(
+            '"st":5', '"st":0'
+        )
+        source._last_values = source._decode_network_status(local_status)
+        with mock.patch.object(source, "_write_command") as write:
+            source.set_local_run(-1)
+            write.assert_called_once_with(b"V1 R-1\n", "software run")
+        self.assertIn('stepperLocalRun: "/api/stepper/local-run"', API_JS)
+        self.assertIn('id="stepperRunReverse"', INDEX_HTML)
+        self.assertIn('id="stepperRunStop"', INDEX_HTML)
+        self.assertIn('id="stepperRunForward"', INDEX_HTML)
+
+class NetworkStepperSourceRuntimeTests(unittest.TestCase):
     def test_dashboard_requires_fresh_network_estop_status(self) -> None:
         master_fd, slave_fd = pty.openpty()
         bridge = SerialBridgeState(os.ttyname(slave_fd), ack_timeout=0.5)
@@ -1301,7 +1499,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
         self.assertIn("function handleMotorShortcut()", STEPPER_JS)
         self.assertIn("void requestBrushlessToggle();", STEPPER_JS)
         self.assertIn(
-            "return {render, handleSpaceShortcut, handleMotorShortcut};",
+            "applyMotionPlan",
             STEPPER_JS,
         )
         self.assertIn(".brushless-control", DASHBOARD_CSS)
@@ -1350,6 +1548,8 @@ class UsbStepperDashboardTests(unittest.TestCase):
         self.assertIn("stepper_limit_qualification_ms", STEPPER_JS)
         self.assertIn("stepper_positive_limit_glitch_count", STEPPER_JS)
         self.assertIn("stepper_negative_limit_glitch_count", STEPPER_JS)
+        self.assertIn("stepper_direction_qualification_ms", STEPPER_JS)
+        self.assertIn("stepper_direction_glitch_count", STEPPER_JS)
         self.assertIn("/ raw ${latest.stepper_d6_raw", STEPPER_JS)
         self.assertIn(
             'aria-label="Read-only piston head position measured by the DRO"',
@@ -1363,13 +1563,18 @@ class UsbStepperDashboardTests(unittest.TestCase):
 
     def test_dashboard_does_not_call_a_disconnected_yun_unsafe_legacy(self) -> None:
         message_block = STEPPER_JS.split(
-            'if (!messageSticky && ["usb", "network"].includes',
+            'if (!messageSticky && ["usb", "network", "controllino"].includes',
             1,
         )[1].split("updateControls();", 1)[0]
-        self.assertIn('!connected\n        ? "Yún disconnected"', message_block)
+        self.assertIn(
+            '!connected\n        ? "Motion controller disconnected"',
+            message_block,
+        )
         self.assertIn("!directionCalibrationSafe", message_block)
         self.assertLess(
-            message_block.index('!connected\n        ? "Yún disconnected"'),
+            message_block.index(
+                '!connected\n        ? "Motion controller disconnected"'
+            ),
             message_block.index("!directionCalibrationSafe"),
         )
 
@@ -1652,6 +1857,9 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 json.loads(system_config_path.read_text(encoding="utf-8")),
                 {
                     "version": 1,
+                    "geometry": {
+                        "powder_mass_per_stepper_travel_g_per_mm": 2.4,
+                    },
                     "stepper": {
                         "dro_zero_raw_mm": -2.81,
                     },
@@ -1721,6 +1929,12 @@ class UsbStepperDashboardTests(unittest.TestCase):
         self.assertEqual(config["history_limit"], 10)
         self.assertEqual(config["solenoid_count"], 4)
         self.assertEqual(
+            config["geometry"],
+            {
+                "powder_mass_per_stepper_travel_g_per_mm": 2.4,
+            },
+        )
+        self.assertEqual(
             config["stepper"],
             {
                 "max_distance_mm": DEFAULT_STEPPER_MAX_DISTANCE_MM,
@@ -1730,6 +1944,14 @@ class UsbStepperDashboardTests(unittest.TestCase):
                 "home_speed_mm_s": DEFAULT_STEPPER_HOME_SPEED_MM_S,
             },
         )
+        saved_metadata = runtime.update_metadata(
+            {
+                "powder_flow_rate_g_per_s": "6.0",
+                "test_duration_s": "4.0",
+            }
+        )
+        self.assertEqual(saved_metadata["powder_flow_rate_g_per_s"], "6.0")
+        self.assertEqual(saved_metadata["test_duration_s"], "4.0")
         motor_on = runtime.toggle_stepper_brushless_motor()
         self.assertTrue(motor_on["confirmed"])
         self.assertTrue(motor_on["stepper"]["stepper_brushless_motor_on"])
@@ -2143,7 +2365,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
             responder.start()
             with self.assertRaisesRegex(
                 RuntimeError,
-                "Yún rejected the move: test interlock",
+                "motion controller rejected the move: test interlock",
             ):
                 runtime.move_stepper(
                     {

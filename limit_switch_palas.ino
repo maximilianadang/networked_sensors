@@ -177,6 +177,27 @@ struct QualifiedLimitInput {
 QualifiedLimitInput positiveLimitInput = {false, false, 0UL, 0};
 QualifiedLimitInput negativeLimitInput = {false, false, 0UL, 0};
 
+// --- Direction-selector input qualification ---
+// Unlike an endpoint input, D5 must accept both electrical transitions
+// symmetrically. A new level must remain continuous for 10 ms before it may
+// authorize a command, alter Local Velocity direction, or abort an active Web
+// Position move. This rejects the short D5 disturbances observed around the
+// DM542T enable transition without hiding a deliberate maintained switch
+// change. At the 10 mm/s firmware maximum, the qualification window represents
+// at most 0.1 mm of continued travel. A stable change still aborts Web Position
+// motion; it never reverses an active command.
+const unsigned long DIRECTION_QUALIFY_US = 10000UL;
+
+struct QualifiedDirectionInput {
+  bool qualifiedHigh;
+  bool transitionPending;
+  bool pendingHigh;
+  unsigned long transitionStartedUs;
+  byte rejectedTransitions;
+};
+
+QualifiedDirectionInput directionInput = {true, false, true, 0UL, 0};
+
 // DM542T common-anode enable wiring (verified against its V4.0 manual):
 // ENA+ remains at Yún 5 V and ENA- connects to D9. LOW places 5 V across the
 // opto-isolated ENA input and disables the motor output stage; HIGH produces
@@ -274,10 +295,11 @@ const char *lastCommandError = "none";
 // a means D4 OFF has been observed since boot, p/g are current/target steps,
 // c is the active command number, e is the software E-STOP latch, bo is the
 // brushless motor state, bp is its configured ON pulse width in us, and lx
-// packs qualified limit state plus diagnostic-only rejected-edge counters. dc marks
-// the read-only DRO decoder; df is freshness; dr/dd are absolute/reference
-// displacement in 0.01 mm; da is sample age; dq counts valid frames; and dx
-// packs rejected frames in its high byte and ISR-overrun drops in its low byte.
+// packs qualified D5/D6/D8 state plus diagnostic-only rejected-transition
+// counters. dc marks the read-only DRO decoder; df is freshness; dr/dd are
+// absolute/reference displacement in 0.01 mm; da is sample age; dq counts
+// valid frames; and dx packs rejected frames in its high byte and ISR-overrun
+// drops in its low byte.
 const unsigned long STATUS_HEARTBEAT_MS = 1000UL;
 const unsigned long STATUS_MOTION_MS = 100UL;
 unsigned long statusSequence = 0;
@@ -768,6 +790,46 @@ bool updateQualifiedLimit(
   return input->qualifiedActive;
 }
 
+void initializeQualifiedDirection(
+    QualifiedDirectionInput *input,
+    bool rawHigh,
+    unsigned long nowUs) {
+  input->qualifiedHigh = rawHigh;
+  input->transitionPending = false;
+  input->pendingHigh = rawHigh;
+  input->transitionStartedUs = nowUs;
+  input->rejectedTransitions = 0;
+}
+
+bool updateQualifiedDirection(
+    QualifiedDirectionInput *input,
+    bool rawHigh,
+    unsigned long nowUs) {
+  if (rawHigh == input->qualifiedHigh) {
+    if (input->transitionPending) {
+      input->transitionPending = false;
+      if (input->rejectedTransitions < 255) ++input->rejectedTransitions;
+      statusDirty = true;
+    }
+    return input->qualifiedHigh;
+  }
+
+  if (!input->transitionPending || input->pendingHigh != rawHigh) {
+    input->transitionPending = true;
+    input->pendingHigh = rawHigh;
+    input->transitionStartedUs = nowUs;
+    return input->qualifiedHigh;
+  }
+
+  // Unsigned subtraction is intentionally wrap-safe across micros() rollover.
+  if (nowUs - input->transitionStartedUs >= DIRECTION_QUALIFY_US) {
+    input->qualifiedHigh = input->pendingHigh;
+    input->transitionPending = false;
+    statusDirty = true;
+  }
+  return input->qualifiedHigh;
+}
+
 void updatePhysicalEndpointLatches(
     bool positiveLimitActive,
     bool negativeLimitActive) {
@@ -941,7 +1003,7 @@ void startHomeCommand() {
     rejectCommand(F("cycle D4 OFF before arming Home."));
     return;
   }
-  if (digitalRead(PIN_DIR) != LOW) {
+  if (directionInput.qualifiedHigh) {
     rejectCommand(F("D5 must authorize Reverse for Home."));
     return;
   }
@@ -1007,7 +1069,7 @@ void startMoveCommand(long deltaSteps, long speedSps, long commandId) {
   }
 
   int requestedDirection = deltaSteps > 0 ? 1 : -1;
-  bool d5AuthorizesPositive = digitalRead(PIN_DIR) == HIGH;
+  bool d5AuthorizesPositive = directionInput.qualifiedHigh;
   if ((requestedDirection > 0) != d5AuthorizesPositive) {
     rejectCommand(F("D5 does not authorize the signed direction."));
     return;
@@ -1424,14 +1486,20 @@ bool reportMachineStatus(
   // physical signed rates identical. ds remains in status as read-only
   // compatibility telemetry; it is no longer a command capability.
   long electricalSpeedSps = effectivePhysicalSpeedSps;
-  // lx packs qualified state and two saturating diagnostic-only counters
+  // lx packs qualified state and three saturating diagnostic-only counters
   // without expanding this AVR frame excessively:
+  //   bit 27=D5 qualifier capability, bit 26=D5 qualified HIGH,
+  //   bits 25..18=D5 rejected transitions,
   //   bit 17=D6 qualified active, bit 16=D8 qualified active,
   //   bits 15..8=D6 rejected edges, bits 7..0=D8 rejected edges.
   // The counters never participate in a motion decision. They make rejected
-  // raw edges visible even when short raw LOW/HIGH frames are overwritten in
-  // transport.
-  unsigned long packedLimitDiagnostics =
+  // raw transitions visible even when short raw frames are overwritten in
+  // transport. The capability bit distinguishes this layout from older
+  // 18-bit lx frames, including when qualified D5 is LOW with a zero counter.
+  unsigned long packedInputDiagnostics =
+      (1UL << 27) |
+      ((unsigned long)(directionInput.qualifiedHigh ? 1 : 0) << 26) |
+      ((unsigned long)directionInput.rejectedTransitions << 18) |
       ((unsigned long)(positiveLimitInput.qualifiedActive ? 1 : 0) << 17) |
       ((unsigned long)(negativeLimitInput.qualifiedActive ? 1 : 0) << 16) |
       ((unsigned long)positiveLimitInput.rejectedGlitches << 8) |
@@ -1459,7 +1527,7 @@ bool reportMachineStatus(
       directionRaw,
       positiveRaw,
       negativeRaw,
-      packedLimitDiagnostics,
+      packedInputDiagnostics,
       positiveLimitLatched ? 1 : 0,
       negativeLimitLatched ? 1 : 0,
       blocked ? 1 : 0,
@@ -1523,6 +1591,10 @@ void setup() {
   initializeQualifiedLimit(
       &negativeLimitInput,
       digitalRead(PIN_LIMIT_NEG) == NEG_LIMIT_ACTIVE_LEVEL,
+      limitInitUs);
+  initializeQualifiedDirection(
+      &directionInput,
+      digitalRead(PIN_DIR) == HIGH,
       limitInitUs);
   // Set the output latch LOW before enabling the pin driver so D9 cannot
   // produce an enable glitch during setup.
@@ -1594,16 +1666,20 @@ void loop() {
   if (!d4On) d4OffObservedSinceBoot = true;
   releaseExpiredOwner();
   bool d4MotionArmed = d4On && d4OffObservedSinceBoot;
-  bool d5Reverse = directionRaw == LOW;
-  unsigned long limitNowUs = micros();
+  unsigned long inputNowUs = micros();
+  bool directionHigh = updateQualifiedDirection(
+      &directionInput,
+      directionRaw == HIGH,
+      inputNowUs);
+  bool d5Reverse = !directionHigh;
   bool positiveLimitActive = updateQualifiedLimit(
       &positiveLimitInput,
       positiveRaw == POS_LIMIT_ACTIVE_LEVEL,
-      limitNowUs);
+      inputNowUs);
   bool negativeLimitActive = updateQualifiedLimit(
       &negativeLimitInput,
       negativeRaw == NEG_LIMIT_ACTIVE_LEVEL,
-      limitNowUs);
+      inputNowUs);
 
   static int lastPositiveRaw = -1;
   static int lastNegativeRaw = -1;

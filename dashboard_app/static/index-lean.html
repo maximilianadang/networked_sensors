@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flow Management Supervisor</title>
+  <link rel="stylesheet" href="/assets/dashboard-lean.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="status-strip" aria-live="polite">
+    <span class="pill" title="Browser connection to the dashboard API stream"><span id="streamDot" class="dot warn"></span><span id="streamStatus">Dashboard connecting</span></span>
+    <span class="pill"><span id="espDot" class="dot warn"></span><span id="espStatus">ESP32</span></span>
+    <span class="pill"><span id="dxDot" class="dot warn"></span><span id="dxStatus">DXMR90</span></span>
+    <span class="pill"><span id="stepperDot" class="dot warn"></span><span id="stepperStatus">Motion controller</span></span>
+    <span class="pill" title="Run recording state"><span id="runDot" class="dot"></span><span id="runStatus">Not recording</span></span>
+    <span class="pill clock-pill"><strong id="clockText" class="clock-text">No UTC sample yet</strong></span>
+  </div>
+</header>
+
+<main>
+  <section class="toolbar" aria-label="Run state">
+    <div class="toolbar-actions run-actions">
+      <button id="startRun" class="primary" type="button">Start</button>
+      <button id="stopRun" class="stop" type="button">Stop</button>
+      <button id="exportRun" type="button">Export</button>
+    </div>
+    <div class="emergency-actions" aria-label="Stepper emergency stop">
+      <button id="emergencyStop" class="emergency-stop" type="button"
+        title="Stops step pulses through the dashboard and controller firmware; not a hardwired safety circuit">E-STOP</button>
+      <button id="emergencyReset" class="emergency-reset" type="button" title="Reset E-STOP">Reset</button>
+      <span id="emergencyState" class="emergency-state" aria-live="assertive">E-STOP status unknown</span>
+    </div>
+    <div class="toolbar-actions solenoid-actions">
+      <button id="sol0" class="solenoid" type="button" aria-keyshortcuts="1">Solenoid 1 <kbd class="shortcut-key" aria-hidden="true">1</kbd></button>
+      <button id="sol1" class="solenoid" type="button" aria-keyshortcuts="2">Solenoid 2 <kbd class="shortcut-key" aria-hidden="true">2</kbd></button>
+      <button id="sol2" class="solenoid" type="button" aria-keyshortcuts="3">Solenoid 3 <kbd class="shortcut-key" aria-hidden="true">3</kbd></button>
+      <button id="sol3" class="solenoid" type="button" aria-keyshortcuts="4">Solenoid 4 <kbd class="shortcut-key" aria-hidden="true">4</kbd></button>
+    </div>
+  </section>
+
+  <section class="metric-grid" aria-label="Live values">
+    <article class="metric">
+      <label>ESP32 Pressure <span class="unit">(bar)</span></label>
+      <div class="metric-values">
+        <div><span class="channel">P1</span><span><span id="mEspP1" class="value">--</span></span></div>
+        <div><span class="channel">P2</span><span><span id="mEspP2" class="value">--</span></span></div>
+        <div><span class="channel">P3</span><span><span id="mEspP3" class="value">--</span></span></div>
+      </div>
+    </article>
+    <article class="metric"><label>SICK Pressure (max)</label><div><span id="mSickPressure" class="value">--</span><span class="unit"> bar</span></div></article>
+    <article class="metric"><label>Open-Line Air Flow</label><div><span id="mOpenFlow" class="value">--</span><span class="unit"> g/min</span></div></article>
+    <article class="metric"><label>Air:Powder Ratio</label><div><span id="mAirPowderRatio" class="value">--</span><span class="unit"> : 1</span></div></article>
+    <article class="metric"><label>SICK Flow · Solenoid 4</label><div><span id="mSickFlow" class="value">--</span><span class="unit"> g/min</span></div></article>
+    <article class="metric"><label>Heartbeat</label><div><span id="mHeartbeat" class="value">--</span><span class="unit"> count</span></div></article>
+  </section>
+
+  <section class="plot-grid" aria-label="Plots">
+    <article class="plot-panel">
+      <div class="plot-head">
+        <h2>Pressure (bar)</h2>
+        <div class="legend">
+          <span style="color: var(--chart-blue)"><i class="swatch"></i>ESP32 1</span>
+          <span style="color: var(--chart-green)"><i class="swatch"></i>ESP32 2</span>
+          <span style="color: var(--chart-amber)"><i class="swatch"></i>ESP32 3</span>
+          <span style="color: var(--chart-red)"><i class="swatch"></i>SICK 1</span>
+          <span style="color: var(--chart-cyan)"><i class="swatch"></i>SICK 2</span>
+        </div>
+      </div>
+      <canvas id="pressureChart" width="900" height="320"></canvas>
+    </article>
+    <article class="plot-panel">
+      <div class="plot-head">
+        <h2>ESP32 Mass Flow (g/min)</h2>
+        <div class="legend">
+          <span style="color: var(--chart-blue)"><i class="swatch"></i>Line 1</span>
+          <span style="color: var(--chart-green)"><i class="swatch"></i>Line 2</span>
+          <span style="color: var(--chart-amber)"><i class="swatch"></i>Line 3</span>
+          <span style="color: var(--chart-violet)"><i class="swatch"></i>Open SUM</span>
+        </div>
+      </div>
+      <canvas id="espFlowChart" width="900" height="320"></canvas>
+    </article>
+    <article class="plot-panel">
+      <div class="plot-head">
+        <h2>SICK Mass Flow (g/min)</h2>
+        <div class="legend">
+          <span style="color: var(--chart-red)"><i class="swatch"></i>Sensor 1</span>
+          <span style="color: var(--chart-cyan)"><i class="swatch"></i>Sensor 2</span>
+          <span style="color: var(--chart-violet)"><i class="swatch"></i>Open SUM</span>
+        </div>
+      </div>
+      <canvas id="sickFlowChart" width="900" height="320"></canvas>
+    </article>
+  </section>
+
+  <section class="lower-grid">
+    <article class="control-panel stepper-panel">
+      <div class="panel-head"><h2>Motor Control</h2><span class="pill" id="stepperState">Unknown</span></div>
+      <div class="stepper-layout">
+        <section id="stepperPistonVisual" class="piston-visual is-unavailable"
+          aria-label="Read-only piston head position measured by the DRO">
+          <div class="piston-readout">
+            <div class="piston-readout-values">
+              <div class="piston-position-readout">
+                <span class="piston-eyebrow">DRO position</span>
+                <strong id="stepperDroPosition" class="piston-position">--</strong>
+              </div>
+              <div class="piston-secondary-readout">
+                <span class="piston-eyebrow">DRO velocity</span>
+                <strong id="stepperDroVelocity" class="piston-secondary-value">--</strong>
+              </div>
+              <div class="piston-secondary-readout">
+                <span class="piston-eyebrow">Pulse timer</span>
+                <strong id="stepperPrimaryPulseOutput" class="piston-secondary-value">--</strong>
+              </div>
+            </div>
+
+            <div class="piston-zero-controls" role="group" aria-label="DRO zero controls">
+              <button id="stepperSetDroZero" type="button">Set zero here</button>
+              <button id="stepperMoveToDroZero" type="button" disabled
+                title="Deferred until the closed-loop controller is implemented and physically tested">Move to zero</button>
+              <span id="stepperDroZeroStatus" class="visually-hidden" role="status"
+                aria-live="polite"></span>
+            </div>
+          </div>
+
+          <div class="piston-stage" aria-hidden="true">
+            <div id="stepperDroMinLabel" class="piston-end-label piston-end-start">D6 bottom −137.18 mm</div>
+            <div id="stepperDroMaxLabel" class="piston-end-label piston-end-finish">D8 top 0 mm</div>
+            <div id="stepperDirectionIndicator"
+              class="piston-direction-indicator is-unavailable">
+              <span id="stepperDirectionLabel" class="piston-direction-label">D5 unavailable</span>
+              <span id="stepperDirectionArrow" class="piston-direction-arrow"></span>
+              <span id="stepperDirectionBlocked" class="piston-direction-blocked">
+                <span class="piston-prohibition-symbol"></span>
+                <span id="stepperDirectionBlockLabel"
+                  class="piston-direction-block-label">Limit blocked</span>
+              </span>
+            </div>
+            <div class="piston-axis">
+              <div class="piston-rod"></div>
+              <div class="piston-head"><span>HEAD</span></div>
+              <div class="piston-origin"></div>
+            </div>
+            <div class="piston-ruler"></div>
+          </div>
+        </section>
+
+        <div class="stepper-console">
+          <form id="stepperForm" class="stepper-control-form">
+            <div class="form-grid">
+              <fieldset class="mode-options">
+                <legend>Control mode</legend>
+                <label class="radio-option"><input id="stepperModeLocal" name="stepper_control_mode" type="radio" value="local_velocity" checked>Local Speed</label>
+                <label class="radio-option"><input id="stepperModeWeb" name="stepper_control_mode" type="radio" value="web_position">Web Position</label>
+              </fieldset>
+              <fieldset id="stepperSoftwareDirection" class="mode-options" hidden>
+                <legend>Move direction</legend>
+                <label class="radio-option"><input id="stepperDirectionForward" name="stepper_direction" type="radio" value="forward" checked>Forward</label>
+                <label class="radio-option"><input id="stepperDirectionReverse" name="stepper_direction" type="radio" value="reverse">Reverse</label>
+              </fieldset>
+              <label id="stepperDistanceField" hidden>Distance (mm)<input id="stepperDistance" name="distance_mm" type="number" required disabled></label>
+              <label><span id="stepperSpeedLabel">Speed (mm/s)</span><input id="stepperSpeed" name="speed_mm_s" type="number" required></label>
+            </div>
+            <div class="form-actions">
+              <button id="stepperMove" class="primary" type="submit" aria-keyshortcuts="Space" hidden>Move <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
+              <button id="stepperHome" type="button" hidden>Home to D8 (top)</button>
+              <button id="stepperStop" class="stop" type="button" aria-keyshortcuts="Space" hidden>Stop <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
+              <button id="stepperApplySpeed" type="button">Apply Motor Speed</button>
+              <span id="stepperSoftwareRun" class="software-run" hidden>
+                <button id="stepperRunReverse" type="button">Reverse</button>
+                <button id="stepperRunStop" class="stop" type="button">Stop</button>
+                <button id="stepperRunForward" type="button">Forward</button>
+              </span>
+              <span class="visually-hidden" id="stepperMessage" role="status" aria-live="polite"></span>
+              <span id="stepperCommandFeedback" class="stepper-command-feedback"
+                role="alert" hidden></span>
+            </div>
+            <fieldset class="brushless-control">
+              <legend>Brushless motor</legend>
+              <div class="brushless-summary">
+                <span id="brushlessMotorState" class="pill" aria-live="polite">Unknown</span>
+                <small id="brushlessMotorDetail">D12 Pulse Timer: --</small>
+              </div>
+              <label class="brushless-pulse-field">Pulse width (µs)
+                <input id="brushlessPulseWidth" name="brushless_pulse_us"
+                  type="number" min="1000" max="2000" step="1" value="1200"
+                  inputmode="numeric">
+              </label>
+              <button id="brushlessApplyPulse" type="button">Apply pulse</button>
+              <button id="brushlessMotorToggle" type="button" aria-keyshortcuts="M">
+                <span id="brushlessMotorAction">Turn on</span>
+                <kbd class="shortcut-key" aria-hidden="true">M</kbd>
+              </button>
+            </fieldset>
+          </form>
+
+          <section id="stepperInterlocks" class="source-row stepper-interlocks" hidden>
+            <header><h3>Interlocks</h3></header>
+            <dl>
+              <div class="interlock-item"><dt title="Local enable input">Enable (D4)</dt><dd id="stepperLocal">--</dd></div>
+              <div class="interlock-item"><dt id="stepperD5Label" title="Manual or authorized travel direction">Direction (D5)</dt><dd id="stepperManualDirection">--</dd></div>
+              <div class="interlock-item"><dt title="Driver enable output">Driver (D9)</dt><dd id="stepperDriverOutput">--</dd></div>
+              <div class="interlock-item"><dt title="Positive/bottom travel limit">+ Limit (D6 · bottom)</dt><dd id="stepperPositiveLimit">--</dd></div>
+              <div class="interlock-item"><dt title="Negative/top travel limit">− Limit (D8 · top)</dt><dd id="stepperNegativeLimit">--</dd></div>
+              <div class="interlock-item"><dt title="Final motion authorization decision">Decision</dt><dd id="stepperBlocked">--</dd></div>
+            </dl>
+          </section>
+
+        </div>
+      </div>
+    </article>
+
+    <article class="metadata-panel">
+      <div class="panel-head"><h2>Test Metadata</h2><span class="pill" id="metadataStatus">Unsaved</span></div>
+      <form id="metadataForm">
+        <div class="form-grid">
+          <label>Sample number<input name="sample_number" autocomplete="off"></label>
+          <label>Sub number<input name="sub_number" autocomplete="off"></label>
+          <label>Dispenser<input name="dispenser" autocomplete="off"></label>
+          <label>Material<input name="material" autocomplete="off"></label>
+          <label>Powder flow rate (g/s)<input name="powder_flow_rate_g_per_s" type="number" min="0" step="0.001" inputmode="decimal" autocomplete="off"></label>
+          <label>Desired test duration (s)<input name="test_duration_s" type="number" min="0" step="0.1" inputmode="decimal" autocomplete="off"></label>
+          <div id="metadataMotionPlan" class="metadata-motion-plan wide" role="status" aria-live="polite">Enter powder flow and duration to calculate the Web Position setpoints.</div>
+          <label class="wide">Description<input name="description" autocomplete="off"></label>
+          <label class="wide metadata-notes">Notes<textarea name="notes"></textarea></label>
+        </div>
+        <div class="form-actions">
+          <button class="primary" type="submit">Save Metadata</button>
+        </div>
+      </form>
+    </article>
+  </section>
+
+  <details class="source-panel source-drawer">
+    <summary class="source-drawer-summary"><span>Source details</span><span id="historyStatus">0 samples</span></summary>
+    <div class="source-body">
+      <details class="stepper-diagnostics">
+        <summary>Stepper diagnostics and motion telemetry</summary>
+        <label id="stepperCommandField" hidden>Command ID (optional)<input id="stepperCommandInput" name="command_id" form="stepperForm" maxlength="64" autocomplete="off" disabled></label>
+        <dl>
+          <dt>Source / owner</dt><dd id="stepperOwner">--</dd>
+          <dt>Control mode</dt><dd id="stepperModeStatus">--</dd>
+          <dt>Configured speed</dt><dd id="stepperConfiguredSpeed">--</dd>
+          <dt>Scheduled speed</dt><dd id="stepperEffectiveSpeed">--</dd>
+          <dt>Measured STEP output</dt><dd id="stepperMeasuredSpeed">--</dd>
+          <dt>Command</dt><dd id="stepperCommand">--</dd>
+          <dt>Fixed physical direction</dt><dd id="stepperDirectionStatus">--</dd>
+          <dt>STEP pulse engine</dt><dd id="stepperPulseEngine">--</dd>
+          <dt>Limit input filter</dt><dd id="stepperLimitFilter">--</dd>
+          <dt>Raw DRO position</dt><dd id="stepperDroRawPosition">--</dd>
+          <dt>System DRO zero</dt><dd id="stepperDroZeroDiagnostic">Not set</dd>
+          <dt>DRO frames</dt><dd id="stepperDroFrames">--</dd>
+          <dt>USB status sequence</dt><dd id="stepperSequence">--</dd>
+          <dt>Transport</dt><dd id="stepperTransport">--</dd>
+        </dl>
+      </details>
+      <div class="source-grid">
+        <section class="source-row">
+          <header><h3>ESP32</h3><span class="pill"><span id="espRowDot" class="dot warn"></span><span id="espRowStatus">Unknown</span></span></header>
+          <dl>
+            <dt>Mode</dt><dd id="espMode">--</dd>
+            <dt>Age</dt><dd id="espAge">--</dd>
+            <dt>Pressure ADC</dt><dd id="espPressureAdc">--</dd>
+            <dt>Flow ADC</dt><dd id="espFlowAdc">--</dd>
+            <dt>Pressure</dt><dd id="espPressure">--</dd>
+            <dt>Flow</dt><dd id="espFlow">--</dd>
+            <dt>Transport</dt><dd id="espTransport">--</dd>
+          </dl>
+        </section>
+        <section class="source-row">
+          <header><h3>DXMR90</h3><span class="pill"><span id="dxRowDot" class="dot warn"></span><span id="dxRowStatus">Unknown</span></span></header>
+          <dl>
+            <dt>Mode</dt><dd id="dxMode">--</dd>
+            <dt>Age</dt><dd id="dxAge">--</dd>
+            <dt>Port 1</dt><dd id="dxPort1">--</dd>
+            <dt>Port 2</dt><dd id="dxPort2">--</dd>
+          </dl>
+        </section>
+      </div>
+    </div>
+  </details>
+</main>
+
+  <script type="module" src="/assets/app-lean.js"></script>
+</body>
+</html>

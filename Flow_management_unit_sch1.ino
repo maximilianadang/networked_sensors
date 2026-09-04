@@ -24,10 +24,9 @@
 #include <ESPmDNS.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include "wifi_credentials.h"
 
 // ── WiFi ─────────────────────────────────────────────────────────────
-const char* WIFI_SSID = "GL-MT3000-b3a";
-const char* WIFI_PASS = "4ACZ53S976";
 const char* MDNS_NAME = "testbench";
 // ────────────────────────────────────────────────────────────────────
 

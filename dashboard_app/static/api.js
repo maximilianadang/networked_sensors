@@ -17,6 +17,7 @@ export const API = Object.freeze({
   stepperMotorPulse: "/api/stepper/motor/pulse",
   stepperHome: "/api/stepper/home",
   stepperControlMode: "/api/stepper/control-mode",
+  stepperLocalRun: "/api/stepper/local-run",
   stepperSpeed: "/api/stepper/speed",
   stepperDroZero: "/api/stepper/dro-zero"
 });

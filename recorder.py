@@ -324,6 +324,16 @@ class FlowRunRecorder:
             pressure = [None, None, None]
         if not isinstance(flow, list):
             flow = [None, None, None]
+        powder_flow_g_per_s = self.metadata.get(
+            "powder_flow_rate_g_per_s",
+            "",
+        )
+        powder_flow_numeric = as_float(powder_flow_g_per_s)
+        powder_flow_g_per_min = (
+            ""
+            if powder_flow_numeric is None
+            else format_float(powder_flow_numeric * 60, 3)
+        )
 
         header_lines = [
             comment_line("schema_version", "1.0"),
@@ -350,7 +360,12 @@ class FlowRunRecorder:
             ),
             comment_line(
                 "powder_flow_rate_g_per_min",
-                self.metadata.get("powder_flow_rate_g_per_min", ""),
+                powder_flow_g_per_min,
+            ),
+            comment_line("powder_flow_rate_g_per_s", powder_flow_g_per_s),
+            comment_line(
+                "test_duration_s",
+                self.metadata.get("test_duration_s", ""),
             ),
             comment_line("description", self.metadata.get("description", "")),
             comment_line("notes", self.metadata.get("notes", "")),

@@ -1,4 +1,7 @@
 __pycache__/
 recordings/
 recordings_processed/
+wifi_credentials.h
+.wifi_credentials.h.*
+.arduino-build/
 documentation/wiring/assets/adafruit-3970-mouser.jpg
