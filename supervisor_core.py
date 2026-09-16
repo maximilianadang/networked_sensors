@@ -1913,10 +1913,21 @@ class NetworkStepperSource(UsbStepperSource):
             self._thread.join(timeout=max(1.0, self.timeout + self.period_s))
 
 
+def solenoid_source_name(index: int, stepper_mode: str) -> str:
+    """Physical ownership: Controllino R5 owns valve 4 on that installation."""
+    return "stepper" if index == 3 and stepper_mode == "controllino" else "esp32"
+
+
 class ControllinoProtocol:
     """Machine semantics shared by USB and Ethernet; transports only move bytes."""
 
     mode = "controllino"  # Dashboard behavior depends on the machine, not the cable.
+    expected_fields = UsbStepperSource.expected_fields + (
+        "stepper_solenoid4_capable", "stepper_solenoid4_on",
+        "stepper_firmware_version", "stepper_aux_kind", "stepper_aux_pin",
+        "stepper_servo_capable", "stepper_servo_enabled", "stepper_servo_pulse_us",
+        "stepper_servo_min_us", "stepper_servo_max_us",
+    )
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
@@ -1931,6 +1942,29 @@ class ControllinoProtocol:
             raise ValueError("Controllino status is not valid JSON") from exc
         if not isinstance(payload, dict):
             raise ValueError("Controllino status must be a JSON object")
+
+        version = payload.get("fw")
+        kind = payload.get("aux", "esc" if "bo" in payload else None)
+        if version is not None and (not isinstance(version, str) or not version or len(version) > 32):
+            raise ValueError("Controllino firmware version must be a short string")
+        if kind not in (None, "esc", "servo"):
+            raise ValueError("Unknown Controllino auxiliary capability")
+        servo = kind == "servo"
+        if servo:
+            if not version or "bo" in payload or "bp" in payload:
+                raise ValueError("Servo firmware requires a version and no ESC fields")
+            if any(type(payload.get(key)) is not int for key in ("sv", "sp", "smin", "smax", "apin")):
+                raise ValueError("Servo telemetry must contain integer state, pulse, limits and pin")
+            if (payload["sv"] not in (0, 1) or not 0 < payload["smin"] < payload["smax"] < 20000
+                    or not payload["smin"] <= payload["sp"] <= payload["smax"]
+                    or not 0 <= payload["apin"] < 256):
+                raise ValueError("Invalid servo telemetry range")
+            if payload.get("e") == 1 and payload["sv"]:
+                raise ValueError("Servo pulses cannot be enabled during E-STOP")
+
+        solenoid4 = payload.get("sol4")
+        if "sol4" in payload and (type(solenoid4) is not int or solenoid4 not in (0, 1)):
+            raise ValueError("Controllino sol4 must be 0 or 1")
 
         # The Controllino truthfully uses -1/0 for absent switches and DRO.
         # Adapt those unavailable inputs to the legacy decoder, then explicitly
@@ -1953,6 +1987,16 @@ class ControllinoProtocol:
         values = UsbStepperSource.decode_status_line(json.dumps(payload))
         values.update(
             {
+                "stepper_firmware_version": version,
+                "stepper_aux_kind": kind,
+                "stepper_aux_pin": payload.get("apin"),
+                "stepper_servo_capable": servo,
+                "stepper_servo_enabled": bool(payload["sv"]) if servo else False,
+                "stepper_servo_pulse_us": payload.get("sp") if servo else None,
+                "stepper_servo_min_us": payload.get("smin") if servo else None,
+                "stepper_servo_max_us": payload.get("smax") if servo else None,
+                "stepper_solenoid4_capable": "sol4" in payload,
+                "stepper_solenoid4_on": bool(solenoid4) if "sol4" in payload else None,
                 "stepper_local_enabled": not bool(values["stepper_estop_latched"]),
                 "stepper_authorized_direction": "both",
                 "stepper_home_capable": False,
@@ -1977,6 +2021,27 @@ class ControllinoProtocol:
         # Signed commands supply direction authority; preserve any limits
         # reported by newer firmware, even though this installation lacks them.
         self._validate_directional_limits(values, delta_steps)
+
+    def set_servo_pulse(self, pulse_us: object) -> None:
+        values = self._require_connected()
+        if values.get("stepper_servo_capable") is not True:
+            raise RuntimeError("Connected firmware does not support position-servo control")
+        if type(pulse_us) is not int or (pulse_us != 0 and not
+                values["stepper_servo_min_us"] <= pulse_us <= values["stepper_servo_max_us"]):
+            raise ValueError("pulse_us must be zero (disable) or an integer within the servo limits")
+        if pulse_us and values.get("stepper_estop_latched"):
+            raise RuntimeError("Reset E-STOP before enabling servo pulses")
+        self._write_command(f"V1 A{pulse_us}\n".encode("ascii"), "servo position")
+
+    def set_solenoid(self, index: int, on: bool) -> None:
+        if index != 3 or type(on) is not bool:
+            raise ValueError("Controllino supports solenoid index 3 with a boolean state")
+        values = self._require_connected()
+        if values.get("stepper_solenoid4_capable") is not True:
+            raise RuntimeError("Controllino firmware needs solenoid 4 support")
+        if on and values.get("stepper_estop_latched"):
+            raise RuntimeError("reset the software E-STOP before opening solenoid 4")
+        self._write_command(f"V1 L4,{int(on)}\n".encode("ascii"), "solenoid 4")
 
     def set_local_run(
         self, direction: object
@@ -2565,13 +2630,24 @@ class SourceMerger:
             transport_error_field = f"{source.name}_transport_error"
             if transport_error_field in source.expected_fields:
                 sample[transport_error_field] = getattr(source, "last_error", None)
+        for index in range(ESP32_SOLENOID_COUNT):
+            owner = solenoid_source_name(index, str(sample.get("stepper_mode", "off")))
+            field = "stepper_solenoid4_on" if owner == "stepper" else f"esp32_sol{index + 1}"
+            connected = sample.get(f"{owner}_connected") is True
+            if owner == "stepper":
+                connected = (connected and sample.get("stepper_solenoid4_capable") is True
+                             and not sample.get("stepper_transport_error"))
+            sample[f"solenoid{index + 1}_source"] = owner
+            sample[f"solenoid{index + 1}_connected"] = bool(connected)
+            sample[f"solenoid{index + 1}_on"] = sample.get(field) if connected else None
+
         sample["esp32_open_flow_gmin"] = self._sum_open_flows(
             sample,
             self.OPEN_FLOW_PAIRS,
         )
         sample["dxmr90_open_total_mass_flow_g_min"] = self._sum_open_flows(
             sample,
-            (("esp32_sol4", "dxmr90_total_mass_flow_g_min"),),
+            (("solenoid4_on", "dxmr90_total_mass_flow_g_min"),),
         )
         return sample
 

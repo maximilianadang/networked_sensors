@@ -42,7 +42,7 @@ export function createMetadataComponent({
     if (powderFlowField.value.trim() === "") {
       setText(
         els.metadataMotionPlan,
-        `Enter powder flow and duration to calculate Web Position setpoints · geometry ${powderMassPerTravel} g/mm`,
+        `Enter powder flow and duration to calculate Positional setpoints · geometry ${powderMassPerTravel} g/mm`,
       );
       return;
     }
@@ -94,12 +94,12 @@ export function createMetadataComponent({
     } else if (distanceMm === null) {
       setText(
         els.metadataMotionPlan,
-        `Web Position speed ${speedMmS.toFixed(3)} mm/s · enter duration to calculate travel`,
+        `Positional speed ${speedMmS.toFixed(3)} mm/s · enter duration to calculate travel`,
       );
     } else {
       setText(
         els.metadataMotionPlan,
-        `Web Position setpoints ${speedMmS.toFixed(3)} mm/s · ${distanceMm.toFixed(2)} mm travel · geometry ${powderMassPerTravel} g/mm`,
+        `Positional setpoints ${speedMmS.toFixed(3)} mm/s · ${distanceMm.toFixed(2)} mm travel · geometry ${powderMassPerTravel} g/mm`,
       );
     }
   }

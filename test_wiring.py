@@ -26,7 +26,7 @@ class WiringTests(unittest.TestCase):
             self.skipTest("C++11 compiler unavailable")
         with tempfile.TemporaryDirectory() as directory:
             stage = Path(directory)
-            for name in (*HEADERS, "wiring_checks.h"):
+            for name in (*HEADERS, "wiring_checks.h", "controllino_firmware.h"):
                 text = (ROOT / name).read_text()
                 if name == header:
                     for old, new in replacements:
@@ -59,7 +59,7 @@ class WiringTests(unittest.TestCase):
 
     def test_alternate_wiring_compiles_without_sketch_edits(self):
         cases = (
-            (HEADERS[0], (("PIN_DIR = 5", "PIN_DIR = 4"),)),
+            (HEADERS[0], (("PIN_DIR = 5", "PIN_DIR = 8"),)),
             (HEADERS[1], (("{5, 6, 9, 10}", "{10, 9, 6, 5}"),
                           ("{0, 1, 2}", "{2, 0, 3}"))),
             (HEADERS[2], (("PIN_RUN = 4", "PIN_RUN = 5"),

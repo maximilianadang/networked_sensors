@@ -1,5 +1,8 @@
 from pathlib import Path
 import unittest
+import subprocess
+import tempfile
+import shutil
 
 FIRMWARE = (Path(__file__).parent / "controllino_motion_control.ino").read_text()
 
@@ -36,6 +39,49 @@ class ControllinoMotionFirmwareTests(unittest.TestCase):
                            ("PIN_STEP", "STEP_IDLE"), ("PIN_DIR", "DIR_REVERSE")):
             self.assertLess(setup.index(f"digitalWrite({pin}, {level})"),
                             setup.index(f"pinMode({pin}, OUTPUT)"))
+
+    def test_command_status_is_immediate_then_periodic(self):
+        # Execute the real loop with a fake clock and transport. A stop must be
+        # reported after motion service, even when the heartbeat is not due.
+        loop = FIRMWARE[FIRMWARE.index("void loop() {"):]
+        harness = r"""
+unsigned long now=100, lastStatusMs=100, ownerAtMs=100;
+const int OWNER_NONE=0, OWNER_RELEASE_MS=2000;
+int owner=0, localCommand=0, Serial=0, reports=0;
+bool statusPending=false, running=true, command=false, motionServiced=false;
+struct Dro { void poll() {} } dro;
+unsigned long millis(){return now;}
+bool moving(){return running;}
+void serviceUsb(){if(command){statusPending=true;running=false;command=false;}}
+void serviceNetwork(){}
+void serviceMotion(){motionServiced=true;}
+void writeStatus(int){if(!motionServiced)__builtin_trap();++reports;}
+""" + loop + r"""
+int main(){
+ command=true; loop();
+ if(reports!=1 || statusPending || running)return 1;
+ loop(); if(reports!=1)return 2;
+ now=1099;loop();if(reports!=1)return 3;
+ now=1100;loop();if(reports!=2)return 4;
+ return 0;
+}
+"""
+        compiler = "/Library/Developer/CommandLineTools/usr/bin/clang++"
+        if not Path(compiler).exists():
+            compiler = shutil.which("c++")
+        if not compiler:
+            self.skipTest("C++ compiler unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "status.cpp"
+            binary = Path(directory) / "status"
+            source.write_text(harness)
+            sdk = Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
+            flags = ["-isysroot", str(sdk)] if sdk.exists() else []
+            result = subprocess.run([compiler, *flags, "-std=c++11", str(source), "-o", str(binary)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            subprocess.run([str(binary)], check=True)
+        command_body = FIRMWARE.split("void processCommand(char *line, byte source) {", 1)[1]
+        self.assertLess(command_body.index("statusPending = true"), command_body.index("return"))
 
     def test_yun_only_interfaces_are_absent(self):
         self.assertNotIn("Serial1", FIRMWARE)

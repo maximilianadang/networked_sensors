@@ -2,6 +2,7 @@
 // Also owns Interlocks, E-STOP, and motion telemetry inside Source details.
 // Markup: index.html; appearance: dashboard.css (search the same panel name).
 import {API, postJson} from "../api.js";
+import {createServoComponent} from "./servo.js";
 import {UI_CONFIG} from "../config.js";
 import {elements, numberValue, setText} from "../dom.js";
 
@@ -34,6 +35,8 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   const stepperPrimaryPulseOutput =
     document.getElementById("stepperPrimaryPulseOutput");
   const stepperDroVelocity = document.getElementById("stepperDroVelocity");
+
+  const servo = createServoComponent({getLatest, applySample, postJson});
 
   let controlModeDirty = false;
   let controlModeRequestPending = false;
@@ -210,11 +213,11 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       ? controllino
         ? "Positive travel magnitude; choose Forward or Reverse above"
         : "Positive travel magnitude; physical D5 selects Forward or Reverse"
-      : "Available only in Web Position mode";
+      : "Available only in Positional mode";
     els.stepperCommandInput.disabled = !webPositionMode;
     els.stepperCommandInput.title = webPositionMode
       ? "Optional identifier for this position command"
-      : "Available only in Web Position mode";
+      : "Available only in Positional mode";
     setText(els.stepperSpeedLabel, "Speed (mm/s)");
     els.stepperMove.disabled = motionRequestPending !== false || !commandCapable ||
       !directionCalibrationSafe || !connected || !webPositionMode || estopLatched ||
@@ -231,10 +234,10 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     for (const input of modeInputs) input.disabled = modeDisabled;
     els.stepperMove.title = motionRequestPending !== false
       ? "Waiting for the current motion command"
-      : "Start the Web Position move (Space while the page has focus)";
+      : "Start the Positional move (Space while the page has focus)";
     els.stepperStop.title = motionRequestPending === "stop"
       ? "Waiting for Stop confirmation"
-      : "Stop Web Position motion (Space while the page has focus)";
+      : "Stop Positional motion (Space while the page has focus)";
 
     if (controlModeRequestPending) {
       for (const input of modeInputs) input.title = "Waiting for the Yún to confirm the control mode";
@@ -253,7 +256,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     if (speedRequestPending) {
       els.stepperApplySpeed.title = "Waiting for the Yún to confirm the new speed";
     } else if (webPositionMode) {
-      els.stepperApplySpeed.title = "Move uses the speed field directly in Web Position mode";
+      els.stepperApplySpeed.title = "Move uses the speed field directly in Positional mode";
     } else if (!Number.isFinite(speed) ||
       speed < limits.min_speed_mm_s || speed > limits.max_speed_mm_s) {
       els.stepperApplySpeed.title = `Enter a speed from ${limits.min_speed_mm_s} through ${limits.max_speed_mm_s} mm/s`;
@@ -325,6 +328,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   }
 
   function render(latest) {
+    servo.render(latest);
     const moving = latest.stepper_moving === true;
     const estopCapable = latest.stepper_estop_capable === true;
     const estopLatched = latest.stepper_estop_latched === true;
@@ -383,8 +387,8 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     }
     setText(els.stepperOwner, `${latest.stepper_mode || "--"} / ${latest.stepper_control_owner || "--"}`);
     setText(els.stepperModeStatus, webPositionMode
-      ? "Web Position"
-      : controlMode === "local_velocity" ? "Local Speed" : "--");
+      ? "Positional"
+      : controlMode === "local_velocity" ? "Directional" : "--");
     setText(els.stepperConfiguredSpeed, `${numberValue(latest, "stepper_command_speed_mm_s", 3)} mm/s`);
     setText(els.stepperEffectiveSpeed, `${numberValue(latest, "stepper_speed_mm_s", 3)} mm/s`);
     const pulseMeasurementCapable = latest.stepper_pulse_measurement_capable === true;
@@ -601,11 +605,11 @@ export function createStepperComponent({getLatest, applySample, limits}) {
           : commandCapable
             ? webPositionMode
               ? controllino
-                ? "Web Position ready; signed commands select direction (no limit switches connected)"
-                : "Web Position ready; D4 arms, D5 selects direction, and D6/D8 stop travel"
+                ? "Positional ready; signed commands select direction (no limit switches connected)"
+                : "Positional ready; D4 arms, D5 selects direction, and D6/D8 stop travel"
               : controllino
-                ? "Local Speed uses software run/direction commands"
-                : "Local Speed: D4 runs/stops and D5 selects direction"
+                ? "Directional uses software run/direction commands"
+                : "Directional: D4 runs/stops and D5 selects direction"
             : latest.stepper_speed_command_capable
               ? `${transportLabel} speed tuning ready; upload position-capable firmware for Home and Move`
               : `${transportLabel} diagnostics only; upload T4B firmware for speed tuning`);
@@ -835,7 +839,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     controlModeDirty = true;
     controlModeRequestPending = true;
     messageSticky = true;
-    setText(els.stepperMessage, `Selecting ${webPosition ? "Web Position" : "Local Speed"}…`);
+    setText(els.stepperMessage, `Selecting ${webPosition ? "Positional" : "Directional"}…`);
     updateControls();
     try {
       const payload = await postJson(API.stepperControlMode, {web_position: webPosition});
@@ -845,8 +849,8 @@ export function createStepperComponent({getLatest, applySample, limits}) {
         throw new Error("the Yún did not return the requested control mode");
       }
       setText(els.stepperMessage, webPosition
-        ? "Web Position selected; D5 chooses travel direction; D6/D8 stop travel"
-        : "Local Speed selected; D4 runs/stops and D5 selects direction");
+        ? "Positional selected; D5 chooses travel direction; D6/D8 stop travel"
+        : "Directional selected; D4 runs/stops and D5 selects direction");
     } catch (error) {
       controlModeDirty = false;
       els.stepperModeWeb.checked = previousWebPosition;

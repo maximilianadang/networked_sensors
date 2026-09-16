@@ -19,18 +19,16 @@ export function createToolbarComponent({
 
   function updateSolenoidControls() {
     const {latest, run} = getState();
-    const simulated = run.esp32_source === "sim";
-    const realAndLive = run.esp32_source === "real" &&
-      latest && latest.esp32_connected === true;
-    const enabled = simulated || realAndLive;
     for (let index = 0; index < solenoidCount; index += 1) {
+      const enabled = latest?.[`solenoid${index + 1}_connected`] === true;
+      const owner = latest?.[`solenoid${index + 1}_source`] === "stepper" ? "Controllino" : "ESP32";
       const pending = pendingSolenoids.has(index);
       els[`sol${index}`].disabled = !enabled || pending;
       els[`sol${index}`].title = pending
         ? `Sending Solenoid ${index + 1} command`
         : enabled
           ? `Toggle Solenoid ${index + 1} (keyboard ${index + 1})`
-          : "ESP32 control stream is not live";
+          : `${owner} control stream is not live`;
     }
   }
 
@@ -54,7 +52,7 @@ export function createToolbarComponent({
     setText(els.clockText, compactTimestamp);
     els.clockText.title = timestamp;
     for (let index = 0; index < solenoidCount; index += 1) {
-      const on = sample[`esp32_sol${index + 1}`] === true;
+      const on = sample[`solenoid${index + 1}_on`] === true;
       els[`sol${index}`].classList.toggle("on", on);
     }
     updateSolenoidControls();

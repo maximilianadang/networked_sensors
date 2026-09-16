@@ -71,7 +71,7 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertIn('id="espPressureAdc"', INDEX_HTML)
         self.assertIn('id="espFlowAdc"', INDEX_HTML)
         self.assertIn('mode === "off"', SOURCES_JS)
-        self.assertIn("realAndLive", TOOLBAR_JS)
+        self.assertIn("solenoid${index + 1}_connected", TOOLBAR_JS)
         self.assertIn("const pendingSolenoids = new Set()", TOOLBAR_JS)
         self.assertIn("function stopPollingFallback()", APP_JS)
         self.assertIn("pollingIntervalMs: 100", CONFIG_JS)

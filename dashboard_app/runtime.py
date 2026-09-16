@@ -27,6 +27,7 @@ try:
         MIN_BRUSHLESS_PULSE_US,
         SourceMerger,
         make_sources,
+        solenoid_source_name,
     )
 except ImportError:  # pragma: no cover - direct dashboard.py execution
     from recorder import FlowRunRecorder, list_recordings, resolve_artifact
@@ -45,6 +46,7 @@ except ImportError:  # pragma: no cover - direct dashboard.py execution
         MIN_BRUSHLESS_PULSE_US,
         SourceMerger,
         make_sources,
+        solenoid_source_name,
     )
 
 from .config import DEFAULT_METADATA
@@ -159,6 +161,7 @@ class DashboardRuntime:
         self._condition = threading.Condition(threading.RLock())
         self._thread: threading.Thread | None = None
         self._solenoid_command_lock = threading.Lock()
+        self._servo_command_lock = threading.Lock()
         with self._condition:
             self._poll_locked(0.0)
 
@@ -480,42 +483,39 @@ class DashboardRuntime:
             return dict(self.metadata)
 
     def toggle_solenoid(self, index: int) -> dict[str, object]:
-        with self._condition:
-            esp32 = next(
-                (source for source in self.sources if source.name == "esp32"),
-                None,
-            )
-            if esp32 is None or not hasattr(esp32, "toggle_solenoid"):
-                raise RuntimeError("ESP32 source does not support solenoid controls")
-            if (
-                esp32.mode == "real"
-                and (
-                    self.latest is None
-                    or self.latest.get("esp32_connected") is not True
-                )
-            ):
-                raise RuntimeError("ESP32 control stream is not live")
-
-        # Network I/O must not hold the condition used by the 10 Hz merge/SSE
-        # loop. The ESP32's immediate sol event can now reach the browser while
-        # this request is still completing.
+        if type(index) is not int or not 0 <= index < ESP32_SOLENOID_COUNT:
+            raise ValueError("solenoid index must be 0, 1, 2, or 3")
+        # Serialize read/modify/write, but release the merge lock during I/O.
         with self._solenoid_command_lock:
-            state = esp32.toggle_solenoid(index)  # type: ignore[attr-defined]
-
-        with self._condition:
-            elapsed_s = time.monotonic() - self.monotonic0
-            self._poll_locked(elapsed_s)
-            states = (
-                list(esp32.solenoid_states())  # type: ignore[attr-defined]
-                if hasattr(esp32, "solenoid_states")
-                else None
-            )
-            return {
-                "index": index,
-                "state": state,
-                "solenoids": states,
-                "sample": self.latest,
-            }
+            with self._condition:
+                stepper = next(source for source in self.sources if source.name == "stepper")
+                owner = solenoid_source_name(index, stepper.mode)
+                source = next(source for source in self.sources if source.name == owner)
+                if not self.latest or self.latest.get(f"solenoid{index + 1}_connected") is not True:
+                    raise RuntimeError(f"{owner} solenoid control stream is not live")
+                if owner == "stepper":
+                    current = self._stepper_payload_locked()
+                    state = not current.get("stepper_solenoid4_on")
+                    before_sequence = current.get("stepper_status_sequence")
+            if owner == "stepper":
+                source.set_solenoid(index, state)
+            else:
+                state = source.toggle_solenoid(index)
+            with self._condition:
+                self._poll_locked(time.monotonic() - self.monotonic0)
+                if owner == "stepper":
+                    self._confirm_stepper_locked(
+                        source, before_sequence, "solenoid 4 state",
+                        lambda payload: payload.get("stepper_solenoid4_on") is state,
+                    )
+                    self._poll_locked(time.monotonic() - self.monotonic0)
+                return {
+                    "index": index,
+                    "state": state,
+                    "solenoids": [self.latest.get(f"solenoid{i + 1}_on")
+                                  for i in range(ESP32_SOLENOID_COUNT)],
+                    "sample": self.latest,
+                }
 
     def _stepper_locked(self) -> object:
         stepper = next(
@@ -801,6 +801,14 @@ class DashboardRuntime:
                             payload.get("stepper_brushless_motor_capable") is not True
                             or payload.get("stepper_brushless_motor_on") is False
                         )
+                        and (
+                            payload.get("stepper_solenoid4_capable") is not True
+                            or payload.get("stepper_solenoid4_on") is False
+                        )
+                        and (
+                            payload.get("stepper_servo_capable") is not True
+                            or payload.get("stepper_servo_enabled") is False
+                        )
                     ),
                 )
             else:
@@ -913,6 +921,25 @@ class DashboardRuntime:
                 "stepper": confirmed,
                 "sample": self.latest,
             }
+
+    def set_stepper_servo(self, values: dict[str, object]) -> dict[str, object]:
+        pulse = values.get("pulse_us")
+        with self._servo_command_lock:
+            with self._condition:
+                stepper = self._stepper_locked()
+                current = self._stepper_payload_locked()
+                if not current.get("stepper_connected") or not hasattr(stepper, "set_servo_pulse"):
+                    raise RuntimeError("Position-servo controller is unavailable")
+                before_sequence = current.get("stepper_status_sequence")
+            stepper.set_servo_pulse(pulse)
+            with self._condition:
+                self._poll_locked(time.monotonic() - self.monotonic0)
+                confirmed = self._confirm_stepper_locked(
+                    stepper, before_sequence, "servo position",
+                    lambda p: p.get("stepper_servo_enabled") is (pulse != 0)
+                    and (pulse == 0 or p.get("stepper_servo_pulse_us") == pulse),
+                )
+                return {"confirmed": True, "stepper": confirmed, "sample": self.latest}
 
     def reset_stepper_emergency_stop(self) -> dict[str, object]:
         """Reset the software latch and require fresh device confirmation."""

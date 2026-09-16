@@ -1,4 +1,5 @@
 // CONTROLLINO MAXI Automation motion controller (100.101.00)
+// Version and auxiliary-output capability: controllino_firmware.h
 // Shares the AbsoluteDRO protocol with the Yún controller.
 //
 // Wiring and electrical polarity: wiring_controllino.h
@@ -41,9 +42,27 @@ volatile long pendingSps = 0;
 volatile bool comparePending = false;
 long cruiseSps = DEFAULT_SPS;
 
-volatile unsigned int escTicks = ESC_OFF_US * ESC_TICKS_PER_US;
+volatile unsigned int auxTicks = ESC_OFF_US * ESC_TICKS_PER_US;
 unsigned int escOnUs = 1200;
 bool escOn = false;
+volatile bool auxPulseEnabled = !AUX_IS_SERVO;
+unsigned int servoPulseUs = SERVO_DEFAULT_US;
+
+void setServoPulse(unsigned int pulseUs) {
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    auxPulseEnabled = pulseUs != 0;
+    if (pulseUs) {
+      servoPulseUs = pulseUs;
+      auxTicks = pulseUs * ESC_TICKS_PER_US;
+    } else digitalWrite(PIN_AUX, LOW);
+  }
+}
+bool solenoid4On = false;
+
+void setSolenoid4(bool on) {
+  solenoid4On = on;
+  digitalWrite(PIN_SOLENOID4, on ? SOLENOID_ON : SOLENOID_OFF);
+}
 
 uint16_t compareFor(long sps) {
   unsigned long ticks = (STEP_TIMER_HZ + sps / 2) / sps;
@@ -89,7 +108,7 @@ void serviceSpeed() {
 void setEsc(bool on) {
   escOn = on;
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    escTicks = (on ? escOnUs : ESC_OFF_US) * ESC_TICKS_PER_US;
+    auxTicks = (on ? escOnUs : ESC_OFF_US) * ESC_TICKS_PER_US;
   }
 }
 
@@ -105,8 +124,8 @@ ISR(TIMER1_COMPA_vect) {
     OCR1A = pendingCompare; scheduledSps = pendingSps; comparePending = false;
   }
 }
-ISR(TIMER3_OVF_vect) { digitalWrite(PIN_ESC, HIGH); OCR3A = escTicks; }
-ISR(TIMER3_COMPA_vect) { digitalWrite(PIN_ESC, LOW); }
+ISR(TIMER3_OVF_vect) { if (auxPulseEnabled) digitalWrite(PIN_AUX, HIGH); OCR3A = auxTicks; }
+ISR(TIMER3_COMPA_vect) { digitalWrite(PIN_AUX, LOW); }
 
 // ---------- 3. Machine state and safety transitions ----------
 enum Mode : byte { LOCAL_SPEED, WEB_POSITION };
@@ -122,6 +141,7 @@ bool estop = false, driverEnabled = false, accepted = true;
 long target = 0;
 unsigned int commandId = 0;
 unsigned long enabledAtMs = 0, ownerAtMs = 0, lastStatusMs = 0;
+bool statusPending = false;
 const char *reason = "boot", *error = "none";
 
 void halt(State next, const char *why, bool clearLocal = true) {
@@ -180,9 +200,11 @@ void accept(byte source, const char *why = "none") {
 }
 
 void processCommand(char *line, byte source) {
+  statusPending = true;  // Publish actual state after servicing this command.
   accepted = true; error = "none";
   if (!strcmp(line, "V1 E1")) {
-    estop = true; setEsc(false); halt(ESTOPPED, "emergency_stop"); return;
+    estop = true;
+    if (AUX_IS_SERVO) setServoPulse(0); else setEsc(false); setSolenoid4(false); halt(ESTOPPED, "emergency_stop"); return;
   }
   if (!strcmp(line, "V1 X")) { halt(ABORTED, "operator_stop"); return; }
   if (!claimable(source)) return;
@@ -191,12 +213,28 @@ void processCommand(char *line, byte source) {
     estop = false; state = mode == WEB_POSITION ? WEB_READY : LOCAL_STOPPED;
     return accept(source, "estop_reset");
   }
+  if (!strcmp(line, "V1 L4,0") || !strcmp(line, "V1 L4,1")) {
+    bool on = line[6] == '1';
+    if (on && estop) return reject("emergency_stop");
+    setSolenoid4(on); return accept(source);
+  }
+  if (!strncmp(line, "V1 A", 4)) {
+    if (!AUX_IS_SERVO) return reject("servo_unavailable");
+    long pulse;
+    if (!parseLong(line + 4, pulse) ||
+        (pulse != 0 && (pulse < SERVO_MIN_US || pulse > SERVO_MAX_US)))
+      return reject("servo_pulse_range");
+    if (pulse && estop) return reject("emergency_stop");
+    setServoPulse(pulse); return accept(source);
+  }
   if (!strcmp(line, "V1 B0") || !strcmp(line, "V1 B1")) {
+    if (AUX_IS_SERVO) return reject("esc_unavailable");
     bool on = line[4] == '1';
     if (on && estop) return reject("emergency_stop");
     setEsc(on); return accept(source);
   }
   if (!strncmp(line, "V1 P", 4)) {
+    if (AUX_IS_SERVO) return reject("esc_unavailable");
     long value;
     if (!parseLong(line + 4, value) || value < ESC_OFF_US || value > ESC_MAX_US)
       return reject("pulse_range");
@@ -259,10 +297,21 @@ void writeStatus(Print &out, bool ack = false) {
   out.print(F(",\"aps\":")); out.print(moving() ? labs(signedSps()) : 0);
   out.print(F(",\"ds\":1,\"en\":")); out.print(driverEnabled);
   out.print(F(",\"ut\":1"));
+  out.print(F(",\"sol4\":")); out.print(solenoid4On);
   dro.writeStatus(out, millis());
   out.print(F(",\"m\":")); out.print(mode);
   out.print(F(",\"h\":0,\"a\":1,\"e\":")); out.print(estop);
+  out.print(F(",\"fw\":\"")); out.print(FIRMWARE_VERSION);
+  out.print(F("\",\"aux\":\"")); out.print(AUX_IS_SERVO ? F("servo") : F("esc"));
+  out.print(F("\",\"apin\":")); out.print(PIN_AUX);
+  if (AUX_IS_SERVO) {
+    out.print(F(",\"sv\":")); out.print(auxPulseEnabled);
+    out.print(F(",\"sp\":")); out.print(servoPulseUs);
+    out.print(F(",\"smin\":")); out.print(SERVO_MIN_US);
+    out.print(F(",\"smax\":")); out.print(SERVO_MAX_US);
+  } else {
   out.print(F(",\"bo\":")); out.print(escOn); out.print(F(",\"bp\":")); out.print(escOnUs);
+  }
   out.print(F(",\"mv\":")); out.print(moving()); out.print(F(",\"st\":")); out.print(state);
   out.print(F(",\"p\":")); out.print(position()); out.print(F(",\"g\":")); out.print(target);
   out.print(F(",\"c\":")); out.print(commandId); out.print(F(",\"o\":")); out.print(owner);
@@ -322,15 +371,16 @@ void serviceNetwork() {
 }
 
 void setup() {
+  digitalWrite(PIN_SOLENOID4, SOLENOID_OFF); pinMode(PIN_SOLENOID4, OUTPUT);
   digitalWrite(PIN_ENABLE, DRIVER_DISABLED); pinMode(PIN_ENABLE, OUTPUT);
   digitalWrite(PIN_STEP, STEP_IDLE); digitalWrite(PIN_DIR, DIR_REVERSE);
   pinMode(PIN_STEP, OUTPUT); pinMode(PIN_DIR, OUTPUT);
-  digitalWrite(PIN_ESC, LOW); pinMode(PIN_ESC, OUTPUT);
+  digitalWrite(PIN_AUX, LOW); pinMode(PIN_AUX, OUTPUT);
 
   TCCR1A = 0; TCCR1B = _BV(WGM12) | _BV(CS11) | _BV(CS10);
   TIMSK1 &= ~_BV(OCIE1A);
   TCCR3A = _BV(WGM31); TCCR3B = _BV(WGM33) | _BV(WGM32) | _BV(CS31);
-  ICR3 = 20000U * ESC_TICKS_PER_US - 1; OCR3A = escTicks;
+  ICR3 = 20000U * ESC_TICKS_PER_US - 1; OCR3A = auxTicks;
   TIMSK3 = _BV(TOIE3) | _BV(OCIE3A);
 
   dro.begin(PIN_DRO_CLOCK, PIN_DRO_DATA, onDroClock);
@@ -345,7 +395,7 @@ void loop() {
   if (owner != OWNER_NONE && !moving() && !localCommand &&
       millis() - ownerAtMs >= OWNER_RELEASE_MS) owner = OWNER_NONE;
   unsigned long interval = moving() ? 100 : 1000;
-  if (millis() - lastStatusMs >= interval) {
-    writeStatus(Serial); lastStatusMs = millis();
+  if (statusPending || millis() - lastStatusMs >= interval) {
+    writeStatus(Serial); lastStatusMs = millis(); statusPending = false;
   }
 }

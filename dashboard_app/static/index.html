@@ -152,8 +152,8 @@
             <div class="form-grid">
               <fieldset class="mode-options">
                 <legend>Control mode</legend>
-                <label class="radio-option"><input id="stepperModeLocal" name="stepper_control_mode" type="radio" value="local_velocity" checked>Local Speed</label>
-                <label class="radio-option"><input id="stepperModeWeb" name="stepper_control_mode" type="radio" value="web_position">Web Position</label>
+                <label class="radio-option"><input id="stepperModeLocal" name="stepper_control_mode" type="radio" value="local_velocity" checked>Directional</label>
+                <label class="radio-option"><input id="stepperModeWeb" name="stepper_control_mode" type="radio" value="web_position">Positional</label>
               </fieldset>
               <fieldset id="stepperSoftwareDirection" class="mode-options" hidden>
                 <legend>Move direction</legend>
@@ -222,7 +222,7 @@
           <label>Material<input name="material" autocomplete="off"></label>
           <label>Powder flow rate (g/s)<input name="powder_flow_rate_g_per_s" type="number" min="0" step="0.001" inputmode="decimal" autocomplete="off"></label>
           <label>Desired test duration (s)<input name="test_duration_s" type="number" min="0" step="0.1" inputmode="decimal" autocomplete="off"></label>
-          <div id="metadataMotionPlan" class="metadata-motion-plan wide" role="status" aria-live="polite">Enter powder flow and duration to calculate the Web Position setpoints.</div>
+          <div id="metadataMotionPlan" class="metadata-motion-plan wide" role="status" aria-live="polite">Enter powder flow and duration to calculate the Positional setpoints.</div>
           <label class="wide">Description<input name="description" autocomplete="off"></label>
           <label class="wide metadata-notes">Notes<textarea name="notes"></textarea></label>
         </div>

@@ -251,7 +251,7 @@ workers, so one network timeout cannot stall the 10 Hz merge/recording cadence.
 Sources are independent: the page does not require ESP32 quorum to show
 SICK/DXMR90 values, and missing/offline sources preserve their
 expected keys as `null` with `*_connected=false`. Step 4 adds a disk-backed
-recorder: metadata, recent history, selected ESP32 solenoid state, and stepper
+recorder: metadata, recent history, selected physical solenoid state, and stepper
 state remain live operator state, while run start/stop creates durable files
 under `--record-dir`.
 
@@ -284,7 +284,7 @@ editable/control/repeat/modifier suppression.
 | `/api/events` | GET | SSE `state` and `sample` events | primary live browser stream |
 | `/api/run/start` / `/api/run/stop` | POST | recording flag, timestamps, run artifact metadata | start opens a run directory; stop finalizes metadata, summary, and export CSV |
 | `/api/metadata` | POST | in-memory metadata object | accepts known keys including `powder_flow_rate_g_per_s` and `test_duration_s`; browser derives speed as flow/geometry and travel as speed×duration but never sends motion from metadata input |
-| `/api/solenoid/toggle?n=0..3` | POST | selected ESP32 solenoid state and latest sample | simulation toggles locally; real mode serializes one ESP32 POST outside the merge lock only while its stream is live; buttons and guarded keyboard keys 1-4 share this action; editable fields, repeats, modifiers, disabled controls, and pending channels suppress shortcuts; index 3 maps to GPIO 10; immediate `sol` events and v3 readings update state |
+| `/api/solenoid/toggle?n=0..3` | POST | selected physical solenoid state and latest sample | with Controllino USB/Ethernet, index 3 uses R5 via idempotent `V1 L4,0|1` and fresh `sol4` status confirmation; indices 0–2 use ESP32; other installations retain all four ESP32 controls; old Controllino firmware disables valve 4 without fallback; buttons and keys 1–4 share the action |
 | `/api/stepper/status` | GET | stable stepper/DRO health plus brushless motor capability, OFF/ON state, active pulse, and configured ON pulse | compact `bo` reports state; optional `bp` identifies variable-pulse support and reports the configured 1000..2000 us ON width; absence of `bp` decodes as the backward-compatible fixed 1200 us revision |
 | `/api/stepper/dro-zero` | POST | snapshots the latest fresh, finite, stopped raw DRO reading into the versioned top-level `system_config.json` and returns raw/zeroed sample fields plus `motion_commanded:false` | rejected while moving or when Yún/DRO feedback is disconnected, unavailable, stale, or non-finite; writes atomically without losing the configured powder mass-per-travel geometry and never calls a stepper motion method; dashboard and transport reconnections reload the reference; the future closed-loop return action remains disabled under T4H.2 |
 | `/api/stepper/control-mode` | POST | strict boolean `web_position` | mode changes only while D4 is OFF and motion is stopped; boot/default is Local Velocity |
@@ -295,6 +295,7 @@ editable/control/repeat/modifier suppression.
 | `/api/stepper/estop` | POST | latches the ATmega software E-STOP and waits for fresh status confirmation | aborts stepper motion and forces brushless OFF at 1000 us; supported firmware must confirm `bo:0`; not safety-rated energy isolation |
 | `/api/stepper/estop/reset` | POST | clears the ATmega software E-STOP and waits for fresh status confirmation | requires stopped motion and physical D4 OFF; reset does not start motion |
 | `/api/stepper/motor/toggle` | POST | toggles the D12 brushless ESC and waits for fresh state confirmation | OFF is 1000 us; ON uses the configured 1000..2000 us setpoint; ON is rejected while E-STOP is latched; button and guarded M share this action |
+| `/api/stepper/servo` | POST | `{pulse_us: integer}` sets the firmware-calibrated position pulse; zero disables pulses; requires fresh matching status | available only when Controllino reports `aux:servo`; startup/E-STOP disable pulses; angle calibration is not assumed |
 | `/api/stepper/motor/pulse` | POST | strict integer `pulse_us` from 1000 through 2000; waits for fresh setpoint confirmation | updates the next ON setting while OFF and applies immediately while ON; unsupported fixed-pulse firmware is rejected |
 | `/api/stepper/speed` | POST | `speed_mm_s` from 0.1 through 10.0 | Local Speed setpoint; Yún requires D4 OFF, while Controllino software run must be stopped; never starts motion |
 | `/api/recordings` | GET | known completed recordings and active recording status | scans `--record-dir` summaries |
@@ -349,7 +350,17 @@ Required Step-1 fields:
 - `esp32_payload_version`, `esp32_sample_ms`,
   `esp32_pressure_adc_ready`, `esp32_flow_adc_ready`, and nullable clamped
   pressure/flow sensor voltage fields
-- `esp32_sol1..esp32_sol4`
+- `esp32_sol1..esp32_sol4` (raw ESP32 outputs)
+- `stepper_firmware_version`, `stepper_aux_kind`, `stepper_aux_pin`; Controllino
+  firmware 1.1.0 reports ESC or position-servo capability independently of `v:1`
+- `stepper_servo_capable`, `stepper_servo_enabled`, `stepper_servo_pulse_us`,
+  `stepper_servo_min_us`, `stepper_servo_max_us`; servo status replaces `bo`/`bp`
+  on servo builds, and the dashboard replaces its brushless panel accordingly
+- `stepper_solenoid4_capable`, `stepper_solenoid4_on` for Controllino R5;
+  missing `sol4` in firmware status means unavailable, not OFF
+- `solenoid1_on..solenoid4_on` with matching `_source` and `_connected` fields;
+  logical state is null when its owning source is unavailable; R5 starts OFF,
+  software E-STOP forces OFF, and ON is refused while E-STOP is latched
 - `esp32_p_combined_bar`, `esp32_f_combined_gmin`
 - `esp32_open_flow_gmin`, summed from ESP32 flow channels whose matching
   Solenoid 1–3 state is open

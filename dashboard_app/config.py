@@ -27,6 +27,7 @@ DASHBOARD_ASSET_TYPES = {
     "/assets/components/metadata.js": "text/javascript; charset=utf-8",
     "/assets/components/metrics.js": "text/javascript; charset=utf-8",
     "/assets/components/sources.js": "text/javascript; charset=utf-8",
+    "/assets/components/servo.js": "text/javascript; charset=utf-8",
     "/assets/components/stepper.js": "text/javascript; charset=utf-8",
     "/assets/components/toolbar.js": "text/javascript; charset=utf-8",
 }

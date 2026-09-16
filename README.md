@@ -58,6 +58,15 @@ On the Yún, this USB workflow updates only the ATmega32U4 `.ino` firmware.
 `yun_stepper_bridge.py` runs on the separate Linux processor and must still be
 deployed over SSH with `provision_yun.sh`.
 
+## Controllino version and auxiliary output
+
+The current sketch reports firmware **1.1.0** and its auxiliary capability.
+The default build supports a position servo on X1 Digital 2 (Arduino D4);
+`CONTROLLINO_AUX_SERVO=0` selects the existing brushless ESC instead. The
+connected firmware selects the dashboard panel automatically. Servo pulses
+start disabled; apply a pulse position within the firmware's reported limits.
+See [firmware versions and calibration](CONTROLLINO-FIRMWARE.md).
+
 ## Firmware wiring configuration
 
 Edit the board header to change wiring; the sketches consume named signals:
@@ -168,6 +177,31 @@ clock on X1 SCL and data on Digital 4 produced fresh 94.16 mm readings, increasi
 valid-frame counts, and zero rejected frames. Digital 0 previously remained low
 in direct-register testing; the cause is unresolved. Coexistence with active
 motion remains unverified. X1 SCL is reserved for the DRO, not I2C.
+
+### Solenoid 4 on Controllino R5
+
+2026-09-15: motion firmware compiled (21,318 bytes flash / 1,025 bytes RAM),
+USB-uploaded with verification, and the restarted dashboard confirmed R5 capability
+and OFF state. Physical valve actuation was not exercised during deployment.
+
+With `--stepper-source controllino` or `controllino-usb`, dashboard Solenoid 4
+routes to terminal **R5** (Arduino pin 27) in `wiring_controllino.h`. Solenoids
+1–3 retain their ESP32 controls. The official mapping is documented in
+[Controllino.h](https://github.com/CONTROLLINO-PLC/CONTROLLINO_Library/blob/master/Controllino.h).
+The relay energizes on HIGH, starts de-energized, and is de-energized by software
+E-STOP; opening it while E-STOP is latched is rejected.
+
+The motion sketch accepts idempotent `V1 L4,0` / `V1 L4,1` commands over either
+transport and reports `sol4:0|1`. The dashboard waits for fresh status matching
+the requested state. Older firmware without `sol4` disables this control rather
+than falling back to ESP32 GPIO 10. Upload the updated motion sketch and restart
+the dashboard before using it. No ESP32 reflash is needed for this routing.
+
+Merged samples expose `solenoid1_on` through `solenoid4_on`, each with `_source`
+and `_connected` fields. Source-specific `esp32_sol*` values remain raw ESP32
+telemetry. The fourth button and SICK open-line flow calculation use the logical
+Solenoid 4 state, including when ESP32 is offline. Reported state represents the
+controller's output command; it is not independent valve-position feedback.
 
 ## Network setup
 

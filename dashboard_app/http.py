@@ -107,6 +107,8 @@ def build_handler(runtime: DashboardRuntime, quiet: bool) -> type[BaseHTTPReques
                     self._send_json(runtime.reset_stepper_emergency_stop())
                 elif path == "/api/stepper/motor/toggle":
                     self._send_json(runtime.toggle_stepper_brushless_motor())
+                elif path == "/api/stepper/servo":
+                    self._send_json(runtime.set_stepper_servo(parse_body(self)))
                 elif path == "/api/stepper/motor/pulse":
                     self._send_json(
                         runtime.set_stepper_brushless_pulse(parse_body(self))
