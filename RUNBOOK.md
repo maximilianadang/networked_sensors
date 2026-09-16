@@ -682,7 +682,14 @@ compile:
 
 ```bash
 mkdir -p networked_sensors/.arduino-build/yun/limit_switch_palas networked_sensors/.arduino-build/yun/build
-cp networked_sensors/limit_switch_palas.ino networked_sensors/.arduino-build/yun/limit_switch_palas/limit_switch_palas.ino
+python3 - <<'PY_STAGE'
+from pathlib import Path
+from networked_sensors.firmware_upload import stage_sketch
+stage_sketch(
+    Path("networked_sensors/limit_switch_palas.ino"),
+    Path("networked_sensors/.arduino-build/yun/limit_switch_palas"),
+)
+PY_STAGE
 arduino-cli compile --fqbn arduino:avr:yun --output-dir networked_sensors/.arduino-build/yun/build networked_sensors/.arduino-build/yun/limit_switch_palas
 ```
 

@@ -30,6 +30,7 @@ from networked_sensors.supervisor_core import (
     DEFAULT_STEPPER_MAX_SPEED_MM_S,
     DEFAULT_STEPPER_MIN_SPEED_MM_S,
     ControllinoStepperSource,
+    ControllinoUsbStepperSource,
     NetworkStepperSource,
     SimulatedStepperSource,
     SourceMerger,
@@ -332,7 +333,8 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertNotIn("V1 D1", firmware)
         self.assertNotIn("directionSign", firmware)
         self.assertGreaterEqual(firmware.count("limitBlocksPhysicalDirection("), 5)
-        self.assertIn("const int PIN_DRIVER_ENABLE_NEG = 9;", firmware)
+        self.assertIn("const int PIN_DRIVER_ENABLE_NEG = 9;",
+                      Path(__file__).with_name("wiring_yun.h").read_text())
         self.assertIn("const unsigned long DRIVER_ENABLE_DELAY_MS = 200UL;", firmware)
         self.assertIn("activePhysicalDirection", firmware)
         self.assertIn("updatePhysicalEndpointLatches", firmware)
@@ -397,9 +399,12 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertIn("bool d5Reverse = !directionHigh;", firmware)
         self.assertIn('\\"lx\\":%lu', firmware)
         self.assertIn("const unsigned int STATUS_FRAME_SIZE = 384;", firmware)
-        self.assertIn("const int PIN_DRO_CLOCK = 10;", firmware)
-        self.assertIn("const int PIN_DRO_DATA = 11;", firmware)
-        self.assertIn("const int PIN_ESC_SIGNAL = 12;", firmware)
+        self.assertIn("const int PIN_DRO_CLOCK = 10;",
+                      Path(__file__).with_name("wiring_yun.h").read_text())
+        self.assertIn("const int PIN_DRO_DATA = 11;",
+                      Path(__file__).with_name("wiring_yun.h").read_text())
+        self.assertIn("const int PIN_ESC_SIGNAL = 12;",
+                      Path(__file__).with_name("wiring_yun.h").read_text())
         self.assertIn("const unsigned int ESC_OFF_PULSE_US = 1000U;", firmware)
         self.assertIn(
             "const unsigned int ESC_DEFAULT_ON_PULSE_US = 1200U;",
@@ -419,8 +424,10 @@ class UsbStepperSourceTests(unittest.TestCase):
         self.assertIn("ISR(PCINT0_vect)", firmware)
         self.assertIn("PCMSK0 |= _BV(PCINT6);", firmware)
         self.assertIn("if (portB & _BV(PB6)) return;", firmware)
-        self.assertIn("droNibble(frame, 11) != 2", firmware)
-        self.assertIn("droNibble(frame, 12) != 0", firmware)
+        self.assertIn("droNibble(frame, 11) != 2",
+                      Path(__file__).with_name("absolute_dro_protocol.h").read_text())
+        self.assertIn("droNibble(frame, 12) != 0",
+                      Path(__file__).with_name("absolute_dro_protocol.h").read_text())
         self.assertIn('\\"dc\\":1,\\"df\\":%d', firmware)
         stop_body = firmware.split("void stopStepperImmediately()", 1)[1].split(
             "void abortWebMotion", 1
@@ -463,7 +470,7 @@ class UsbStepperSourceTests(unittest.TestCase):
         # Timer1 is the sole STEP-edge owner after setup. A software pulse
         # counter without these physical writes is not evidence of D3 output.
         timer_isr = firmware.split("ISR(TIMER1_COMPA_vect)", 1)[1].split(
-            "byte droNibble", 1
+            "void pollDroFrames", 1
         )[0]
         self.assertIn("digitalWrite(PIN_STEP, HIGH);", timer_isr)
         self.assertIn("delayMicroseconds(5);", timer_isr)
@@ -1144,6 +1151,32 @@ class ControllinoStepperSourceTests(unittest.TestCase):
         '"m":1,"h":0,"a":1,"e":0,"bo":0,"bp":1200,"mv":0,'
         '"st":5,"p":0,"g":0,"c":0,"o":2}'
     )
+
+    def test_controllino_usb_status_and_acknowledgements(self) -> None:
+        master_fd, slave_fd = pty.openpty()
+        sources = make_sources(esp32_source="off", dxmr90_source="off",
+                               stepper_source="controllino-usb",
+                               stepper_port=os.ttyname(slave_fd), stepper_baud=9600)
+        source = next(source for source in sources if source.name == "stepper")
+        self.assertIsInstance(source, ControllinoUsbStepperSource)
+        try:
+            source.poll(0.0)
+            os.write(master_fd, (self.STATUS + "\n").encode())
+            reading = source.poll(0.1)
+            self.assertIsNotNone(reading)
+            self.assertEqual(reading.mode, "controllino")
+            self.assertIsNone(reading.values["stepper_positive_limit_active"])
+            self.assertFalse(reading.values["stepper_dro_capable"])
+            os.write(master_fd, b'{"v":1,"t":"a","ok":0,"e":"blocked"}\n')
+            source.poll(0.2)
+            self.assertEqual(source.pending_command_error, "blocked")
+            os.write(master_fd, b'{"v":1,"t":"a","ok":1}\n')
+            source.poll(0.3)
+            self.assertIsNone(source.pending_command_error)
+        finally:
+            source.close()
+            os.close(master_fd)
+            os.close(slave_fd)
 
     def test_cli_and_factory_enable_direct_controllino_mode(self) -> None:
         args = parse_args(

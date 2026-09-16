@@ -1,27 +1,15 @@
 // Operator-gated SRX02-S motion bring-up for CONTROLLINO MAXI Automation.
 //
-// X1 Digital Out 1 / Arduino D3 -> SRX02-S STEP-
-// X1 Digital Out 3 / Arduino D5 -> SRX02-S DIR-
-// X1 Digital Out 5 / Arduino D7 -> SRX02-S EN-
-// X1 5 V -> STEP+, DIR+, EN+ (common anode)
-//
-// The SRX02-S optocouplers are active when a '-' terminal is LOW. EN active
-// disables the amplifier. STEP idles HIGH and a pulse is HIGH->LOW->HIGH so
-// the documented falling edge occurs without holding the STEP optocoupler on.
+// Wiring and electrical polarity: wiring_controllino.h
 
 #include <SPI.h>
 #include <Ethernet.h>
+#include "wiring_controllino.h"
+
+// This sketch drives STEP with the fixed OC3C output, unlike the motion ISR.
+static_assert(PIN_STEP == 3, "Bring-up Timer3 OC3C requires STEP on Arduino D3");
 
 namespace {
-
-const uint8_t PIN_STEP_NEG = 3;
-const uint8_t PIN_DIRECTION_NEG = 5;
-const uint8_t PIN_ENABLE_NEG = 7;
-
-const uint8_t DRIVER_DISABLED_LEVEL = LOW;
-const uint8_t DRIVER_ENABLED_LEVEL = HIGH;
-const uint8_t STEP_IDLE_LEVEL = HIGH;
-const uint8_t STEP_ACTIVE_LEVEL = LOW;
 
 const unsigned long DRIVER_WAKE_MS = 250UL;
 const unsigned long STEP_INTERVAL_US = 1000UL;  // 1,000 pulses/s.
@@ -72,12 +60,12 @@ void stopJogPulseTimer() {
   TCCR3A = 0;
   TCCR3B = 0;
   jogTimerRunning = false;
-  digitalWrite(PIN_STEP_NEG, STEP_IDLE_LEVEL);
+  digitalWrite(PIN_STEP, STEP_IDLE);
 }
 
 void disableDriver() {
   stopJogPulseTimer();
-  digitalWrite(PIN_ENABLE_NEG, DRIVER_DISABLED_LEVEL);
+  digitalWrite(PIN_ENABLE, DRIVER_DISABLED);
   moving = false;
   stepActive = false;
   jogMode = false;
@@ -115,11 +103,10 @@ void startMotion(char command, bool continuous = false) {
 
   directionName = command;
   pulsesCompleted = 0;
-  // Installation reference: logical Forward is the mechanism direction
-  // produced by a HIGH DIR- output; logical Reverse is LOW.
-  digitalWrite(PIN_DIRECTION_NEG, command == 'F' ? HIGH : LOW);
-  digitalWrite(PIN_STEP_NEG, STEP_IDLE_LEVEL);
-  digitalWrite(PIN_ENABLE_NEG, DRIVER_ENABLED_LEVEL);
+  // Logical direction uses the same installation polarity as motion firmware.
+  digitalWrite(PIN_DIR, command == 'F' ? DIR_FORWARD : DIR_REVERSE);
+  digitalWrite(PIN_STEP, STEP_IDLE);
+  digitalWrite(PIN_ENABLE, DRIVER_ENABLED);
   enabledAtMs = millis();
   nextStepAtUs = micros();
   stepActive = false;
@@ -166,7 +153,7 @@ void serviceMotion() {
   const unsigned long nowUs = micros();
   if (stepActive) {
     if (nowUs - stepActiveAtUs >= STEP_ACTIVE_US) {
-      digitalWrite(PIN_STEP_NEG, STEP_IDLE_LEVEL);
+      digitalWrite(PIN_STEP, STEP_IDLE);
       stepActive = false;
       ++pulsesCompleted;
       if (!jogMode && pulsesCompleted >= TEST_PULSES) {
@@ -177,7 +164,7 @@ void serviceMotion() {
   }
 
   if (static_cast<long>(nowUs - nextStepAtUs) >= 0) {
-    digitalWrite(PIN_STEP_NEG, STEP_ACTIVE_LEVEL);
+    digitalWrite(PIN_STEP, STEP_ACTIVE);
     stepActiveAtUs = nowUs;
     stepActive = true;
     nextStepAtUs += STEP_INTERVAL_US;
@@ -333,12 +320,12 @@ void handleSerial() {
 
 void setup() {
   // Preload safe values before enabling the three output drivers.
-  digitalWrite(PIN_STEP_NEG, STEP_IDLE_LEVEL);
-  digitalWrite(PIN_DIRECTION_NEG, LOW);
-  digitalWrite(PIN_ENABLE_NEG, DRIVER_DISABLED_LEVEL);
-  pinMode(PIN_STEP_NEG, OUTPUT);
-  pinMode(PIN_DIRECTION_NEG, OUTPUT);
-  pinMode(PIN_ENABLE_NEG, OUTPUT);
+  digitalWrite(PIN_STEP, STEP_IDLE);
+  digitalWrite(PIN_DIR, DIR_REVERSE);
+  digitalWrite(PIN_ENABLE, DRIVER_DISABLED);
+  pinMode(PIN_STEP, OUTPUT);
+  pinMode(PIN_DIR, OUTPUT);
+  pinMode(PIN_ENABLE, OUTPUT);
 
   Serial.begin(9600);
   delay(250);

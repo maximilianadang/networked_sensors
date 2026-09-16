@@ -1,10 +1,7 @@
 /*
  * Flow-management ESP32 I/O firmware (headless supervisor source)
  *
- * Hardware:
- *   - 3 pressure channels on ADS1115 0x48 A0-A2
- *   - 3 flow channels on ADS1115 0x49 A0-A2
- *   - 4 active-low solenoid relays on GPIO 5, 6, 9, and 10
+ * Wiring and ADC channel order: wiring_esp32.h
  *
  * Network API:
  *   - GET  /          small JSON service description (no hosted webpage)
@@ -25,17 +22,10 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include "wifi_credentials.h"
+#include "wiring_esp32.h"
 
 // ── WiFi ─────────────────────────────────────────────────────────────
 const char* MDNS_NAME = "testbench";
-// ────────────────────────────────────────────────────────────────────
-
-// ── Pins ─────────────────────────────────────────────────────────────
-const int I2C_SDA = 3;
-const int I2C_SCL = 4;
-const int SOLENOID_COUNT = 4;
-const int SOLENOID_PINS[SOLENOID_COUNT] = {5, 6, 9, 10};
-const bool RELAY_ACTIVE_LOW = true;
 // ────────────────────────────────────────────────────────────────────
 
 // ── Sensor scaling ───────────────────────────────────────────────────
@@ -45,8 +35,6 @@ const float VOLTS_PER_BIT = 0.0001875;
 const unsigned long SAMPLE_PERIOD_MS = 100;
 const unsigned long ADC_HEALTH_PERIOD_MS = 1000;
 const unsigned long ADC_RETRY_PERIOD_MS = 5000;
-const uint8_t PRESSURE_ADC_ADDRESS = 0x48;
-const uint8_t FLOW_ADC_ADDRESS = 0x49;
 // ────────────────────────────────────────────────────────────────────
 
 Adafruit_ADS1115 adsP;
@@ -93,7 +81,7 @@ bool initializePressureAdc() {
   if (!adsP.begin(PRESSURE_ADC_ADDRESS)) return false;
   adsP.setGain(GAIN_TWOTHIRDS);
   adsP.setDataRate(RATE_ADS1115_860SPS);
-  Serial.println("ADS1115 pressure ADC (0x48) ready.");
+  Serial.printf("ADS1115 pressure ADC (0x%02x) ready.\n", PRESSURE_ADC_ADDRESS);
   return true;
 }
 
@@ -101,7 +89,7 @@ bool initializeFlowAdc() {
   if (!adsF.begin(FLOW_ADC_ADDRESS)) return false;
   adsF.setGain(GAIN_TWOTHIRDS);
   adsF.setDataRate(RATE_ADS1115_860SPS);
-  Serial.println("ADS1115 flow ADC (0x49) ready.");
+  Serial.printf("ADS1115 flow ADC (0x%02x) ready.\n", FLOW_ADC_ADDRESS);
   return true;
 }
 
@@ -134,14 +122,14 @@ void readSensors(float pressure[3], float flow[3],
     flowVolts[i] = NAN;
 
     if (pressureAdcReady) {
-      int16_t rawPressure = adsP.readADC_SingleEnded(i);
+      int16_t rawPressure = adsP.readADC_SingleEnded(PRESSURE_CHANNELS[i]);
       pressureVolts[i] = constrain(
           rawPressure * VOLTS_PER_BIT, P_V_MIN, P_V_MAX);
       pressure[i] = mapFloat(
           pressureVolts[i], P_V_MIN, P_V_MAX, P_MIN, P_MAX);
     }
     if (flowAdcReady) {
-      int16_t rawFlow = adsF.readADC_SingleEnded(i);
+      int16_t rawFlow = adsF.readADC_SingleEnded(FLOW_CHANNELS[i]);
       flowVolts[i] = constrain(rawFlow * VOLTS_PER_BIT, F_V_MIN, F_V_MAX);
       flow[i] = mapFloat(flowVolts[i], F_V_MIN, F_V_MAX, F_MIN, F_MAX);
     }

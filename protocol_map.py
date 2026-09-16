@@ -221,9 +221,42 @@ flowchart TD
 | `read_dxmr90_modbus` | `networked_sensors/read_dxmr90_modbus.py` | exists | DXMR90 Modbus TCP registers | table/json/csv rows | `--host` selects device; `--format json` supports programmatic use |
 | `Flow_management_unit_sch1` | `networked_sensors/Flow_management_unit_sch1.ino` | four-output headless v3 field-WLAN firmware is compiled and hash-verified on the physical board; field-LAN stream smoke pending | independently optional ADS1115 analog channels + four active-low relays on GPIO 5/6/9/10 | DHCP client at `testbench.local`, 10 Hz v3 SSE with per-ADC health and null unavailable families, immediate four-state solenoid events, toggle indices 0–3, and JSON service descriptor; no UI/recording | flash to `esp32:esp32:adafruit_feather_esp32s3_nopsram`; run laptop `dashboard.py` as the webpage; no ADC is a Wi-Fi/control startup gate |
 | archived ESP32 dashboard | `networked_sensors/legacy/Flow_management_unit_sch1/Flow_management_unit_sch1.ino` | preserved reference firmware | ADS1115 analog channels + browser commands | former ESP32 HTML, partial unversioned SSE, and RAM CSV | not compatible with strict `RealEsp32Source`; flash only for deliberate legacy investigation |
-| `limit_switch_palas` | `networked_sensors/limit_switch_palas.ino` | current variable-pulse/D5-qualified revision compiles at @@CURRENT_YUN_BUILD@@, was LAN-uploaded with full read-back verification, and reports the new D5 capability bit over the installed bridge; physical reproduction of the former transient abort remains | D4, 10-ms-qualified D5, physical 5-ms-qualified D6/D8, D9-to-DM542T-ENA-, level-shifted AbsoluteDRO Plus D10 clock/D11 data, D12 OPTO ESC signal at 1000 us OFF and configurable 1000..2000 us ON, and USB/Linux-relayed `V1 S/M/H/G/X/E1/E0/B0/B1/P` | Timer1 exclusively drives Local Velocity, Web Position, and Home STEP timing; independent Timer3 generates the 50 Hz D12 ESC pulse; `V1 P` configures the ON width and `V1 B0|1` selects OFF/ON; software E-STOP forces brushless OFF as well as stopping the stepper; D5 and D6/D8 rejected-transition diagnostics, fixed direction, driver wake-up, DRO telemetry, non-blocking transports, and measured STEP output remain | compile/upload as `arduino:avr:yun`; no external Arduino library is required; stage the standalone source under ignored `.arduino-build/yun/limit_switch_palas`; USB uses Arduino CLI, while LAN uses the Yún Linux `/usr/bin/run-avrdude` helper and must complete read-back verification |
+| `limit_switch_palas` | `networked_sensors/limit_switch_palas.ino` | current variable-pulse/D5-qualified revision compiles at @@CURRENT_YUN_BUILD@@, was LAN-uploaded with full read-back verification, and reports the new D5 capability bit over the installed bridge; physical reproduction of the former transient abort remains | D4, 10-ms-qualified D5, physical 5-ms-qualified D6/D8, D9-to-DM542T-ENA-, level-shifted AbsoluteDRO Plus D10 clock/D11 data, D12 OPTO ESC signal at 1000 us OFF and configurable 1000..2000 us ON, and USB/Linux-relayed `V1 S/M/H/G/X/E1/E0/B0/B1/P` | Timer1 exclusively drives Local Velocity, Web Position, and Home STEP timing; independent Timer3 generates the 50 Hz D12 ESC pulse; `V1 P` configures the ON width and `V1 B0|1` selects OFF/ON; software E-STOP forces brushless OFF as well as stopping the stepper; D5 and D6/D8 rejected-transition diagnostics, fixed direction, driver wake-up, DRO telemetry, non-blocking transports, and measured STEP output remain | compile/upload as `arduino:avr:yun`; no external Arduino library is required; stage the source and its local wiring headers under ignored `.arduino-build/yun/limit_switch_palas`; USB uses Arduino CLI, while LAN uses the Yún Linux `/usr/bin/run-avrdude` helper and must complete read-back verification |
 | `yun_stepper_bridge` | `networked_sensors/yun_stepper_bridge.py` | Python 2/3 loopback plus physical health, stopped status, rejection, boot-start, and post-firmware-upload status pass | compact ATmega status plus exact validated `V1` command lines on `/dev/ttyATH0` | trusted-LAN `GET /v1/status`, `GET /v1/health`, and `POST /v1/command` on port 8080 | init wrapper temporarily disables LEDEYun `askconsole` while running and restores it on stop; provisioner installs and enables it |
 | `YunSerialTerminal` | retired official Bridge library example | temporary maintenance path, verified | Yún USB CDC plus AR9331 UART console; DM542T power must be off | interactive OpenWrt console for non-secret network inspection/configuration | compile/upload as `arduino:avr:yun`, monitor at 115200 baud, send `~~`; restore `limit_switch_palas` immediately after maintenance |
+
+### 2.1 Firmware wiring configuration
+
+`wiring_controllino.h`, `wiring_esp32.h`, and `wiring_yun.h` own their board's
+pin assignments. The Controllino motion and bring-up sketches share one map.
+The uploader stages these headers and `wiring_checks.h` with each sketch.
+Compile-time checks reject pin collisions and fixed-function remaps; ESP32
+ADC addresses/channel order are configurable within the existing v3 contract.
+See README for constraints and the host compile/staging test command. Existing
+hardware verification records below predate this header extraction. All five
+current top-level sketches now compile locally with the extracted headers; the
+ESP32 verification build uses staged placeholder Wi-Fi credentials. Hardware
+verification of the extracted revision remains pending. The Yún pin
+contract below describes the installed wiring and must be updated if it changes.
+
+### 2.2 Controllino DRO input
+
+`controllino_motion_control.ino` captures read-only AbsoluteDRO Plus clock on
+X1 SCL / PD0 / chip pin 43 and data on Digital 4 / PH3 / chip pin 15. The wiring
+header translates those labels to Arduino pins 2 and 6. An external falling-edge
+interrupt uses the shared `absolute_dro_protocol.h` frame assembler/decoder;
+`absolute_dro_avr.h` owns the ISR-to-loop mailbox and telemetry. STEP/ESC retain
+their existing timers. Capability `dc:1` does not imply freshness: `df:1` requires
+a valid frame captured within 250 ms. Existing `dr/dd/da/dq/dx` fields carry
+position/displacement in hundredths of mm, capture age, and frame diagnostics.
+The lean dashboard shares the adapter/runtime and requires no new API fields.
+
+Target compilation passes (Controllino motion: 23,070 flash / 1,015 RAM bytes;
+Yún after shared decoder extraction: 22,772 flash / 1,700 RAM bytes). Injected
+C++ frame tests exercise decode, freshness, overrun, rollover, and the adapter /
+lean runtime's zero and velocity path. Upload and physical DRO/motion coexistence
+verification remain pending. Run the lean entry point as documented in README;
+the upload notebook's default Ethernet diagnostic does not capture the DRO.
 
 ## 3. Source contracts
 
@@ -511,7 +544,7 @@ def _implemented_v1_patterns() -> set[str]:
 def _implemented_yun_pin_assignments() -> dict[str, int]:
     """Return the named Yún pin constants that form the documented pin map."""
 
-    source = (ROOT / "limit_switch_palas.ino").read_text(encoding="utf-8")
+    source = (ROOT / "wiring_yun.h").read_text(encoding="utf-8")
     return {
         name: int(pin)
         for name, pin in re.findall(

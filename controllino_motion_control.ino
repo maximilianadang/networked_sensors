@@ -1,31 +1,23 @@
 // CONTROLLINO MAXI Automation motion controller (100.101.00)
-// Lean successor to limit_switch_palas.ino; the original remains unchanged.
+// Shares the AbsoluteDRO protocol with the Yún controller.
 //
-// X1 wiring (5 V common-anode SRX02-S inputs):
-//   DO1 / Arduino D3 -> STEP-    X1 5 V -> STEP+
-//   DO3 / Arduino D5 -> DIR-     X1 5 V -> DIR+
-//   DO5 / Arduino D7 -> EN-      X1 5 V -> EN+
-//   Arduino D12      -> brushless ESC receiver signal (confirm final landing)
+// Wiring and electrical polarity: wiring_controllino.h
 //
-// Installed hardware has no physical run/direction switches, limits, or DRO.
+// Installed hardware has no physical run/direction switches or limits.
 // V1 R-1/R0/R1 provides software Reverse/Stop/Forward in Local Speed mode.
 // H remains protocol-compatible but is rejected until a home switch exists.
-// D6/D8=-1 and dc=0 report unavailable hardware; they never mean "clear".
+// D6/D8=-1 report absent limits. DRO freshness comes from validated input frames.
 
 #include <SPI.h>
 #include <Ethernet.h>
 #include <math.h>
 #include <util/atomic.h>
+#include "wiring_controllino.h"
+#include "absolute_dro_avr.h"
 
 // ---------- 1. Pin map and fixed configuration ----------
-constexpr byte PIN_STEP = 3, PIN_DIR = 5, PIN_ENABLE = 7, PIN_ESC = 12;
-constexpr byte STEP_IDLE = HIGH, STEP_ACTIVE = LOW;
-constexpr byte DRIVER_ENABLED = HIGH, DRIVER_DISABLED = LOW;
-constexpr byte DIR_FORWARD = HIGH, DIR_REVERSE = LOW;  // verified 2026-09-03
-
 constexpr long MIN_SPS = 25, MAX_SPS = 2520, DEFAULT_SPS = 1000;
 constexpr long MAX_RELATIVE_PULSES = 34565;  // conservative; recalibrate SRX/motor
-constexpr float ACCEL_SPS2 = 1260.0f;
 constexpr unsigned long STEP_TIMER_HZ = F_CPU / 64UL;
 constexpr unsigned long DRIVER_WAKE_MS = 250, OWNER_RELEASE_MS = 2000;
 constexpr unsigned int ESC_OFF_US = 1000, ESC_MAX_US = 2000;
@@ -36,6 +28,10 @@ IPAddress ip(10, 77, 0, 10), dns(10, 77, 0, 2), gateway(10, 77, 0, 2);
 IPAddress subnet(255, 255, 255, 0);
 EthernetServer server(80);
 
+// Read-only DRO: X1 SCL clock / Digital 4 data (see wiring_controllino.h).
+AbsoluteDroReader dro;
+void onDroClock() { dro.onClock(); }
+
 // ---------- 2. Hardware-timed STEP and ESC outputs ----------
 volatile bool pulseOn = false, pulseFinite = false, pulseReached = false;
 volatile int8_t pulseDirection = 1;
@@ -44,8 +40,6 @@ volatile uint16_t pendingCompare = 0;
 volatile long pendingSps = 0;
 volatile bool comparePending = false;
 long cruiseSps = DEFAULT_SPS;
-float rampSps = 0;
-unsigned long rampAtUs = 0;
 
 volatile unsigned int escTicks = ESC_OFF_US * ESC_TICKS_PER_US;
 unsigned int escOnUs = 1200;
@@ -68,37 +62,27 @@ void stopPulses() {
     TIMSK1 &= ~_BV(OCIE1A);
   }
   digitalWrite(PIN_STEP, STEP_IDLE);
-  rampSps = 0;
 }
 
 void startPulses(int8_t direction, bool finite, long target) {
   stopPulses();
-  rampSps = min(cruiseSps, 50L);
-  rampAtUs = micros();
   digitalWrite(PIN_DIR, direction > 0 ? DIR_FORWARD : DIR_REVERSE);
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
     pulseDirection = direction; pulseFinite = finite; pulseTarget = target;
-    pulseReached = false; scheduledSps = long(rampSps);
+    pulseReached = false; scheduledSps = cruiseSps;
     OCR1A = compareFor(scheduledSps); TCNT1 = 0; TIFR1 = _BV(OCF1A);
     pulseOn = true; TIMSK1 |= _BV(OCIE1A);
   }
 }
 
-void serviceRamp() {
-  if (!moving()) return;
-  unsigned long now = micros(), elapsed = now - rampAtUs;
-  if (elapsed < 1000) return;
-  rampAtUs = now; elapsed = min(elapsed, 10000UL);
-  float desired = cruiseSps;
-  bool finite; long target;
-  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { finite = pulseFinite; target = pulseTarget; }
-  if (finite) desired = min(desired,
-      sqrt(2.0f * ACCEL_SPS2 * labs(target - position())));
-  float change = ACCEL_SPS2 * elapsed / 1000000.0f;
-  rampSps += constrain(desired - rampSps, -change, change);
-  long next = max(1L, long(rampSps + 0.5f));
+// Apply speed changes at a pulse boundary, without acceleration or deceleration.
+void serviceSpeed() {
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    pendingCompare = compareFor(next); pendingSps = next; comparePending = true;
+    if (pulseOn && scheduledSps != cruiseSps) {
+      pendingCompare = compareFor(cruiseSps);
+      pendingSps = cruiseSps;
+      comparePending = true;
+    }
   }
 }
 
@@ -176,7 +160,7 @@ void serviceMotion() {
     state = mode == WEB_POSITION ? WEB_MOVING : LOCAL_MOVING;
     reason = "none";
   }
-  serviceRamp();
+  serviceSpeed();
 }
 
 // ---------- 4. V1 command parser and compact status contract ----------
@@ -274,7 +258,9 @@ void writeStatus(Print &out, bool ack = false) {
   out.print(F(",\"csps\":")); out.print(cruiseSps);
   out.print(F(",\"aps\":")); out.print(moving() ? labs(signedSps()) : 0);
   out.print(F(",\"ds\":1,\"en\":")); out.print(driverEnabled);
-  out.print(F(",\"ut\":1,\"dc\":0,\"df\":0,\"dr\":0,\"dd\":0,\"da\":-1,\"dq\":0,\"dx\":0,\"m\":")); out.print(mode);
+  out.print(F(",\"ut\":1"));
+  dro.writeStatus(out, millis());
+  out.print(F(",\"m\":")); out.print(mode);
   out.print(F(",\"h\":0,\"a\":1,\"e\":")); out.print(estop);
   out.print(F(",\"bo\":")); out.print(escOn); out.print(F(",\"bp\":")); out.print(escOnUs);
   out.print(F(",\"mv\":")); out.print(moving()); out.print(F(",\"st\":")); out.print(state);
@@ -319,6 +305,7 @@ void serviceNetwork() {
   char request[112] = {}; byte length = 0;
   unsigned long deadline = millis() + 100;
   while (client.connected() && long(deadline - millis()) > 0) {
+    dro.poll();
     serviceMotion();
     if (!client.available()) continue;
     char c = client.read();
@@ -346,12 +333,14 @@ void setup() {
   ICR3 = 20000U * ESC_TICKS_PER_US - 1; OCR3A = escTicks;
   TIMSK3 = _BV(TOIE3) | _BV(OCIE3A);
 
+  dro.begin(PIN_DRO_CLOCK, PIN_DRO_DATA, onDroClock);
   Serial.begin(9600);
   Ethernet.begin(mac, ip, dns, gateway, subnet); server.begin();
   Serial.println(F("CONTROLLINO motion control ready: stopped and disabled."));
 }
 
 void loop() {
+  dro.poll();
   serviceUsb(); serviceNetwork(); serviceMotion();
   if (owner != OWNER_NONE && !moving() && !localCommand &&
       millis() - ownerAtMs >= OWNER_RELEASE_MS) owner = OWNER_NONE;

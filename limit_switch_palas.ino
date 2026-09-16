@@ -1,9 +1,9 @@
 #include <math.h>
 #include <util/atomic.h>
+#include "wiring_yun.h"
+#include "absolute_dro_protocol.h"
 
-const int PIN_STEP = 3;
-const int PIN_DRIVER_DIR = 2;
-// STEP=D3, DIR=D2. Timer1 is the sole STEP-edge owner in every motion mode.
+// Timer1 is the sole STEP-edge owner in every motion mode.
 
 // --- Mechanism calibration ---
 // CALIBRATED pulse conversion (2026-07-13): the mechanism advances
@@ -91,15 +91,7 @@ const int FIXED_DIRECTION_SIGN = 1;
 const int DRIVER_DIR_POSITIVE_LEVEL = LOW;
 const int DRIVER_DIR_NEGATIVE_LEVEL = HIGH;
 
-// --- Switch pins ---
-const int PIN_RUN = 4;
-const int PIN_DIR = 5;
-const int PIN_LIMIT_POS = 6;
-const int PIN_LIMIT_NEG = 8;  // D7 is reserved by the Yún Linux handshake.
-const int PIN_DRIVER_ENABLE_NEG = 9;
-const int PIN_DRO_CLOCK = 10;
-const int PIN_DRO_DATA = 11;
-const int PIN_ESC_SIGNAL = 12;
+// Pin assignments: wiring_yun.h
 
 // --- Brushless ESC output ---
 // The BadAss Renegade 130A V2 OPTO uses a receiver-style throttle signal, not
@@ -129,16 +121,8 @@ unsigned int brushlessOnPulseUs = ESC_DEFAULT_ON_PULSE_US;
 // is grounded. Four leading 0xF nibbles make a self-synchronizing header, so
 // capture does not depend on a guessed inter-frame delay. D10 and D11 are
 // diagnostic inputs only; no DRO value participates in a motion decision.
-const byte DRO_FRAME_BITS = 52;
-const byte DRO_HEADER_BITS = 16;
-const byte DRO_FRAME_BYTES = 7;
-const unsigned long DRO_STALE_MS = 250UL;
-const unsigned long DRO_STATUS_MS = 200UL;
-
-volatile byte droCaptureFrame[DRO_FRAME_BYTES];
+DroFrameCapture droCapture;
 volatile byte droCompletedFrame[DRO_FRAME_BYTES];
-volatile byte droCaptureBit = 0;
-volatile byte droHeaderOnes = 0;
 volatile bool droFrameReady = false;
 volatile byte droDroppedFrames = 0;
 
@@ -348,42 +332,16 @@ ISR(PCINT0_vect) {
   if (portB & _BV(PB6)) return;
   bool dataHigh = (portB & _BV(PB7)) != 0;
 
-  if (droCaptureBit == 0) {
-    if (!dataHigh) {
-      droHeaderOnes = 0;
-      return;
-    }
-    if (droHeaderOnes < DRO_HEADER_BITS) ++droHeaderOnes;
-    if (droHeaderOnes == DRO_HEADER_BITS) {
-      // The first two bytes are the known 16-one header. Clear the remainder
-      // before collecting bits 16..51 LSB-first.
-      droCaptureFrame[0] = 0xFF;
-      droCaptureFrame[1] = 0xFF;
-      for (byte index = 2; index < DRO_FRAME_BYTES; ++index) {
-        droCaptureFrame[index] = 0;
-      }
-      droCaptureBit = DRO_HEADER_BITS;
-    }
-    return;
-  }
-
-  if (dataHigh) {
-    droCaptureFrame[droCaptureBit >> 3] |=
-        _BV(droCaptureBit & 0x07);
-  }
-  ++droCaptureBit;
-  if (droCaptureBit < DRO_FRAME_BITS) return;
+  if (!droCapture.feed(dataHigh)) return;
 
   if (!droFrameReady) {
     for (byte index = 0; index < DRO_FRAME_BYTES; ++index) {
-      droCompletedFrame[index] = droCaptureFrame[index];
+      droCompletedFrame[index] = droCapture.frame[index];
     }
     droFrameReady = true;
   } else if (droDroppedFrames < 255) {
     ++droDroppedFrames;
   }
-  droCaptureBit = 0;
-  droHeaderOnes = 0;
 }
 
 ISR(TIMER3_OVF_vect) {
@@ -426,38 +384,6 @@ ISR(TIMER1_COMPA_vect) {
     pulseTimerScheduledSpeedSps = pulseTimerPendingSpeedSps;
     pulseTimerComparePending = false;
   }
-}
-
-byte droNibble(const byte frame[DRO_FRAME_BYTES], byte digitIndex) {
-  byte packed = frame[digitIndex >> 1];
-  if (digitIndex & 0x01) packed >>= 4;
-  return packed & 0x0F;
-}
-
-bool decodeDroFrame(
-    const byte frame[DRO_FRAME_BYTES],
-    long *positionHundredthsMm) {
-  // AbsoluteDRO Plus follows the 13-nibble Digimatic ordering, with every
-  // nibble transmitted least-significant bit first:
-  //   d1..d4=F, d5=sign, d6..d11=xxxx.xx, d12=2 decimals, d13=millimetres.
-  for (byte digit = 0; digit < 4; ++digit) {
-    if (droNibble(frame, digit) != 0x0F) return false;
-  }
-  byte sign = droNibble(frame, 4);
-  if (sign != 0 && sign != 8) return false;
-
-  long magnitudeHundredthsMm = 0L;
-  for (byte digit = 5; digit <= 10; ++digit) {
-    byte value = droNibble(frame, digit);
-    if (value > 9) return false;
-    magnitudeHundredthsMm = magnitudeHundredthsMm * 10L + value;
-  }
-  if (droNibble(frame, 11) != 2) return false;
-  if (droNibble(frame, 12) != 0) return false;
-
-  *positionHundredthsMm =
-      sign == 8 ? -magnitudeHundredthsMm : magnitudeHundredthsMm;
-  return true;
 }
 
 void pollDroFrames() {

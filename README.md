@@ -26,9 +26,10 @@ discovery does not report an FQBN.
 
 The notebook automatically uses the downloaded workspace Arduino CLI under
 `../tools/arduino-cli-*` and the isolated `.arduino-build/arduino-cli.yaml`
-configuration. That toolchain currently contains ESP32 core 3.3.10, Arduino
-AVR core 1.8.8, Controllino AVR core 3.1.3, Ethernet 2.0.2, Adafruit
-ADS1X15/BusIO, ESP Async WebServer, and Async TCP. If the
+configuration. The local macOS ARM64 installation uses Arduino CLI 1.5.1,
+ESP32 core 3.3.10, Arduino AVR core 1.8.8, Controllino AVR core 3.1.3,
+Ethernet 2.0.2, Adafruit ADS1X15 2.6.2, Adafruit BusIO 1.17.4,
+ESP Async WebServer 3.12.1, and Async TCP 3.5.0. If the
 workspace toolchain is absent, it falls back to `arduino-cli` on `PATH`; the
 configuration cell also accepts explicit CLI and config paths. The Yún sketch
 has no external library dependency.
@@ -37,9 +38,136 @@ Keep the Yún DM542T motor supply off, disconnect the brushless ESC battery, and
 set D4 OFF before upload. Stop any dashboard or serial monitor currently holding
 the selected USB port.
 
+From this directory, inspect the workspace toolchain or connected USB boards:
+
+```sh
+../tools/arduino-cli-1.5.1/arduino-cli --config-file .arduino-build/arduino-cli.yaml core list
+../tools/arduino-cli-1.5.1/arduino-cli --config-file .arduino-build/arduino-cli.yaml board list
+```
+
+Board packages, libraries, downloads, and the build cache live under the ignored
+`.arduino-build/` directory. The notebook discovers this installation automatically. All five current top-level
+sketches have passed local target compilation; details and installed package
+versions are saved in `.arduino-build/verification.md` and
+`.arduino-build/toolchain-manifest.json`.
+For ESP32 deployment, create the ignored `wifi_credentials.h` using
+`wifi_credentials.example.h`; build-verification placeholder credentials are
+confined to `.arduino-build/verify/` and are not deployment credentials.
+
 On the Yún, this USB workflow updates only the ATmega32U4 `.ino` firmware.
 `yun_stepper_bridge.py` runs on the separate Linux processor and must still be
 deployed over SSH with `provision_yun.sh`.
+
+## Firmware wiring configuration
+
+Edit the board header to change wiring; the sketches consume named signals:
+
+| Board | Wiring source | Used by |
+| --- | --- | --- |
+| Controllino MAXI Automation | [`wiring_controllino.h`](wiring_controllino.h) | motion controller and stepper bring-up |
+| Feather ESP32-S3 | [`wiring_esp32.h`](wiring_esp32.h) | headless flow-management firmware |
+| Yún | [`wiring_yun.h`](wiring_yun.h) | `limit_switch_palas.ino` |
+
+For example, moving the Controllino direction wire changes `PIN_DIR` in one
+place, shared by both sketches. On ESP32, reorder `SOLENOID_PINS` or the ADC
+channel arrays to preserve logical channel order after rewiring. Pin values are
+Arduino/GPIO numbers; adjacent terminal comments describe the installed wiring.
+Update those comments when moving a wire. ESP32 ADC addresses and relay polarity,
+and Controllino output polarities, also live in their board headers.
+
+Compile-time checks reject duplicate assignments, listed reserved-pin conflicts,
+and unsupported fixed-function remaps. The bring-up sketch's STEP output is
+fixed to D3/OC3C; the Controllino motion sketch uses an ISR and has no such pin
+restriction. Yún DRO capture remains fixed to D10/PB6 and D11/PB7. Its direction
+calibration stays in the motion code. Legacy status names such as `d4` and `d6`
+retain their protocol meanings after rewiring; they are not a live pin map.
+The protocol-map checker separately pins the documented installed Yún wiring;
+update that installation contract when changing the physical installation.
+
+These checks do not establish that an arbitrary pin exists, is exposed, or has
+suitable electrical characteristics. Match the selected board and its pinout.
+Changing channel counts or adding hardware is a feature change, not a wiring
+change; the ESP32 v3 contract still has four solenoids and three channels per ADC.
+The Ethernet-only diagnostic and archived/example sketches do not use these maps.
+
+The uploader automatically stages these headers and their shared checks alongside
+the selected sketch. From this directory, run:
+
+```sh
+PYTHONPATH=.. python3 -m unittest test_wiring test_controllino_motion_firmware test_firmware_upload
+```
+
+`test_wiring` uses a host C++11 compiler with Arduino pin definitions stubbed to
+check valid/invalid configurations and verifies upload staging. A target Arduino
+compile and physical wiring verification are still required before deployment.
+
+## Controllino DRO
+
+The motion firmware reads the existing iGaging AbsoluteDRO Plus on these **X1
+logic-level signals**, through the existing level shifter:
+
+| DRO signal | Controllino label | Gray chip-pin number | Port | Firmware constant |
+| --- | --- | --- | --- | --- |
+| Clock | SCL | 43 | PD0 | `PIN_DRO_CLOCK = 21` |
+| Data | Digital 4 | 15 | PH3 | `PIN_DRO_DATA = 6` |
+
+The gray numbers identify the ATmega package pins, not connector positions or
+Arduino code numbers. Both assignments live in `wiring_controllino.h`. Clock must
+support an external interrupt; changing it to an unsupported pin fails compilation.
+The data input register/mask are derived from the selected pin rather than hardcoded.
+The DRO's existing REQ-to-GND modification and level-shifter connections remain
+required. The older proposed migration drawing uses a different pin allocation.
+
+The code path is deliberately small:
+
+- `absolute_dro_protocol.h`: assemble 52 clocked bits; validate sign, six decimal
+  digits, two decimal places, and millimetre units. Shared with the Yún firmware.
+- `absolute_dro_avr.h`: configure inputs, capture falling edges, hand the newest
+  complete frame to the loop, and report position/freshness/frame diagnostics.
+- `controllino_motion_control.ino`: connect the reader to the wiring map and the
+  existing USB/Ethernet status output. STEP and ESC timer ownership is unchanged.
+
+No valid frame means capable but not fresh, with age `-1`. A sample becomes stale
+past 250 ms, measured from capture time rather than when the loop processes it.
+Rejected frames do not refresh the last good reading. If the loop falls behind,
+the newest complete frame replaces the pending one and increments the dropped
+counter. These diagnostics saturate at 255 rather than wrapping.
+
+The lean dashboard already consumes this telemetry: raw position, saved display
+zero, signed velocity, and frame diagnostics. **Set zero here** requires a fresh
+reading with motion stopped; **Move to zero** remains disabled. DRO readings do
+not authorize or control motion. The piston display retains its existing
+raw-minus-zero sign convention and configured display span.
+
+Launch the lean dashboard from this directory:
+
+```sh
+python3 dashboard-lean.py --stepper-source controllino --stepper-url http://10.77.0.10 --esp32-source off --dxmr90-source off
+```
+
+For USB, use the same machine protocol over serial:
+
+```sh
+python3 dashboard-lean.py --stepper-source controllino-usb --stepper-port /dev/cu.usbmodem1101 --stepper-baud 9600 --esp32-source off --dxmr90-source off
+```
+
+The serial device name may change after reconnecting. Select `real` for the other sources when they are needed. The existing
+`run_controllino_dashboard.sh` still launches the original dashboard; both use the
+same DRO backend. Upload `controllino_motion_control.ino` explicitly in the
+notebook: the Controllino upload default remains the Ethernet-only diagnostic,
+which does not read the DRO.
+
+Validation: `PYTHONPATH=.. python3 -m unittest test_dro_firmware` executes the real
+C++ frame reader with injected edges and passes its status into the Controllino
+adapter and lean runtime. It covers signed values, malformed frames, stale and
+missing data, delayed processing, buffer overruns, timestamp rollover, saved zero,
+and derived velocity. Target builds pass for Controllino motion/bring-up and Yún.
+The motion firmware has been uploaded and verified on the MAXI Automation.
+USB dashboard telemetry and physical DRO capture are verified with motion stopped:
+clock on X1 SCL and data on Digital 4 produced fresh 94.16 mm readings, increasing
+valid-frame counts, and zero rejected frames. Digital 0 previously remained low
+in direct-register testing; the cause is unresolved. Coexistence with active
+motion remains unverified. X1 SCL is reserved for the DRO, not I2C.
 
 ## Network setup
 
@@ -244,3 +372,8 @@ default.
 | `13053-13054` | temperature delta P2-P1 | C |
 | `13055-13056` | absolute temperature delta | C |
 | `13057-13058` | temperature delta P1-P2 x 10 | C x10 |
+
+Controllino motion uses the selected pulse rate immediately, with no acceleration
+or deceleration ramp. Speed changes take effect at a pulse boundary. The 250 ms
+driver-enable wake delay remains before the first pulse. Finite moves stop at
+their target pulse count.

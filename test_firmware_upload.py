@@ -1,3 +1,4 @@
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -160,7 +161,7 @@ class FirmwareUploadTests(unittest.TestCase):
             result = firmware_upload.compile_and_upload(
                 "yun",
                 compile_only=True,
-                executable="/bin/true",
+                executable=sys.executable,
             )
 
         self.assertTrue(result.compiled)

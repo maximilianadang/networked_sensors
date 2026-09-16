@@ -9,6 +9,15 @@ python3 dashboard-lean.py --stepper-source controllino --stepper-url http://10.7
 Defaults remain simulated. All original dashboard CLI options are supported.
 The original `dashboard.py` and launch scripts are preserved.
 
+## Controllino DRO support
+
+The motion firmware now reads X1 SCL (clock, gray chip pin 43) and Digital 4
+(data, gray chip pin 15). The lean dashboard uses the existing position, velocity,
+freshness, frame diagnostics, and saved-zero fields; no additional browser decoder
+is needed. See [the wiring and code-path explanation](README.md#controllino-dro).
+Firmware compilation and injected-frame tests pass; upload and physical validation
+remain pending. The Ethernet diagnostic sketch does not provide DRO capture.
+
 ## Where to edit a panel
 
 Search the exact visible heading across `dashboard_app/static/`. JavaScript
@@ -104,3 +113,5 @@ The options table is the single declaration of CLI defaults, types and choices
 within this entry point. Runtime names differ from CLI names only where listed
 in `RUNTIME_NAMES`. Server binding precedes worker startup, and cleanup runs
 on startup failure, normal shutdown and keyboard interruption.
+
+For a USB-connected Controllino, use `--stepper-source controllino-usb --stepper-port /dev/cu.usbmodem1101 --stepper-baud 9600` instead of the Ethernet source and URL. USB and Ethernet share the same Controllino decoder and dashboard behavior. The device name can change after reconnecting.

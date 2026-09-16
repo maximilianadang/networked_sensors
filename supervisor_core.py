@@ -71,7 +71,7 @@ SIMULATION_SCENARIOS = (
     "all_stale",
 )
 SOURCE_MODES = ("sim", "real", "off")
-STEPPER_SOURCE_MODES = ("sim", "usb", "network", "controllino", "off")
+STEPPER_SOURCE_MODES = ("sim", "usb", "network", "controllino", "controllino-usb", "off")
 DXMR90_DATA_PATHS = ("direct", "republished")
 DEFAULT_STEPPER_USB_PORT = "/dev/ttyACM0"
 DEFAULT_STEPPER_USB_BAUD = 9600
@@ -1663,6 +1663,12 @@ class UsbStepperSource:
             if not line.startswith("{"):
                 continue
             try:
+                payload = json.loads(line)
+                if isinstance(payload, dict) and payload.get("v") == 1 and payload.get("t") == "a":
+                    self.pending_command_error = (
+                        None if payload.get("ok") == 1 else str(payload.get("e", "rejected"))
+                    )
+                    continue
                 latest = self.decode_status_line(line)
             except ValueError as exc:
                 self.last_error = str(exc)
@@ -1907,40 +1913,16 @@ class NetworkStepperSource(UsbStepperSource):
             self._thread.join(timeout=max(1.0, self.timeout + self.period_s))
 
 
-class ControllinoStepperSource(NetworkStepperSource):
-    """Direct Ethernet transport for the Controllino MAXI motion firmware."""
+class ControllinoProtocol:
+    """Machine semantics shared by USB and Ethernet; transports only move bytes."""
 
-    mode = "controllino"
-    status_path = "/status"
-    command_path = "/command"
+    mode = "controllino"  # Dashboard behavior depends on the machine, not the cable.
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
         self._synthetic_sequence = 0
 
-    def _command_request(self, command_text: str) -> Request:
-        url = f"{self.base_url}{self.command_path}?value={quote(command_text, safe='')}"
-        return Request(
-            url,
-            data=b"",
-            headers={"Accept": "application/json", "Cache-Control": "no-store"},
-            method="POST",
-        )
-
-    @staticmethod
-    def _acknowledgement_error(payload: object) -> str | None:
-        if (
-            isinstance(payload, dict)
-            and payload.get("v") == 1
-            and payload.get("t") == "a"
-        ):
-            if payload.get("ok") in (1, True):
-                return None
-            error = payload.get("e")
-            return str(error) if isinstance(error, str) and error else "rejected"
-        return "invalid acknowledgement"
-
-    def _decode_network_status(
+    def decode_status_line(
         self, body: str
     ) -> dict[str, float | int | bool | str | None]:
         try:
@@ -1968,7 +1950,7 @@ class ControllinoStepperSource(NetworkStepperSource):
         if payload.get("dc") == 0:
             for key in ("dc", "df", "dr", "dd", "da", "dq", "dx"):
                 payload.pop(key, None)
-        values = self.decode_status_line(json.dumps(payload))
+        values = UsbStepperSource.decode_status_line(json.dumps(payload))
         values.update(
             {
                 "stepper_local_enabled": not bool(values["stepper_estop_latched"]),
@@ -2011,6 +1993,40 @@ class ControllinoStepperSource(NetworkStepperSource):
             "software run",
         )
         return self.status()
+
+
+class ControllinoStepperSource(ControllinoProtocol, NetworkStepperSource):
+    """Direct Ethernet transport for the Controllino MAXI motion firmware."""
+
+    status_path = "/status"
+    command_path = "/command"
+
+    def _command_request(self, command_text: str) -> Request:
+        url = f"{self.base_url}{self.command_path}?value={quote(command_text, safe='')}"
+        return Request(
+            url,
+            data=b"",
+            headers={"Accept": "application/json", "Cache-Control": "no-store"},
+            method="POST",
+        )
+
+    @staticmethod
+    def _acknowledgement_error(payload: object) -> str | None:
+        if (
+            isinstance(payload, dict)
+            and payload.get("v") == 1
+            and payload.get("t") == "a"
+        ):
+            if payload.get("ok") in (1, True):
+                return None
+            error = payload.get("e")
+            return str(error) if isinstance(error, str) and error else "rejected"
+        return "invalid acknowledgement"
+
+
+
+class ControllinoUsbStepperSource(ControllinoProtocol, UsbStepperSource):
+    """The same Controllino protocol over the existing USB serial transport."""
 
 
 class RealEsp32Source:
@@ -2705,6 +2721,8 @@ def make_sources(
             base_url=stepper_network_url,
             timeout=stepper_network_timeout,
         )
+    elif stepper_source == "controllino-usb":
+        stepper = ControllinoUsbStepperSource(port=stepper_port, baud=stepper_baud)
     elif stepper_source == "controllino":
         stepper = ControllinoStepperSource(
             base_url=stepper_network_url,

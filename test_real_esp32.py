@@ -63,7 +63,7 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertNotIn("FATAL: sensor hardware unavailable", primary)
         self.assertIn('\\"p_v\\":[', primary)
         self.assertIn('\\"f_v\\":[', primary)
-        self.assertIn("{5, 6, 9, 10}", primary)
+        self.assertIn("{5, 6, 9, 10}", (root / "wiring_esp32.h").read_text())
         self.assertIn("solenoidOn[3]", primary)
         self.assertIn("const char HTML[]", legacy)
         self.assertIn('"text/html"', legacy)

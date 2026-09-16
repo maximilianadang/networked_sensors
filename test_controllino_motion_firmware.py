@@ -3,11 +3,13 @@ import unittest
 
 FIRMWARE = (Path(__file__).parent / "controllino_motion_control.ino").read_text()
 
+WIRING = (Path(__file__).parent / "wiring_controllino.h").read_text()
+
 class ControllinoMotionFirmwareTests(unittest.TestCase):
     def test_x1_pin_map_and_direction_are_explicit(self):
-        for item in ("PIN_STEP = 3", "PIN_DIR = 5", "PIN_ENABLE = 7",
+        for item in ("PIN_STEP = 3", "PIN_DIR = 5", "PIN_ENABLE = 7", "PIN_DRO_CLOCK = 21;", "PIN_DRO_DATA = 6",
                      "DIR_FORWARD = HIGH", "DIR_REVERSE = LOW"):
-            self.assertIn(item, FIRMWARE)
+            self.assertIn(item, WIRING)
 
     def test_each_timer_has_one_owner(self):
         for vector in ("TIMER1_COMPA_vect", "TIMER3_OVF_vect", "TIMER3_COMPA_vect"):
@@ -21,7 +23,7 @@ class ControllinoMotionFirmwareTests(unittest.TestCase):
     def test_absent_hardware_is_not_reported_clear_or_fresh(self):
         self.assertIn('reject("home_switch_unavailable")', FIRMWARE)
         self.assertIn('\\"d6\\":-1,\\"d8\\":-1', FIRMWARE)
-        self.assertIn('\\"dc\\":0,\\"df\\":0', FIRMWARE)
+        self.assertIn("dro.writeStatus(out, millis())", FIRMWARE)
 
     def test_priority_stops_precede_transport_ownership(self):
         ownership = FIRMWARE.index("claimable(source)")
