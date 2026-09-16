@@ -11,7 +11,7 @@ ESP32_URL=${ESP32_URL:-http://testbench.local}
 DASHBOARD_HOST=${DASHBOARD_HOST:-0.0.0.0}
 DASHBOARD_PORT=${DASHBOARD_PORT:-8000}
 
-exec python3 "$SCRIPT_DIR/dashboard.py" \
+exec python3 "$SCRIPT_DIR/dashboard-lean.py" \
     --esp32-source "$ESP32_SOURCE" \
     --esp32-url "$ESP32_URL" \
     --dxmr90-source "$DXMR90_SOURCE" \

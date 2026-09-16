@@ -47,9 +47,11 @@ unsigned int escOnUs = 1200;
 bool escOn = false;
 volatile bool auxPulseEnabled = !AUX_IS_SERVO;
 unsigned int servoPulseUs = SERVO_DEFAULT_US;
+volatile byte servoReleaseFrames = 0;  // 50 Hz countdown, independent of network/USB.
 
-void setServoPulse(unsigned int pulseUs) {
+void setServoPulse(unsigned int pulseUs, byte releaseFrames = 0) {
   ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    servoReleaseFrames = pulseUs ? releaseFrames : 0;
     auxPulseEnabled = pulseUs != 0;
     if (pulseUs) {
       servoPulseUs = pulseUs;
@@ -124,7 +126,11 @@ ISR(TIMER1_COMPA_vect) {
     OCR1A = pendingCompare; scheduledSps = pendingSps; comparePending = false;
   }
 }
-ISR(TIMER3_OVF_vect) { if (auxPulseEnabled) digitalWrite(PIN_AUX, HIGH); OCR3A = auxTicks; }
+ISR(TIMER3_OVF_vect) {
+  if (servoReleaseFrames && --servoReleaseFrames == 0) auxPulseEnabled = false;
+  if (auxPulseEnabled) digitalWrite(PIN_AUX, HIGH);
+  OCR3A = auxTicks;
+}
 ISR(TIMER3_COMPA_vect) { digitalWrite(PIN_AUX, LOW); }
 
 // ---------- 3. Machine state and safety transitions ----------
@@ -220,12 +226,19 @@ void processCommand(char *line, byte source) {
   }
   if (!strncmp(line, "V1 A", 4)) {
     if (!AUX_IS_SERVO) return reject("servo_unavailable");
-    long pulse;
+    long pulse, releaseMs = 0;
+    char *separator = strchr(line + 4, ',');
+    if (separator) {
+      *separator = '\0';
+      if (!parseLong(separator + 1, releaseMs) || releaseMs < 20 || releaseMs > 5000)
+        return reject("servo_release_range");
+    }
     if (!parseLong(line + 4, pulse) ||
         (pulse != 0 && (pulse < SERVO_MIN_US || pulse > SERVO_MAX_US)))
       return reject("servo_pulse_range");
     if (pulse && estop) return reject("emergency_stop");
-    setServoPulse(pulse); return accept(source);
+    if (!pulse && separator) return reject("servo_release_range");
+    setServoPulse(pulse, (releaseMs + 19) / 20); return accept(source);
   }
   if (!strcmp(line, "V1 B0") || !strcmp(line, "V1 B1")) {
     if (AUX_IS_SERVO) return reject("esc_unavailable");
@@ -309,6 +322,7 @@ void writeStatus(Print &out, bool ack = false) {
     out.print(F(",\"sp\":")); out.print(servoPulseUs);
     out.print(F(",\"smin\":")); out.print(SERVO_MIN_US);
     out.print(F(",\"smax\":")); out.print(SERVO_MAX_US);
+    out.print(F(",\"srel\":1,\"sr\":")); out.print(servoReleaseFrames);
   } else {
   out.print(F(",\"bo\":")); out.print(escOn); out.print(F(",\"bp\":")); out.print(escOnUs);
   }

@@ -24,8 +24,10 @@ DEFAULT_SYSTEM_CONFIG: dict[str, object] = {
         ),
     },
     "stepper": {
-        "dro_zero_raw_mm": None,
+        "dro_home": None,
+        "max_travel_mm": 137.18,
     },
+    "servo": {"off_pulse_us": 2500, "displacement_deg": 120.0},
 }
 
 
@@ -56,7 +58,7 @@ class SystemConfig:
                 f"system config {self.path} must contain a stepper object"
             )
         dro_zero_raw_mm = self._validate_dro_zero(
-            stepper.get("dro_zero_raw_mm")
+            stepper.get("dro_home", stepper.get("dro_zero_raw_mm"))
         )
         geometry = payload.get("geometry")
         if geometry is None:
@@ -76,24 +78,50 @@ class SystemConfig:
 
         normalized = deepcopy(payload)
         normalized_stepper = deepcopy(stepper)
-        normalized_stepper["dro_zero_raw_mm"] = dro_zero_raw_mm
+        normalized_stepper.pop("dro_zero_raw_mm", None)  # migrate legacy files
+        normalized_stepper["dro_home"] = dro_zero_raw_mm
+        normalized_stepper["max_travel_mm"] = self._validate_positive_finite(
+            stepper.get("max_travel_mm", DEFAULT_SYSTEM_CONFIG["stepper"]["max_travel_mm"]),
+            "stepper.max_travel_mm",
+        )
         normalized_geometry = deepcopy(geometry)
         normalized_geometry[
             "powder_mass_per_stepper_travel_g_per_mm"
         ] = powder_mass_per_travel
         normalized["stepper"] = normalized_stepper
         normalized["geometry"] = normalized_geometry
+        normalized["servo"] = self.validate_servo(payload.get("servo", DEFAULT_SYSTEM_CONFIG["servo"]))
         return normalized
+
+    @staticmethod
+    def validate_servo(values: object) -> dict[str, Any]:
+        """MS62 nominal clockwise mapping; never silently clip a requested angle."""
+        if not isinstance(values, dict):
+            raise ValueError("servo must be an object")
+        zero, angle = values.get("off_pulse_us"), values.get("displacement_deg")
+        if type(zero) is not int or not 500 <= zero <= 2500:
+            raise ValueError("Servo zero must be an integer from 500 to 2500 us")
+        if type(angle) not in (int, float) or not math.isfinite(angle) or not 0 <= angle <= (zero-500)*270/2000:
+            raise ValueError("Clockwise displacement exceeds the available servo travel")
+        return {"off_pulse_us": zero, "displacement_deg": angle}
+
+    def set_servo(self, values: dict[str, Any]) -> None:
+        with self._lock:
+            updated = deepcopy(self._values)
+            updated["servo"] = self.validate_servo(values)
+            if self.path is not None:
+                self._write_atomic(updated)
+            self._values = updated
 
     @staticmethod
     def _validate_dro_zero(value: object) -> float | None:
         if value is None:
             return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError("stepper.dro_zero_raw_mm must be finite or null")
+            raise ValueError("stepper.dro_home must be finite or null")
         parsed = float(value)
         if not math.isfinite(parsed):
-            raise ValueError("stepper.dro_zero_raw_mm must be finite or null")
+            raise ValueError("stepper.dro_home must be finite or null")
         return parsed
 
     @staticmethod
@@ -107,10 +135,16 @@ class SystemConfig:
 
     @property
     def stepper_dro_zero_raw_mm(self) -> float | None:
+        """Keep the telemetry/API name stable; persistent calibration is dro_home."""
         with self._lock:
             stepper = self._values["stepper"]
             assert isinstance(stepper, dict)
-            return self._validate_dro_zero(stepper.get("dro_zero_raw_mm"))
+            return self._validate_dro_zero(stepper.get("dro_home"))
+
+    @property
+    def stepper_max_travel_mm(self) -> float:
+        with self._lock:
+            return float(self._values["stepper"]["max_travel_mm"])
 
     @property
     def powder_mass_per_stepper_travel_g_per_mm(self) -> float:
@@ -130,7 +164,7 @@ class SystemConfig:
             updated = deepcopy(self._values)
             stepper = updated["stepper"]
             assert isinstance(stepper, dict)
-            stepper["dro_zero_raw_mm"] = rounded
+            stepper["dro_home"] = rounded
             if self.path is not None:
                 self._write_atomic(updated)
             self._values = updated

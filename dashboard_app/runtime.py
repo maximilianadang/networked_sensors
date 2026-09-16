@@ -213,6 +213,7 @@ class DashboardRuntime:
         """Add the persistent display reference without changing raw DRO data."""
 
         zero_raw_mm = self.system_config.stepper_dro_zero_raw_mm
+        sample["servo_settings"] = self.system_config.snapshot()["servo"]
         raw_value = sample.get("stepper_dro_position_mm")
         try:
             raw_position_mm = float(raw_value)  # type: ignore[arg-type]
@@ -401,7 +402,11 @@ class DashboardRuntime:
             "history_limit": self.history_limit,
             "solenoid_count": ESP32_SOLENOID_COUNT,
             "stepper": {
-                "max_distance_mm": DEFAULT_STEPPER_MAX_DISTANCE_MM,
+                "max_distance_mm": min(
+                    self.system_config.stepper_max_travel_mm,
+                    DEFAULT_STEPPER_MAX_DISTANCE_MM,
+                ),
+                "max_travel_mm": self.system_config.stepper_max_travel_mm,
                 "min_speed_mm_s": DEFAULT_STEPPER_MIN_SPEED_MM_S,
                 "max_speed_mm_s": DEFAULT_STEPPER_MAX_SPEED_MM_S,
                 "default_speed_mm_s": DEFAULT_STEPPER_HOME_SPEED_MM_S,
@@ -704,6 +709,8 @@ class DashboardRuntime:
                 ) from exc
             if not math.isfinite(travel_mm) or travel_mm <= 0:
                 raise ValueError("distance_mm must be a positive finite travel magnitude")
+            if travel_mm > self.system_config.stepper_max_travel_mm:
+                raise ValueError("distance_mm exceeds configured max_travel_mm")
 
             # Snapshot the physical D5 selection and turn the operator's
             # positive magnitude into the signed internal/wire command. The
@@ -924,6 +931,7 @@ class DashboardRuntime:
 
     def set_stepper_servo(self, values: dict[str, object]) -> dict[str, object]:
         pulse = values.get("pulse_us")
+        release_ms = 0
         with self._servo_command_lock:
             with self._condition:
                 stepper = self._stepper_locked()
@@ -931,14 +939,44 @@ class DashboardRuntime:
                 if not current.get("stepper_connected") or not hasattr(stepper, "set_servo_pulse"):
                     raise RuntimeError("Position-servo controller is unavailable")
                 before_sequence = current.get("stepper_status_sequence")
-            stepper.set_servo_pulse(pulse)
+                action = values.get("action")
+                settings = self.system_config.snapshot()["servo"]
+                if action is not None:
+                    if action not in ("endpoint", "settings", "on", "off"):
+                        raise ValueError("Unknown servo action")
+                    if not current.get("stepper_servo_capable"):
+                        raise RuntimeError("Servo firmware required")
+                    if action == "endpoint":
+                        if current.get("stepper_servo_enabled") is not False or current.get("stepper_servo_releasing"):
+                            raise RuntimeError("Turn the servo Off and wait for its return to finish before setting zero")
+                        # Explicit movement, not a relabeling of the current position.
+                        settings["off_pulse_us"] = 2500
+                    elif action != "off" and "displacement_deg" in values:
+                        settings["displacement_deg"] = values["displacement_deg"]
+                    settings = self.system_config.validate_servo(settings)
+                    if action == "settings":
+                        self.system_config.set_servo(settings)
+                        self._apply_stepper_dro_zero_locked(self.latest)
+                        return {"confirmed": True, "sample": self.latest}
+                    # Installed MS62: decreasing pulse width moves clockwise.
+                    pulse = round(settings["off_pulse_us"] - (
+                        settings["displacement_deg"] * 2000 / 270 if action == "on" else 0))
+                    release_ms = 1500 if action in ("off", "endpoint") else 0
+            if release_ms:
+                stepper.set_servo_pulse(pulse, release_ms=release_ms)
+            else:
+                stepper.set_servo_pulse(pulse)
             with self._condition:
                 self._poll_locked(time.monotonic() - self.monotonic0)
                 confirmed = self._confirm_stepper_locked(
                     stepper, before_sequence, "servo position",
-                    lambda p: p.get("stepper_servo_enabled") is (pulse != 0)
+                    lambda p: (p.get("stepper_servo_enabled") is (pulse != 0) or
+                               (release_ms and p.get("stepper_servo_enabled") is False))
                     and (pulse == 0 or p.get("stepper_servo_pulse_us") == pulse),
                 )
+                if action in ("on", "off", "endpoint"):
+                    self.system_config.set_servo(settings)
+                    self._apply_stepper_dro_zero_locked(self.latest)
                 return {"confirmed": True, "stepper": confirmed, "sample": self.latest}
 
     def reset_stepper_emergency_stop(self) -> dict[str, object]:

@@ -1,64 +1,68 @@
-// Shared by both dashboards. Firmware declares which auxiliary panel is present.
+// PANEL: Position servo — MS62 calibration and On/Off; shared by both dashboards.
+// Firmware owns return-and-release timing. Rendering never sends motion commands.
 export function createServoComponent({getLatest, applySample, postJson}) {
   const brushless = document.getElementById("brushlessMotorToggle").closest("fieldset");
   const panel = document.createElement("fieldset");
   panel.className = "brushless-control servo-control";
-  panel.hidden = true;
   panel.style.display = "none";
   panel.innerHTML = `
     <legend>Position servo</legend>
     <span data-servo="state" class="pill" aria-live="polite">Unknown</span>
-    <small data-servo="detail"></small>
-    <label class="brushless-pulse-field">Position pulse (µs)
-      <input data-servo="pulse" type="number" step="1" inputmode="numeric">
+    <label class="brushless-pulse-field">Displacement from off (° clockwise)
+      <input data-servo="angle" type="number" min="0" step="0.1" inputmode="decimal">
     </label>
     <div class="servo-actions">
-      <button data-servo="apply" type="button">Apply position</button>
-      <button data-servo="disable" type="button">Disable pulses</button>
+      <button data-servo="toggle" class="servo-toggle" type="button" role="switch"
+        aria-label="Servo" aria-checked="false">
+        <span class="servo-toggle-track" aria-hidden="true"></span>
+        <span data-servo="toggleLabel">Off</span>
+      </button>
+      <button data-servo="zero" type="button" title="Moves to the counterclockwise endpoint (0°), then disables pulses">Zero</button>
     </div>
     <small data-servo="feedback" role="status"></small>`;
   brushless.insertAdjacentElement("afterend", panel);
   const el = Object.fromEntries([...panel.querySelectorAll("[data-servo]")]
     .map(node => [node.dataset.servo, node]));
-  let pending = false;
-  let dirty = false;
+  let pending = false, dirty = false;
 
   function render(sample) {
     const servo = sample.stepper_aux_kind === "servo";
     brushless.hidden = servo;
     brushless.style.display = servo ? "none" : "";
-    panel.hidden = !servo;
     panel.style.display = servo ? "" : "none";
     if (!servo) return;
+    const settings = sample.servo_settings;
     const live = sample.stepper_connected === true && !sample.stepper_transport_error;
+    const releasing = sample.stepper_servo_releasing === true;
     const enabled = sample.stepper_servo_enabled === true;
-    const available = live && sample.stepper_servo_capable === true;
-    el.state.textContent = !live ? "Disconnected" : enabled ? "Position pulses enabled" : "Pulses disabled";
-    el.detail.textContent = `Commanded ${sample.stepper_servo_pulse_us} µs`;
-    el.pulse.min = String(sample.stepper_servo_min_us);
-    el.pulse.max = String(sample.stepper_servo_max_us);
-    if (!dirty) el.pulse.value = String(sample.stepper_servo_pulse_us);
-    const pulse = Number(el.pulse.value);
-    const valid = Number.isInteger(pulse) && pulse >= Number(el.pulse.min) && pulse <= Number(el.pulse.max);
-    el.pulse.disabled = pending || !available || sample.stepper_estop_latched;
-    el.apply.disabled = el.pulse.disabled || !valid;
-    el.disable.disabled = pending || !available || !enabled;
+    const ready = live && settings && sample.stepper_servo_release_capable === true;
+    el.state.textContent = !live ? "Disconnected" : !ready ? "Firmware update required" :
+      releasing ? "Returning to off" : enabled ? "Holding target" : "Pulses disabled";
+    if (settings) {
+      if (!dirty) el.angle.value = settings.displacement_deg;
+      el.angle.max = Math.floor((settings.off_pulse_us - sample.stepper_servo_min_us) * 0.135 * 10) / 10;
+    }
+    const on = enabled && !releasing;
+    el.toggle.setAttribute("aria-checked", String(on));
+    el.toggleLabel.textContent = on ? "On" : "Off";
+    const valid = el.angle.value !== "" && el.angle.checkValidity();
+    el.angle.disabled = pending || !ready;
+    el.toggle.disabled = pending || !ready || (!on && !valid) || sample.stepper_estop_latched;
+    el.zero.disabled = pending || !ready || enabled || releasing || sample.stepper_estop_latched;
   }
 
-  async function send(pulse) {
+  async function send(action) {
     pending = true;
     render(getLatest());
-    el.feedback.textContent = "Waiting for controller confirmation…";
+    el.feedback.textContent = "";
     try {
-      const result = await postJson("/api/stepper/servo", {pulse_us: pulse});
-      const status = result.stepper;
-      if (result.confirmed !== true || status?.stepper_servo_enabled !== (pulse !== 0) ||
-          (pulse !== 0 && status?.stepper_servo_pulse_us !== pulse)) {
-        throw new Error("Servo output was not confirmed");
-      }
+      const result = await postJson("/api/stepper/servo", {
+        action, displacement_deg: Number(el.angle.value)
+      });
+      if (result.confirmed !== true) throw new Error("Servo command was not confirmed");
       dirty = false;
       if (result.sample) applySample(result.sample);
-      el.feedback.textContent = pulse ? `Position pulse confirmed: ${pulse} µs` : "Position pulses disabled";
+      if (action === "endpoint") el.feedback.textContent = "Off endpoint commanded and saved. Clockwise range: 0–270°.";
     } catch (error) {
       el.feedback.textContent = error.message;
     } finally {
@@ -66,9 +70,10 @@ export function createServoComponent({getLatest, applySample, postJson}) {
       render(getLatest());
     }
   }
-
-  el.pulse.addEventListener("input", () => { dirty = true; render(getLatest()); });
-  el.apply.addEventListener("click", () => { if (!el.apply.disabled) void send(Number(el.pulse.value)); });
-  el.disable.addEventListener("click", () => { if (!el.disable.disabled) void send(0); });
+  el.angle.addEventListener("input", () => { dirty = true; render(getLatest()); });
+  el.toggle.addEventListener("click", () => {
+    if (!el.toggle.disabled) void send(el.toggle.getAttribute("aria-checked") === "true" ? "off" : "on");
+  });
+  el.zero.addEventListener("click", () => { if (!el.zero.disabled) void send("endpoint"); });
   return {render};
 }

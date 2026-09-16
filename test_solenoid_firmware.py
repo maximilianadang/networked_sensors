@@ -24,7 +24,7 @@ const int ESC_OFF_US=1000, ESC_MAX_US=2000, MIN_SPS=25, MAX_SPS=2520;
 const long MAX_RELATIVE_PULSES=34565;
 const bool AUX_IS_SERVO=false;
 const int SERVO_MIN_US=1000, SERVO_MAX_US=2000;
-void setServoPulse(unsigned int){}
+void setServoPulse(unsigned int, byte=0){}
 bool solenoid4On=false, escOn=false;
 int gpio=0, escOnUs=1200;
 long cruiseSps=1000, pulsePosition=0;

@@ -1927,6 +1927,7 @@ class ControllinoProtocol:
         "stepper_firmware_version", "stepper_aux_kind", "stepper_aux_pin",
         "stepper_servo_capable", "stepper_servo_enabled", "stepper_servo_pulse_us",
         "stepper_servo_min_us", "stepper_servo_max_us",
+        "stepper_servo_release_capable", "stepper_servo_releasing",
     )
 
     def __init__(self, *args: object, **kwargs: object) -> None:
@@ -1961,6 +1962,9 @@ class ControllinoProtocol:
                 raise ValueError("Invalid servo telemetry range")
             if payload.get("e") == 1 and payload["sv"]:
                 raise ValueError("Servo pulses cannot be enabled during E-STOP")
+            if (type(payload.get("srel", 0)) is not int or payload.get("srel", 0) not in (0, 1)
+                    or type(payload.get("sr", 0)) is not int or not 0 <= payload.get("sr", 0) <= 250):
+                raise ValueError("Invalid servo release telemetry")
 
         solenoid4 = payload.get("sol4")
         if "sol4" in payload and (type(solenoid4) is not int or solenoid4 not in (0, 1)):
@@ -1995,6 +1999,8 @@ class ControllinoProtocol:
                 "stepper_servo_pulse_us": payload.get("sp") if servo else None,
                 "stepper_servo_min_us": payload.get("smin") if servo else None,
                 "stepper_servo_max_us": payload.get("smax") if servo else None,
+                "stepper_servo_release_capable": servo and payload.get("srel") == 1,
+                "stepper_servo_releasing": servo and payload.get("sr", 0) > 0,
                 "stepper_solenoid4_capable": "sol4" in payload,
                 "stepper_solenoid4_on": bool(solenoid4) if "sol4" in payload else None,
                 "stepper_local_enabled": not bool(values["stepper_estop_latched"]),
@@ -2022,7 +2028,7 @@ class ControllinoProtocol:
         # reported by newer firmware, even though this installation lacks them.
         self._validate_directional_limits(values, delta_steps)
 
-    def set_servo_pulse(self, pulse_us: object) -> None:
+    def set_servo_pulse(self, pulse_us: object, release_ms: int = 0) -> None:
         values = self._require_connected()
         if values.get("stepper_servo_capable") is not True:
             raise RuntimeError("Connected firmware does not support position-servo control")
@@ -2031,7 +2037,12 @@ class ControllinoProtocol:
             raise ValueError("pulse_us must be zero (disable) or an integer within the servo limits")
         if pulse_us and values.get("stepper_estop_latched"):
             raise RuntimeError("Reset E-STOP before enabling servo pulses")
-        self._write_command(f"V1 A{pulse_us}\n".encode("ascii"), "servo position")
+        if type(release_ms) is not int or (release_ms != 0 and not 20 <= release_ms <= 5000):
+            raise ValueError("Invalid servo release time")
+        if release_ms and (not pulse_us or not values.get("stepper_servo_release_capable")):
+            raise RuntimeError("Servo return-and-release requires firmware 1.2.0 or newer")
+        suffix = f",{release_ms}" if release_ms else ""
+        self._write_command(f"V1 A{pulse_us}{suffix}\n".encode("ascii"), "servo position")
 
     def set_solenoid(self, index: int, on: bool) -> None:
         if index != 3 or type(on) is not bool:

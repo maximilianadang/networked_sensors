@@ -56,7 +56,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
 
   // The saved display zero is the physical D8/negative limit at the top.
   // Preserve raw-minus-zero sign: positions below that top zero are negative.
-  const droVisualMinMm = -limits.max_distance_mm;
+  const droVisualMinMm = -(limits.max_travel_mm ?? limits.max_distance_mm);
   const droVisualMaxMm = 0;
   const droVisualSpanMm = droVisualMaxMm - droVisualMinMm;
   const droVisualEndpointToleranceMm = 0.1;
@@ -72,8 +72,8 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   els.brushlessPulseWidth.min = "1000";
   els.brushlessPulseWidth.max = "2000";
   els.brushlessPulseWidth.step = "1";
-  setText(els.stepperDroMinLabel, `D6 bottom ${droVisualMinMm.toFixed(2)} mm`);
-  setText(els.stepperDroMaxLabel, "D8 top 0 mm");
+  setText(els.stepperDroMinLabel, `Bottom ${droVisualMinMm.toFixed(2)} mm`);
+  setText(els.stepperDroMaxLabel, "Top 0 mm");
   const modeInputs = [els.stepperModeLocal, els.stepperModeWeb];
 
   function formatSetpoint(value, digits) {

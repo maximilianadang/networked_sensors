@@ -7,7 +7,8 @@ python3 dashboard-lean.py --stepper-source controllino --stepper-url http://10.7
 ```
 
 Defaults remain simulated. All original dashboard CLI options are supported.
-The original `dashboard.py` and launch scripts are preserved.
+The original `dashboard.py` is preserved. `./run_controllino_dashboard.sh`
+launches the lean version with the existing real-device connection settings.
 
 ## Controllino DRO support
 
@@ -115,3 +116,20 @@ in `RUNTIME_NAMES`. Server binding precedes worker startup, and cleanup runs
 on startup failure, normal shutdown and keyboard interruption.
 
 For a USB-connected Controllino, use `--stepper-source controllino-usb --stepper-port /dev/cu.usbmodem1101 --stepper-baud 9600` instead of the Ethernet source and URL. USB and Ethernet share the same Controllino decoder and dashboard behavior. The device name can change after reconnecting.
+# Piston home and travel configuration
+
+`system_config.json` → `stepper` contains two independent settings:
+`dro_home` (raw DRO millimeters saved by **Set top zero**) and
+`max_travel_mm` (positive top-to-bottom distance, currently 126 mm).
+With the piston physically at the top, press **Set top zero** after restarting
+the dashboard. Display position is raw DRO minus `dro_home`: top 0 mm,
+bottom −126 mm. Calibration persists across dashboard restarts; do not zero
+automatically on reconnect. A sensor reference reset requires recalibration.
+
+Manual config edits take effect on dashboard restart. Legacy
+`dro_zero_raw_mm` configs still load and migrate to `dro_home` on the next
+calibration save. Existing telemetry field names are unchanged. The configured
+range sets the piston scale and caps individual requested travel (also bounded
+by the existing firmware-compatible command ceiling). It is not an absolute
+motion envelope or a replacement for physical limits. No firmware upload is
+required for this configuration change.

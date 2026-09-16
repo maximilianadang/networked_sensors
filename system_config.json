@@ -2,8 +2,13 @@
   "geometry": {
     "powder_mass_per_stepper_travel_g_per_mm": 2.4
   },
+  "servo": {
+    "displacement_deg": 180,
+    "off_pulse_us": 2500
+  },
   "stepper": {
-    "dro_zero_raw_mm": 137.18
+    "dro_home": 135.46,
+    "max_travel_mm": 126.0
   },
   "version": 1
 }

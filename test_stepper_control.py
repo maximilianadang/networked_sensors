@@ -220,6 +220,37 @@ class SimulatedStepperSourceTests(unittest.TestCase):
 
 
 class SystemConfigTests(unittest.TestCase):
+    def test_home_and_travel_persist_independently(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "system_config.json"
+            path.write_text(json.dumps({"version": 1, "stepper": {
+                "dro_home": None, "max_travel_mm": 126}}))
+            config = SystemConfig(path)
+            config.set_stepper_dro_zero_raw_mm(135.0)
+            restored = SystemConfig(path)
+            self.assertEqual(restored.stepper_dro_zero_raw_mm, 135.0)
+            self.assertEqual(restored.stepper_max_travel_mm, 126.0)
+            self.assertEqual(restored.snapshot()["stepper"], {
+                "dro_home": 135.0, "max_travel_mm": 126.0})
+            runtime = DashboardRuntime.__new__(DashboardRuntime)
+            runtime.system_config = restored
+            runtime.history_limit = 10
+            self.assertEqual(runtime.dashboard_config()["stepper"]["max_travel_mm"], 126)
+            self.assertEqual(runtime.dashboard_config()["stepper"]["max_distance_mm"], 126)
+            for raw, expected in ((135, 0), (126, -9), (9, -126)):
+                sample = {"stepper_dro_position_mm": raw}
+                runtime._apply_stepper_dro_zero_locked(sample)
+                self.assertEqual(sample["stepper_dro_zeroed_position_mm"], expected)
+
+    def test_rejects_invalid_max_travel(self):
+        for value in (0, -126, True, "126", float("inf"), float("nan")):
+            with self.subTest(value=value), TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                path.write_text(json.dumps({"version": 1, "stepper": {
+                    "dro_home": None, "max_travel_mm": value}}))
+                with self.assertRaisesRegex(ValueError, "max_travel_mm"):
+                    SystemConfig(path)
+
     def test_legacy_version_one_file_gets_default_geometry_on_next_write(
         self,
     ) -> None:
@@ -1437,7 +1468,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
     def test_control_mode_uses_explicit_radio_choices(self) -> None:
         self.assertIn('id="stepperModeLocal"', INDEX_HTML)
         self.assertIn('value="local_velocity" checked', INDEX_HTML)
-        self.assertIn(">Local Speed</label>", INDEX_HTML)
+        self.assertIn(">Directional</label>", INDEX_HTML)
         self.assertIn('id="stepperModeWeb"', INDEX_HTML)
         self.assertIn('value="web_position"', INDEX_HTML)
         self.assertIn(
@@ -1648,7 +1679,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
         )
         self.assertNotIn("droVisualRange", CONFIG_JS)
         self.assertIn(
-            "const droVisualMinMm = -limits.max_distance_mm",
+            "const droVisualMinMm = -(limits.max_travel_mm ?? limits.max_distance_mm)",
             STEPPER_JS,
         )
         self.assertIn("const droVisualMaxMm = 0", STEPPER_JS)
@@ -1661,12 +1692,12 @@ class UsbStepperDashboardTests(unittest.TestCase):
             STEPPER_JS,
         )
         self.assertIn(
-            'setText(els.stepperDroMaxLabel, "D8 top 0 mm")',
+            'setText(els.stepperDroMaxLabel, "Top 0 mm")',
             STEPPER_JS,
         )
-        self.assertIn("D6 bottom ${droVisualMinMm.toFixed(2)} mm", STEPPER_JS)
-        self.assertIn("D8 top 0 mm", INDEX_HTML)
-        self.assertIn("D6 bottom −137.18 mm", INDEX_HTML)
+        self.assertIn("Bottom ${droVisualMinMm.toFixed(2)} mm", STEPPER_JS)
+        self.assertIn("Top 0 mm", INDEX_HTML)
+        self.assertIn("Bottom —", INDEX_HTML)
         self.assertIn(
             "positive is upward and negative is downward",
             STEPPER_JS,
@@ -1894,8 +1925,10 @@ class UsbStepperDashboardTests(unittest.TestCase):
                         "powder_mass_per_stepper_travel_g_per_mm": 2.4,
                     },
                     "stepper": {
-                        "dro_zero_raw_mm": -2.81,
+                        "dro_home": -2.81,
+                        "max_travel_mm": 137.18,
                     },
+                    "servo": {"off_pulse_us": 2500, "displacement_deg": 120.0},
                 },
             )
             self.assertEqual(payload["sample"]["stepper_dro_zeroed_position_mm"], 0.0)
@@ -1971,6 +2004,7 @@ class UsbStepperDashboardTests(unittest.TestCase):
             config["stepper"],
             {
                 "max_distance_mm": DEFAULT_STEPPER_MAX_DISTANCE_MM,
+                "max_travel_mm": DEFAULT_STEPPER_MAX_DISTANCE_MM,
                 "min_speed_mm_s": DEFAULT_STEPPER_MIN_SPEED_MM_S,
                 "max_speed_mm_s": DEFAULT_STEPPER_MAX_SPEED_MM_S,
                 "default_speed_mm_s": DEFAULT_STEPPER_HOME_SPEED_MM_S,

@@ -22,6 +22,61 @@ def servo_payload():
 
 
 class ServoTests(unittest.TestCase):
+    def test_angle_zero_persistence_and_firmware_owned_release(self):
+        from dashboard_app.system_config import SystemConfig
+        test = fixtures.SolenoidRoutingTests()
+        test.setUp()
+        test.stepper.payload = dict(servo_payload(), fw='1.2.0', smin=500, smax=2500, srel=1, sr=0)
+        test.stepper.refresh()
+        def write(command, description):
+            test.stepper.commands.append(command)
+            parts = command[4:].strip().split(b',')
+            pulse = int(parts[0])
+            test.stepper.payload.update(sv=int(pulse != 0), sr=75 if len(parts) == 2 else 0)
+            if pulse: test.stepper.payload['sp'] = pulse
+            test.stepper.refresh()
+        test.stepper._write_command = write
+        with TemporaryDirectory() as tmp:
+            runtime = test.runtime(tmp)
+            path = Path(tmp)/'servo-settings.json'
+            runtime.system_config = SystemConfig(path)
+            self.assertEqual(runtime.system_config.snapshot()['servo']['off_pulse_us'], 2500)
+            # Also exercise an older saved reference and explicit endpoint migration.
+            runtime.system_config.set_servo({'off_pulse_us':1550, 'displacement_deg':120})
+            result = runtime.set_stepper_servo({'action':'on', 'displacement_deg':120})
+            self.assertEqual(test.stepper.commands[-1], b'V1 A661\n')
+            self.assertTrue(result['stepper']['stepper_servo_enabled'])
+            count = len(test.stepper.commands)
+            with self.assertRaisesRegex(RuntimeError, 'Turn the servo Off'):
+                runtime.set_stepper_servo({'action':'endpoint'})
+            self.assertEqual(len(test.stepper.commands), count)
+            self.assertEqual(runtime.system_config.snapshot()['servo']['off_pulse_us'], 1550)
+            runtime.set_stepper_servo({'action':'off', 'displacement_deg':9999})
+            self.assertEqual(test.stepper.commands[-1], b'V1 A1550,1500\n')
+            with self.assertRaises(RuntimeError):
+                runtime.set_stepper_servo({'action':'endpoint'})
+            test.stepper.payload.update(sv=0, sr=0, sp=1600)
+            test.stepper.refresh()
+            with runtime._condition:
+                runtime._poll_locked(0)
+            count = len(test.stepper.commands)
+            runtime.set_stepper_servo({'action':'endpoint'})
+            self.assertEqual(test.stepper.commands[-1], b'V1 A2500,1500\n')
+            self.assertEqual(SystemConfig(path).snapshot()['servo'],
+                             {'off_pulse_us':2500, 'displacement_deg':120})
+            count = len(test.stepper.commands)
+            for invalid in (-1, 270.1, float('nan'), True):
+                with self.assertRaises(ValueError):
+                    runtime.set_stepper_servo({'action':'on', 'displacement_deg':invalid})
+            self.assertEqual(len(test.stepper.commands), count)
+            runtime.set_stepper_servo({'action':'on', 'displacement_deg':270})
+            self.assertEqual(test.stepper.commands[-1], b'V1 A500\n')
+            runtime.set_stepper_servo({'action':'off'})
+            self.assertEqual(test.stepper.commands[-1], b'V1 A2500,1500\n')
+            with self.assertRaises(ValueError):
+                runtime.set_stepper_servo({'action':'zero'})  # stale UI must not trigger movement
+            runtime.stop()
+
     def test_usb_and_network_support_identical_servo_contract(self):
         for cls in (ControllinoStepperSource, ControllinoUsbStepperSource):
             source = cls('http://unused.invalid')
@@ -112,7 +167,7 @@ int main(){
   command("V1 A1700");if(!accepted||servoPulseUs!=1700||!auxPulseEnabled)return 2;
   TIMER3_OVF_vect();if(auxLevel!=1||OCR3A!=3400)return 3;
   TIMER3_COMPA_vect();if(auxLevel)return 4;
-  command("V1 A2001");if(accepted||servoPulseUs!=1700)return 5;
+  command("V1 A2501");if(accepted||servoPulseUs!=1700)return 5;
   command("V1 A1500x");if(accepted||servoPulseUs!=1700)return 6;
   command("V1 B1");if(accepted||escOn)return 7;
   command("V1 P1200");if(accepted)return 8;
@@ -121,6 +176,20 @@ int main(){
   command("V1 E0");if(auxPulseEnabled)return 11;
   command("V1 A1000");if(!accepted||!auxPulseEnabled)return 12;
   command("V1 A0");if(!accepted||auxPulseEnabled||auxLevel)return 13;
+  command("V1 A2439");if(!accepted||servoPulseUs!=2439)return 17;
+  command("V1 A1550,1500");if(!accepted||servoReleaseFrames!=75)return 18;
+  for(int i=0;i<74;i++) TIMER3_OVF_vect();
+  if(!auxPulseEnabled)return 19;
+  TIMER3_COMPA_vect();TIMER3_OVF_vect();
+  if(auxPulseEnabled||auxLevel||servoReleaseFrames)return 20;
+  command("V1 A1550,1500");command("V1 A2439");
+  for(int i=0;i<100;i++) TIMER3_OVF_vect();
+  if(!auxPulseEnabled||servoReleaseFrames)return 21;
+  command("V1 A1550,1500");command("V1 E1");
+  if(auxPulseEnabled||servoReleaseFrames)return 22;
+  command("V1 E0");
+  command("V1 A1550,5001");if(accepted)return 23;
+  command("V1 A0,1500");if(accepted)return 24;
  } else {
   command("V1 A1500");if(accepted)return 14;
   command("V1 B1");if(!accepted||!escOn||auxTicks!=2400)return 15;

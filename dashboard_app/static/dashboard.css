@@ -1,3 +1,4 @@
+@import url("./servo-toggle.css");
 /* Theme tokens: presentation-only colors used by panels and canvas charts. */
 :root {
   color-scheme: light;

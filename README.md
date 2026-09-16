@@ -161,7 +161,7 @@ python3 dashboard-lean.py --stepper-source controllino-usb --stepper-port /dev/c
 ```
 
 The serial device name may change after reconnecting. Select `real` for the other sources when they are needed. The existing
-`run_controllino_dashboard.sh` still launches the original dashboard; both use the
+`run_controllino_dashboard.sh` launches the lean dashboard by default; both use the
 same DRO backend. Upload `controllino_motion_control.ino` explicitly in the
 notebook: the Controllino upload default remains the Ethernet-only diagnostic,
 which does not read the DRO.

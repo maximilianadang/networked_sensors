@@ -1,0 +1,33 @@
+/* PANEL: Position servo — shared accessible On/Off toggle. */
+.servo-control .servo-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #fff;
+  background: #b4232c;
+  border: 1px solid transparent;
+  font-weight: 700;
+}
+.servo-control .servo-toggle[aria-checked="true"] { background: #187343; }
+.servo-toggle-track {
+  display: block;
+  width: 42px;
+  height: 24px;
+  flex-shrink: 0;
+  border-radius: 12px;
+  background: #0003;
+  border: 1px solid #ffffff80;
+}
+.servo-toggle-track::before {
+  content: "";
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin: 2px;
+  border-radius: 50%;
+  background: #fff;
+}
+.servo-toggle[aria-checked="true"] .servo-toggle-track::before { transform: translateX(18px); }
+.servo-control .servo-toggle:focus-visible { outline: 3px solid #2563eb; outline-offset: 3px; }
+.servo-control .servo-toggle:disabled { opacity: .5; cursor: not-allowed; }
