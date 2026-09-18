@@ -1,1 +1,1 @@
-"""Optional diagnostics and browser checks; not dashboard runtime dependencies."""
+"""Verified USB firmware upload tooling for Controllino and Yun."""

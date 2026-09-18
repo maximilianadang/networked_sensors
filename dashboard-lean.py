@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Flow dashboard entry point; editing guide: documentation/guides/DASHBOARD-LEAN.md.
+"""Flow dashboard entry point; minimal Controllino/Yun distribution.
+
+Run ./dashboard-lean.py for Controllino Ethernet. For Yun LAN, add
+--stepper-source network --stepper-url http://arduino.local:8080.
+For Yun USB, use --stepper-source usb --stepper-port /dev/ttyACM0.
+Upload via tools/firmware_upload.ipynb; provision Yun LAN with
+devices/yun/provision_yun.sh. Full tests and guides live on dev-organized.
 
 This entry point owns CLI validation
 and server lifecycle. Browser assets use the shared dashboard_app API and
@@ -99,7 +105,7 @@ def main(argv=None):
     runtime = None
     try:
         runtime = DashboardRuntime(**{RUNTIME_NAMES.get(k, k): v for k, v in settings.items()})
-        with DashboardServer((host, port), build_handler(runtime, quiet=quiet, lean=True)) as server:
+        with DashboardServer((host, port), build_handler(runtime, quiet=quiet)) as server:
             runtime.start()
             print(f"Serving flow-management dashboard at http://{host}:{port}/", file=sys.stderr)
             server.serve_forever()

@@ -14,13 +14,7 @@ from .runtime import DashboardRuntime
 DASHBOARD_ASSET_DIR = Path(__file__).with_name("static")
 DASHBOARD_ASSET_TYPES = {
     "/assets/dashboard-lean.css": "text/css; charset=utf-8",
-    "/assets/dashboard.css": "text/css; charset=utf-8",
-    "/assets/app.js": "text/javascript; charset=utf-8",
-    "/assets/api.js": "text/javascript; charset=utf-8",
     "/assets/app-lean.js": "text/javascript; charset=utf-8",
-    "/assets/components/metadata.js": "text/javascript; charset=utf-8",
-    "/assets/components/stepper.js": "text/javascript; charset=utf-8",
-    "/assets/components/toolbar.js": "text/javascript; charset=utf-8",
 }
 
 
@@ -49,7 +43,7 @@ def parse_body(handler: BaseHTTPRequestHandler) -> dict[str, object]:
     return {key: values[-1] if values else "" for key, values in decoded.items()}
 
 
-def build_handler(runtime: DashboardRuntime, quiet: bool = True, *, lean: bool = False) -> type[BaseHTTPRequestHandler]:
+def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "FlowSupervisorHTTP/0.1"
 
@@ -63,7 +57,7 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True, *, lean: bool =
             query = parse_qs(parsed.query)
             try:
                 if path == "/":
-                    self._send_html(load_dashboard_asset("index-lean.html" if lean else "index.html"))
+                    self._send_html(load_dashboard_asset("index-lean.html"))
                 elif path in DASHBOARD_ASSET_TYPES:
                     self._send_dashboard_asset(path)
                 elif path == "/api/state":

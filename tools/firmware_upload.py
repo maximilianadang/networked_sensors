@@ -2,9 +2,7 @@
 
 Arduino CLI expects the main sketch file to live in a directory with the same
 name, so uploads are compiled from a hash-checked temporary copy instead of
-modifying the repository. Local quoted includes such as the ignored ESP32
-``wifi_credentials.h`` are staged with the sketch without printing their
-contents.
+modifying the repository. Local quoted headers are staged with the sketch without printing their contents.
 """
 
 from __future__ import annotations
@@ -66,23 +64,12 @@ TARGETS: Mapping[str, FirmwareTarget] = {
         key="controllino",
         label="CONTROLLINO MAXI Automation",
         fqbn="CONTROLLINO_Boards:avr:controllino_maxi_automation",
-        default_payload="controllino_ethernet_diagnostic.ino",
+        default_payload="controllino_motion_control.ino",
         monitor_baud=9600,
         safety_note=(
             "Uploading resets the controller. Inspect the selected payload, "
             "confirm its startup output states, and make all connected equipment "
             "safe before continuing."
-        ),
-    ),
-    "esp32": FirmwareTarget(
-        key="esp32",
-        label="Adafruit Feather ESP32-S3 No PSRAM",
-        fqbn="esp32:esp32:adafruit_feather_esp32s3_nopsram",
-        default_payload="Flow_management_unit_sch1.ino",
-        monitor_baud=115200,
-        safety_note=(
-            "Uploading resets the controller. Put all connected solenoid loads "
-            "in a safe state before continuing."
         ),
     ),
     "yun": FirmwareTarget(
