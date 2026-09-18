@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PROFILE=${1:-Mars_2p4Ghz}
 SSID=${2:-$PROFILE}
-OUTPUT="$SCRIPT_DIR/wifi_credentials.h"
+OUTPUT="$SCRIPT_DIR/firmware/wifi_credentials.h"
 
 if ! command -v nmcli >/dev/null 2>&1; then
     echo "nmcli is required to import a saved Wi-Fi credential." >&2
@@ -31,7 +31,7 @@ escape_cpp_string() {
     printf '%s' "$value"
 }
 
-TEMP_FILE=$(mktemp "$SCRIPT_DIR/.wifi_credentials.h.XXXXXX")
+TEMP_FILE=$(mktemp "$SCRIPT_DIR/firmware/.wifi_credentials.h.XXXXXX")
 trap 'rm -f "$TEMP_FILE"; unset PASSWORD' EXIT
 chmod 600 "$TEMP_FILE"
 

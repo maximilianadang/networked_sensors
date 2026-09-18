@@ -1,7 +1,7 @@
 // TOOLBAR: Start, Stop, Export, Solenoid 1–4 and recording/UTC indicators.
 // E-STOP belongs to Motor Control in stepper.js; shared appearance: dashboard.css.
 import {API, downloadLatestExport, postJson} from "../api.js";
-import {elements, setDot, setText} from "../dom.js";
+import {elements, setDot, setText} from "../app-lean.js";
 
 export function createToolbarComponent({
   getState,

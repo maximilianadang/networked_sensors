@@ -1,10 +1,8 @@
 import {API, getJson} from "./api.js";
-import {drawAllCharts} from "./charts.js";
-import {UI_CONFIG} from "./config.js";
-import {elements, setDot, setText, shortcutTargetIsGuarded} from "./dom.js";
-import {renderMetrics} from "./components/metrics.js";
+import {drawAllCharts, UI_CONFIG} from "./app-lean.js";
+import {elements, setDot, setText, shortcutTargetIsGuarded} from "./app-lean.js";
+import {renderMetrics, renderSources, setEspTransportMessage} from "./app-lean.js";
 import {createMetadataComponent} from "./components/metadata.js";
-import {renderSources, setEspTransportMessage} from "./components/sources.js";
 import {createStepperComponent} from "./components/stepper.js";
 import {createToolbarComponent} from "./components/toolbar.js";
 

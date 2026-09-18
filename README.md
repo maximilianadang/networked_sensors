@@ -1,12 +1,70 @@
 # DXMR90-4k network measurements
 
+## Start here
+
+Launch the current dashboard from this directory:
+
+```bash
+./dashboard-lean.py
+```
+
+Defaults connect to real devices. For hardware-free simulation, add
+`--stepper-source sim --esp32-source sim --dxmr90-source sim --host 127.0.0.1`.
+
+| Location | Contents |
+| --- | --- |
+| Root Python files, `dashboard_app/` | Dashboard runtime, device transports, recording; original dashboard retained |
+| `firmware/` | Board sketches and their shared wiring/DRO headers |
+| `firmware/diagnostics/` | Standalone DRO-only sketches retained from troubleshooting |
+| `tests/` | Current automated Python and native C++ regression tests |
+| `tools/` | Firmware uploader/notebook, protocol documentation generator, simulation CLI, browser checks, hardware diagnostics and test GUI |
+| `devices/yun/` | Yún Linux bridge, boot-service wrapper and SSH provisioner; not used by Controllino |
+| `tools/historical/` | Superseded diagnostic code, preserved but not in current test discovery |
+| `documentation/guides/` | Operating instructions, dashboard editing guide, firmware and protocol references |
+| `documentation/history/` | Development/task/procedure logs and older handoff notes; not current startup instructions |
+| `documentation/wiring/` | Wiring layouts, source assets and generation scripts |
+| `documentation/` | Vendor references and saved diagnostic evidence; archived export ZIP in `archive/` |
+| `legacy/` | Preserved older ESP32 firmware |
+| `recordings/`, `recordings_processed/` | Experimental data; ignored by Git and left untouched |
+
+Start with the [dashboard editing guide](documentation/guides/DASHBOARD-LEAN.md)
+or [Controllino firmware guide](documentation/guides/CONTROLLINO-FIRMWARE.md).
+Paths in guide commands are relative to the repository root unless stated otherwise.
+Historical logs preserve the paths and observations from their original sessions.
+
+Run the current regression suite without commanding physical hardware:
+
+```bash
+PYTHONPATH=.:.. python3 -m unittest discover -s tests
+```
+
+Hardware diagnostic tools can send commands or upload firmware: inspect their
+options before running them. Browser-only checks such as
+`python3 tools/check_ms62_panel.py` use fake device telemetry.
+
+Firmware upload tooling and its notebook live together in `tools/`. Open
+`tools/firmware_upload.ipynb` from the repository root or `tools/` directory.
+The uploader accepts both `firmware/controllino_motion_control.ino` and the
+existing bare sketch name. Production sketches are `controllino_motion_control.ino`,
+`Flow_management_unit_sch1.ino`, and `limit_switch_palas.ino`; `*_test.ino`,
+`*_bringup.ino`, and `*_diagnostic.ino` are diagnostic payloads, not replacements
+for production firmware. The Controllino uploader's default remains the Ethernet
+diagnostic; choose motion firmware explicitly. No firmware was uploaded as part
+of the directory reorganization.
+
+Private ESP32 credentials now live at `firmware/wifi_credentials.h` (still ignored).
+`configure_esp32_wifi.sh` writes that location. Diagnostic sketches and evidence
+previously untracked have been retained, not discarded or assumed validated.
+
+## Background
+
 The exported notes describe a Banner DXMR90-4k reading SICK flow sensors over
 IO-Link, converting the raw two-register IEEE-754 values with ScriptBasic, and
 republishing the useful measurements into DXM local registers.
 
 ## USB firmware uploads
 
-Use [`firmware_upload.ipynb`](firmware_upload.ipynb) to compile and upload a
+Use [`tools/firmware_upload.ipynb`](tools/firmware_upload.ipynb) to compile and upload a
 controller sketch over USB. Its configuration cell selects the target,
 payload `.ino`, and port:
 
@@ -55,8 +113,8 @@ For ESP32 deployment, create the ignored `wifi_credentials.h` using
 confined to `.arduino-build/verify/` and are not deployment credentials.
 
 On the Yún, this USB workflow updates only the ATmega32U4 `.ino` firmware.
-`yun_stepper_bridge.py` runs on the separate Linux processor and must still be
-deployed over SSH with `provision_yun.sh`.
+`devices/yun/yun_stepper_bridge.py` runs on the separate Linux processor and must still be
+deployed over SSH with `devices/yun/provision_yun.sh`.
 
 ## Controllino version and auxiliary output
 
@@ -65,7 +123,7 @@ The default build supports a position servo on X1 Digital 2 (Arduino D4);
 `CONTROLLINO_AUX_SERVO=0` selects the existing brushless ESC instead. The
 connected firmware selects the dashboard panel automatically. Servo pulses
 start disabled; apply a pulse position within the firmware's reported limits.
-See [firmware versions and calibration](CONTROLLINO-FIRMWARE.md).
+See [firmware versions and calibration](documentation/guides/CONTROLLINO-FIRMWARE.md).
 
 ## Firmware wiring configuration
 
@@ -73,9 +131,9 @@ Edit the board header to change wiring; the sketches consume named signals:
 
 | Board | Wiring source | Used by |
 | --- | --- | --- |
-| Controllino MAXI Automation | [`wiring_controllino.h`](wiring_controllino.h) | motion controller and stepper bring-up |
-| Feather ESP32-S3 | [`wiring_esp32.h`](wiring_esp32.h) | headless flow-management firmware |
-| Yún | [`wiring_yun.h`](wiring_yun.h) | `limit_switch_palas.ino` |
+| Controllino MAXI Automation | [`wiring_controllino.h`](firmware/wiring_controllino.h) | motion controller and stepper bring-up |
+| Feather ESP32-S3 | [`wiring_esp32.h`](firmware/wiring_esp32.h) | headless flow-management firmware |
+| Yún | [`wiring_yun.h`](firmware/wiring_yun.h) | `limit_switch_palas.ino` |
 
 For example, moving the Controllino direction wire changes `PIN_DIR` in one
 place, shared by both sketches. On ESP32, reorder `SOLENOID_PINS` or the ADC
@@ -160,9 +218,9 @@ For USB, use the same machine protocol over serial:
 python3 dashboard-lean.py --stepper-source controllino-usb --stepper-port /dev/cu.usbmodem1101 --stepper-baud 9600 --esp32-source off --dxmr90-source off
 ```
 
-The serial device name may change after reconnecting. Select `real` for the other sources when they are needed. The existing
-`run_controllino_dashboard.sh` launches the lean dashboard by default; both use the
-same DRO backend. Upload `controllino_motion_control.ino` explicitly in the
+The serial device name may change after reconnecting. Select `real` for the other sources when they are needed.
+`./dashboard-lean.py` defaults to the real devices and Controllino Ethernet transport.
+Upload `controllino_motion_control.ino` explicitly in the
 notebook: the Controllino upload default remains the Ethernet-only diagnostic,
 which does not read the DRO.
 
@@ -270,7 +328,7 @@ The page receives state at 10 Hz over SSE and retains a 10 Hz polling fallback.
 Relay commands do not pause that stream; the adapter resolves a `.local` ESP32
 once and reuses its address so each button press avoids another mDNS lookup.
 
-After installing the matching T6 firmware and `yun_stepper_bridge.py` service
+After installing the matching T6 firmware and `devices/yun/yun_stepper_bridge.py` service
 on the Yún, use its reserved DHCP address instead of a USB device:
 
 ```bash
@@ -284,7 +342,7 @@ python3 networked_sensors/dashboard.py \
 ```
 
 The Yún service has no application authentication and belongs only on the
-isolated trusted bench LAN. See `RUNBOOK.md` for installation, motor-off
+isolated trusted bench LAN. See `documentation/guides/RUNBOOK.md` for installation, motor-off
 verification, ownership, rollback, and browser-address instructions.
 
 ### Cold-start Yún and one-command LAN dashboard
@@ -294,7 +352,7 @@ second argument stores the Wi-Fi network it should join after its next power
 cycle:
 
 ```bash
-networked_sensors/provision_yun.sh CURRENT_YUN_IP GL-MT3000-b3a
+networked_sensors/devices/yun/provision_yun.sh CURRENT_YUN_IP GL-MT3000-b3a
 ```
 
 The first run creates `~/.ssh/yun_stepper`, may ask once for the Yún root
@@ -314,7 +372,7 @@ networked_sensors/run_lan_dashboard.sh
 For the Controllino MAXI direct-Ethernet motion transport, run:
 
 ```bash
-networked_sensors/run_controllino_dashboard.sh
+networked_sensors/dashboard-lean.py
 ```
 
 It defaults to `http://10.77.0.10`; override that with

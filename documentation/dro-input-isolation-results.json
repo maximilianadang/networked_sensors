@@ -1,0 +1,436 @@
+{
+  "samples": [
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 1,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    },
+    {
+      "clock": 0,
+      "data": 0,
+      "ddre": 40,
+      "eimsk": 16,
+      "eicrb": 2,
+      "edges": 0
+    }
+  ]
+}

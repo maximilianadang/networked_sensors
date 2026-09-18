@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_SYSTEM_CONFIG_PATH = Path(__file__).resolve().parents[1] / "system_config.json"
 SYSTEM_CONFIG_VERSION = 1
 DEFAULT_POWDER_MASS_PER_STEPPER_TRAVEL_G_PER_MM = 2.4
 DEFAULT_SYSTEM_CONFIG: dict[str, object] = {

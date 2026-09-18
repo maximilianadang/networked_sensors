@@ -46,7 +46,7 @@ the reasoning; source files remain the interface of record.
   image is uploaded and stopped-state latch/reset verification passes; moving
   stop and latency checks remain.
   A Yún Linux network path is now software-landed: the ATmega uses bounded,
-  non-blocking Serial1 queues; `yun_stepper_bridge.py` relays the existing V1
+  non-blocking Serial1 queues; `devices/yun/yun_stepper_bridge.py` relays the existing V1
   contract through trusted-LAN HTTP; and `NetworkStepperSource` polls/commands
   it with explicit USB/network firmware ownership. Six focused network tests
   and a 72%-flash/54%-RAM Yún compile pass. The image is now uploaded and a
@@ -59,22 +59,22 @@ the reasoning; source files remain the interface of record.
 
 ## Doc map
 
-- `PROTOCOL.md` - current and target run protocol: sources, streams, commands,
+- `documentation/guides/PROTOCOL.md` - current and target run protocol: sources, streams, commands,
   artifacts, verification tiers, and the visual graph. It is generated/checked
-  by `protocol_map.py`.
-- `DEVELOPMENT-TASKS.md` / `DEVELOPMENT-PROCEDURE.md` - build plan and chronicle
+  by `tools/protocol_map.py`.
+- `documentation/history/DEVELOPMENT-TASKS.md` / `documentation/history/DEVELOPMENT-PROCEDURE.md` - build plan and chronicle
   for the supervisor/dashboard work.
-- `INTEGRATION-TASKS.md` / `INTEGRATION-PROCEDURE.md` - how each sensor/source arm
+- `documentation/history/INTEGRATION-TASKS.md` / `documentation/history/INTEGRATION-PROCEDURE.md` - how each sensor/source arm
   is dried into the supervisor.
-- `DOCUMENTATION-TASKS.md` / `DOCUMENTATION-PROCEDURE.md` - documentation cadence
+- `documentation/history/DOCUMENTATION-TASKS.md` / `documentation/history/DOCUMENTATION-PROCEDURE.md` - documentation cadence
   and interface map discipline.
-- `TASKS.md` - ordered implementation queue for the Yún Rev2 web-controlled
+- `documentation/history/TASKS.md` - ordered implementation queue for the Yún Rev2 web-controlled
   stepper adaptation.
-- `RUNBOOK.md` - how to run the simulated supervisor now and real hardware later.
-- `DASHBOARD-CODE-MAP.md` - offline field-edit map from each visible dashboard
+- `documentation/guides/RUNBOOK.md` - how to run the simulated supervisor now and real hardware later.
+- `documentation/guides/DASHBOARD-CODE-MAP.md` - offline field-edit map from each visible dashboard
   region to its HTML, CSS, JavaScript component, Python limits, and tests.
-- `TESTBENCH_CHECKLIST.md` - bench bring-up checks the simulator cannot validate.
-- `TESTBENCH_HANDOFF.md` - hardware facts inherited from the former
+- `documentation/guides/TESTBENCH_CHECKLIST.md` - bench bring-up checks the simulator cannot validate.
+- `documentation/history/TESTBENCH_HANDOFF.md` - hardware facts inherited from the former
   embedded-dashboard implementation plus the headless transition.
 - `README.md` - DXMR90 Modbus network setup and register map.
 
@@ -85,21 +85,21 @@ networked_sensors/
   Flow_management_unit_sch1.ino   # primary headless ESP32-S3 sensor/solenoid API, telemetry v3
   legacy/Flow_management_unit_sch1/Flow_management_unit_sch1.ino # archived ESP32-hosted dashboard firmware
   limit_switch_palas.ino          # dual-mode engine, limits, USB motion/status, latched software E-STOP
-  yun_stepper_bridge.py           # Yún Linux /dev/ttyATH0 to trusted-LAN HTTP relay
-  yun-stepper-bridge.init         # staged OpenWrt service wrapper (install only after smoke)
+  devices/yun/yun_stepper_bridge.py           # Yún Linux /dev/ttyATH0 to trusted-LAN HTTP relay
+  devices/yun/yun-stepper-bridge.init         # staged OpenWrt service wrapper (install only after smoke)
   documentation/                  # offline Arduino Yún/Bridge/AccelStepper references and adaptation notes
-  TASKS.md                       # Yún Rev2 stepper web-control execution order and acceptance gates
+  documentation/history/TASKS.md                       # Yún Rev2 stepper web-control execution order and acceptance gates
   read_dxmr90_modbus.py           # stdlib Modbus TCP reader for Banner DXMR90-4k republished registers
   supervisor_core.py              # source schema, simulations, real ESP32/DXMR90 and USB Yún adapters, merge logic
-  supervisor.py                   # no-hardware JSONL smoke CLI with healthy/stale/missing scenarios
+  tools/supervisor.py                   # no-hardware JSONL smoke CLI with healthy/stale/missing scenarios
   dashboard.py                    # short dashboard CLI/bootstrap and compatibility surface
   dashboard_app/                 # runtime, HTTP routes, and dependency-free local frontend modules
-  DASHBOARD-CODE-MAP.md           # field map for offline webpage edits
+  documentation/guides/DASHBOARD-CODE-MAP.md           # field map for offline webpage edits
   recorder.py                     # Step-4 run directories, merged/source CSVs, metadata, summary, export CSV
   test_stepper_control.py         # simulated motion plus USB parser/pseudo-terminal contract tests
-  protocol_map.py                 # generated PROTOCOL.md graph/table checker
+  tools/protocol_map.py                 # generated documentation/guides/PROTOCOL.md graph/table checker
   README.md                       # DXMR90 network setup and register table
-  TESTBENCH_HANDOFF.md            # existing test-bench hardware/software handoff
+  documentation/history/TESTBENCH_HANDOFF.md            # existing test-bench hardware/software handoff
 ```
 
 ## Intended architecture
@@ -121,7 +121,7 @@ supervisor API, not the ESP32 directly.
 
 ## Translation from dpc-flight practice
 
-- `PROTOCOL.md` in `dpc-flight` maps verbs/configs/artifacts. Here it maps
+- `documentation/guides/PROTOCOL.md` in `dpc-flight` maps verbs/configs/artifacts. Here it maps
   sources/endpoints/recording artifacts and is generated once the supervisor
   skeleton exists. Check it whenever a task changes how something is run,
   configured, selected, guarded, produced, or consumed.
@@ -131,5 +131,5 @@ supervisor API, not the ESP32 directly.
 - `INTEGRATION-*` in `dpc-flight` dried method arms. Here it dries sensor arms:
   ESP32 analog/control, DXMR90 Modbus, merged timing, and export contracts.
 - `RUNBOOK` and `FLIGHT_CHECKLIST` in `dpc-flight` separate runnable procedure
-  from hardware-only checks. Here that becomes `RUNBOOK.md` plus
-  `TESTBENCH_CHECKLIST.md`.
+  from hardware-only checks. Here that becomes `documentation/guides/RUNBOOK.md` plus
+  `documentation/guides/TESTBENCH_CHECKLIST.md`.

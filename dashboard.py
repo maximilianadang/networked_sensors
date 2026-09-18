@@ -10,12 +10,9 @@ from typing import Sequence
 
 try:
     from .dashboard_app import DashboardRuntime, DashboardServer, build_handler, parse_body
-    from .dashboard_app.config import (
-        DEFAULT_HISTORY_LIMIT,
-        DEFAULT_SYSTEM_CONFIG_PATH,
-        INDEX_HTML,
-        load_dashboard_asset,
-    )
+    from .dashboard_app.runtime import DEFAULT_HISTORY_LIMIT
+    from .dashboard_app.system_config import DEFAULT_SYSTEM_CONFIG_PATH
+    from .dashboard_app.http import load_dashboard_asset
     from .supervisor_core import (
         DEFAULT_DXMR90_HOST,
         DEFAULT_DXMR90_PORT,
@@ -37,12 +34,9 @@ try:
     from .recorder import DEFAULT_RECORD_DIR
 except ImportError:  # pragma: no cover - direct script execution fallback
     from dashboard_app import DashboardRuntime, DashboardServer, build_handler, parse_body
-    from dashboard_app.config import (
-        DEFAULT_HISTORY_LIMIT,
-        DEFAULT_SYSTEM_CONFIG_PATH,
-        INDEX_HTML,
-        load_dashboard_asset,
-    )
+    from dashboard_app.runtime import DEFAULT_HISTORY_LIMIT
+    from dashboard_app.system_config import DEFAULT_SYSTEM_CONFIG_PATH
+    from dashboard_app.http import load_dashboard_asset
     from supervisor_core import (
         DEFAULT_DXMR90_HOST,
         DEFAULT_DXMR90_PORT,
@@ -65,6 +59,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
 
 
 DEFAULT_HOST = "127.0.0.1"
+INDEX_HTML = load_dashboard_asset("index.html")  # Legacy entry point compatibility only.
 DEFAULT_PORT = 8000
 DEFAULT_RATE_HZ = 10.0
 

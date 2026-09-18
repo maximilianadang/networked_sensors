@@ -1,43 +1,38 @@
 #!/usr/bin/env python3
-"""Flow dashboard entry point; panel editing guide: DASHBOARD-LEAN.md.
+"""Flow dashboard entry point; editing guide: documentation/guides/DASHBOARD-LEAN.md.
 
-The original dashboard.py is preserved. This entry point owns CLI validation
-and server lifecycle. Lean browser assets use the shared dashboard_app API and
-runtime, keeping recording and device support consistent with the original.
+This entry point owns CLI validation
+and server lifecycle. Browser assets use the shared dashboard_app API and
+runtime.
 """
 
 import argparse
 import math
-import runpy
+import os
 import sys
 from pathlib import Path
 
 import supervisor_core as core
-from dashboard_app import DashboardRuntime, DashboardServer
-from dashboard_app.config import DEFAULT_HISTORY_LIMIT, DEFAULT_SYSTEM_CONFIG_PATH
+from dashboard_app import DashboardRuntime, DashboardServer, build_handler
+from dashboard_app.runtime import DEFAULT_HISTORY_LIMIT
+from dashboard_app.system_config import DEFAULT_SYSTEM_CONFIG_PATH
 from recorder import DEFAULT_RECORD_DIR
-
-# Hyphens are intentional for lean variants; load this local adapter explicitly.
-build_handler = runpy.run_path(
-    str(Path(__file__).with_name("dashboard_app") / "http-lean.py")
-)["build_handler"]
-
 
 # CLI name, default, choices. Types come from defaults; names normally map
 # directly to runtime keyword arguments. Keep exceptions in RUNTIME_NAMES.
 OPTIONS = (
-    ("host", "127.0.0.1", None),
+    ("host", "0.0.0.0", None),
     ("port", 8000, None),
     ("rate-hz", 10.0, None),
     ("scenario", "healthy", core.SIMULATION_SCENARIOS),
-    ("esp32-source", "sim", core.SOURCE_MODES),
+    ("esp32-source", "real", core.SOURCE_MODES),
     ("esp32-url", core.DEFAULT_ESP32_BASE_URL, None),
     ("esp32-timeout", core.DEFAULT_ESP32_TIMEOUT_S, None),
-    ("dxmr90-source", "sim", core.SOURCE_MODES),
-    ("stepper-source", "sim", core.STEPPER_SOURCE_MODES),
+    ("dxmr90-source", "real", core.SOURCE_MODES),
+    ("stepper-source", "controllino", core.STEPPER_SOURCE_MODES),
     ("stepper-port", core.DEFAULT_STEPPER_USB_PORT, None),
     ("stepper-baud", core.DEFAULT_STEPPER_USB_BAUD, None),
-    ("stepper-url", core.DEFAULT_STEPPER_NETWORK_URL, None),
+    ("stepper-url", "http://10.77.0.10", None),
     ("stepper-timeout", core.DEFAULT_STEPPER_NETWORK_TIMEOUT_S, None),
     ("dxmr90-host", core.DEFAULT_DXMR90_HOST, None),
     ("dxmr90-port", core.DEFAULT_DXMR90_PORT, None),
@@ -59,10 +54,18 @@ RUNTIME_NAMES = {
     "stepper_timeout": "stepper_network_timeout",
     "system_config": "system_config_path",
 }
+# Preserve launcher's environment overrides. CLI arguments win;
+# unset or empty environment variables use the defaults in OPTIONS.
+ENV_OPTIONS = {
+    "host": "DASHBOARD_HOST", "port": "DASHBOARD_PORT",
+    "esp32-source": "ESP32_SOURCE", "esp32-url": "ESP32_URL",
+    "dxmr90-source": "DXMR90_SOURCE", "dxmr90-host": "DXMR90_HOST",
+    "stepper-url": "CONTROLLINO_URL",
+}
 
 
 def parse_args(argv=None):
-    """Preserve every original CLI option and reject invalid numeric settings."""
+    """Preserve CLI options and reject invalid numeric settings."""
     parser = argparse.ArgumentParser(description=__doc__)
     for name, default, choices in OPTIONS:
         parser.add_argument(
@@ -71,7 +74,11 @@ def parse_args(argv=None):
             help=f"{name.replace('-', ' ')} (default: {default})",
         )
     parser.add_argument("--verbose-http", action="store_true", help="log HTTP requests")
-    args = parser.parse_args(argv)
+    env_args = [
+        f"--{name}={os.environ[env]}"
+        for name, env in ENV_OPTIONS.items() if os.environ.get(env)
+    ]
+    args = parser.parse_args(env_args + list(sys.argv[1:] if argv is None else argv))
     for name, value in vars(args).items():
         if isinstance(value, float) and not math.isfinite(value):
             parser.error(f"--{name.replace('_', '-')} must be finite")
@@ -92,7 +99,7 @@ def main(argv=None):
     runtime = None
     try:
         runtime = DashboardRuntime(**{RUNTIME_NAMES.get(k, k): v for k, v in settings.items()})
-        with DashboardServer((host, port), build_handler(runtime, quiet=quiet)) as server:
+        with DashboardServer((host, port), build_handler(runtime, quiet=quiet, lean=True)) as server:
             runtime.start()
             print(f"Serving flow-management dashboard at http://{host}:{port}/", file=sys.stderr)
             server.serve_forever()

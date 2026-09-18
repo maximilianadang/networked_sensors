@@ -2,9 +2,9 @@
 // Also owns Interlocks, E-STOP, and motion telemetry inside Source details.
 // Markup: index.html; appearance: dashboard.css (search the same panel name).
 import {API, postJson} from "../api.js";
-import {createServoComponent} from "./servo.js";
-import {UI_CONFIG} from "../config.js";
-import {elements, numberValue, setText} from "../dom.js";
+import {createServoComponent} from "../app-lean.js";
+import {UI_CONFIG} from "../app-lean.js";
+import {elements, numberValue, setText} from "../app-lean.js";
 
 export function createStepperComponent({getLatest, applySample, limits}) {
   const els = elements([

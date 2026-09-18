@@ -49,9 +49,20 @@ except ImportError:  # pragma: no cover - direct dashboard.py execution
         solenoid_source_name,
     )
 
-from .config import DEFAULT_METADATA
 from .system_config import SystemConfig
 
+
+DEFAULT_HISTORY_LIMIT = 600
+DEFAULT_METADATA = {
+    "sample_number": "",
+    "sub_number": "",
+    "dispenser": "",
+    "material": "",
+    "powder_flow_rate_g_per_s": "",
+    "test_duration_s": "",
+    "description": "",
+    "notes": "",
+}
 
 DRO_VELOCITY_WINDOW_S = 0.65
 DRO_VELOCITY_MIN_SPAN_S = 0.15
@@ -535,92 +546,15 @@ class DashboardRuntime:
                     "sample": self.latest,
                 }
 
-    def _stepper_locked(self) -> object:
-        stepper = next(
-            (source for source in self.sources if source.name == "stepper"),
-            None,
-        )
-        if stepper is None or not hasattr(stepper, "move"):
-            raise RuntimeError("stepper source does not support motion controls")
-        return stepper
-
-    def _stepper_speed_locked(self) -> object:
-        stepper = next(
-            (source for source in self.sources if source.name == "stepper"),
-            None,
-        )
-        if stepper is None or not hasattr(stepper, "set_speed"):
-            raise RuntimeError("stepper source does not support manual speed tuning")
-        return stepper
-
-    def _stepper_mode_locked(self) -> object:
-        stepper = next(
-            (source for source in self.sources if source.name == "stepper"),
-            None,
-        )
-        if stepper is None or not hasattr(stepper, "set_control_mode"):
-            raise RuntimeError("stepper source does not support control modes")
-        return stepper
-
-    def _stepper_local_run_locked(self) -> object:
-        stepper = next(
-            (source for source in self.sources if source.name == "stepper"),
-            None,
-        )
-        if stepper is None or not hasattr(stepper, "set_local_run"):
-            raise RuntimeError(
-                "software run controls require the Controllino Ethernet source"
-            )
-        return stepper
-
-    def _stepper_home_locked(self) -> object:
-        stepper = next(
-            (source for source in self.sources if source.name == "stepper"),
-            None,
-        )
-        if stepper is None or not hasattr(stepper, "home"):
-            raise RuntimeError("stepper source does not support Home")
-        return stepper
-
-    def _stepper_estop_locked(self) -> object:
-        stepper = next(
-            (source for source in self.sources if source.name == "stepper"),
-            None,
-        )
-        if (
-            stepper is None
-            or not hasattr(stepper, "emergency_stop")
-            or not hasattr(stepper, "reset_emergency_stop")
-        ):
-            raise RuntimeError("stepper source does not support software E-STOP")
-        return stepper
-
-    def _stepper_brushless_locked(self) -> object:
-        stepper = next(
-            (source for source in self.sources if source.name == "stepper"),
-            None,
-        )
-        if stepper is None or not hasattr(stepper, "set_brushless_motor"):
-            raise RuntimeError(
-                "stepper source does not support brushless motor control"
-            )
-        return stepper
-
-    def _stepper_brushless_pulse_locked(self) -> object:
-        stepper = self._stepper_brushless_locked()
-        if not hasattr(stepper, "set_brushless_pulse_us"):
-            raise RuntimeError(
-                "stepper source does not support brushless pulse-width control"
-            )
+    def _require_stepper_locked(self, *capabilities: str, error: str) -> object:
+        """Find the selected transport and check the requested control capabilities."""
+        stepper = next((source for source in self.sources if source.name == "stepper"), None)
+        if stepper is None or any(not hasattr(stepper, name) for name in capabilities):
+            raise RuntimeError(error)
         return stepper
 
     def _stepper_payload_locked(self) -> dict[str, object]:
-        stepper = next(
-            (source for source in self.sources if source.name == "stepper"),
-            None,
-        )
-        if stepper is None:
-            raise RuntimeError("stepper source is unavailable")
+        stepper = self._require_stepper_locked(error="stepper source is unavailable")
         payload: dict[str, object] = {
             "stepper_mode": stepper.mode,
             "stepper_connected": False,
@@ -711,7 +645,10 @@ class DashboardRuntime:
 
     def move_stepper(self, values: dict[str, object]) -> dict[str, object]:
         with self._condition:
-            stepper = self._stepper_locked()
+            stepper = self._require_stepper_locked(
+                'move',
+                error='stepper source does not support motion controls',
+            )
             if "distance_mm" not in values:
                 raise ValueError("distance_mm is required")
             if "speed_mm_s" not in values:
@@ -777,7 +714,10 @@ class DashboardRuntime:
 
     def stop_stepper(self) -> dict[str, object]:
         with self._condition:
-            stepper = self._stepper_locked()
+            stepper = self._require_stepper_locked(
+                'move',
+                error='stepper source does not support motion controls',
+            )
             before_sequence = self._stepper_payload_locked().get(
                 "stepper_status_sequence"
             )
@@ -805,7 +745,10 @@ class DashboardRuntime:
         Status acknowledgement still uses the normal merged-data condition.
         """
 
-        stepper = self._stepper_estop_locked()
+        stepper = self._require_stepper_locked(
+            'emergency_stop', 'reset_emergency_stop',
+            error='stepper source does not support software E-STOP',
+        )
         status = (
             stepper.status()  # type: ignore[attr-defined]
             if hasattr(stepper, "status")
@@ -848,7 +791,10 @@ class DashboardRuntime:
         """Toggle the D12 ESC between OFF and its configured ON pulse."""
 
         with self._condition:
-            stepper = self._stepper_brushless_locked()
+            stepper = self._require_stepper_locked(
+                'set_brushless_motor',
+                error='stepper source does not support brushless motor control',
+            )
             current = self._stepper_payload_locked()
             if current.get("stepper_brushless_motor_capable") is not True:
                 raise RuntimeError(
@@ -911,7 +857,14 @@ class DashboardRuntime:
                 raise ValueError(
                     "pulse_us must be an integer from 1000 through 2000"
                 )
-            stepper = self._stepper_brushless_pulse_locked()
+            stepper = self._require_stepper_locked(
+                "set_brushless_motor",
+                error="stepper source does not support brushless motor control",
+            )
+            stepper = self._require_stepper_locked(
+                "set_brushless_pulse_us",
+                error="stepper source does not support brushless pulse-width control",
+            )
             current = self._stepper_payload_locked()
             if (
                 current.get("stepper_brushless_motor_variable_capable")
@@ -952,7 +905,10 @@ class DashboardRuntime:
         release_ms = 0
         with self._servo_command_lock:
             with self._condition:
-                stepper = self._stepper_locked()
+                stepper = self._require_stepper_locked(
+                    'move',
+                    error='stepper source does not support motion controls',
+                )
                 current = self._stepper_payload_locked()
                 if not current.get("stepper_connected") or not hasattr(stepper, "set_servo_pulse"):
                     raise RuntimeError("Position-servo controller is unavailable")
@@ -1001,7 +957,10 @@ class DashboardRuntime:
         """Reset the software latch and require fresh device confirmation."""
 
         with self._condition:
-            stepper = self._stepper_estop_locked()
+            stepper = self._require_stepper_locked(
+                'emergency_stop', 'reset_emergency_stop',
+                error='stepper source does not support software E-STOP',
+            )
             before_sequence = self._stepper_payload_locked().get(
                 "stepper_status_sequence"
             )
@@ -1027,7 +986,10 @@ class DashboardRuntime:
         values: dict[str, object],
     ) -> dict[str, object]:
         with self._condition:
-            stepper = self._stepper_mode_locked()
+            stepper = self._require_stepper_locked(
+                'set_control_mode',
+                error='stepper source does not support control modes',
+            )
             if "web_position" not in values:
                 raise ValueError("web_position is required")
             requested = values["web_position"]
@@ -1056,7 +1018,10 @@ class DashboardRuntime:
 
     def set_stepper_local_run(self, values: dict[str, object]) -> dict[str, object]:
         with self._condition:
-            stepper = self._stepper_local_run_locked()
+            stepper = self._require_stepper_locked(
+                'set_local_run',
+                error='software run controls require the Controllino Ethernet source',
+            )
             direction = values.get("direction")
             if isinstance(direction, bool) or direction not in (-1, 0, 1):
                 raise ValueError("direction must be -1, 0, or 1")
@@ -1081,7 +1046,10 @@ class DashboardRuntime:
 
     def home_stepper(self) -> dict[str, object]:
         with self._condition:
-            stepper = self._stepper_home_locked()
+            stepper = self._require_stepper_locked(
+                'home',
+                error='stepper source does not support Home',
+            )
             before_sequence = self._stepper_payload_locked().get(
                 "stepper_status_sequence"
             )
@@ -1103,7 +1071,10 @@ class DashboardRuntime:
 
     def set_stepper_speed(self, values: dict[str, object]) -> dict[str, object]:
         with self._condition:
-            stepper = self._stepper_speed_locked()
+            stepper = self._require_stepper_locked(
+                'set_speed',
+                error='stepper source does not support manual speed tuning',
+            )
             if "speed_mm_s" not in values:
                 raise ValueError("speed_mm_s is required")
             requested_speed = values["speed_mm_s"]

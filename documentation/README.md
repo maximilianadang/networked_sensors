@@ -1,5 +1,39 @@
 # Arduino Yún stepper-control documentation
 
+## Current sketch editing map
+
+The Yún production sketch is `firmware/limit_switch_palas.ino`. Its numbered
+sections keep changes local without adding production modules:
+
+1. Configuration/state: calibration and timing; pin assignments remain in `firmware/wiring_yun.h`.
+2. Hardware: Timer1 STEP, Timer3 ESC, DRO capture and pulse ramp.
+3. Inputs/commands: switch qualification, ownership and V1 command validation.
+   `authorizeWebCommand` owns the shared Home/Move preconditions.
+4. Transports: `pollCommands` frames both USB and UART input; `drainStatus`
+   handles bounded writes. USB alone reserves endpoint capacity and flushes packets;
+   UART alone receives command acknowledgements.
+5. Telemetry: pulse instrumentation and the compact V1 status format.
+6. Startup/control cycle: `readMotionInputs`, `serviceLocalMotion`,
+   `serviceWebMotion`, and `reportMotionCycle`. `MotionCycle` is a transient input
+   and output snapshot, not an additional persistent machine state.
+
+Add a command in section 3 and update its Python transport/bridge contract and
+tests when necessary. Add telemetry in section 5 and the host decoder. A pin or
+timer change still needs hardware-specific review; changing an interrupt pin is
+not necessarily a header-only edit. Limit assertion (5 ms), direction qualification
+(10 ms), motion authorization, wire commands, and timer behavior were preserved.
+
+The organization refactor was AVR-compiled and checked with the native sketch
+harness in `tests/test_yun_firmware.py`. Before/after motion traces matched in
+those test scenarios. This is not physical timing validation, and the refactored
+firmware has **not been uploaded**. From the repository root:
+
+```bash
+PYTHONPATH=.:.. python3 -m unittest tests.test_yun_firmware
+```
+
+## Original hardware reference bundle
+
 Offline source bundle and engineering notes for evaluating an Arduino Yún Rev2
 (ABX00020) as a replacement controller for `limit_switch_palas.ino`.
 

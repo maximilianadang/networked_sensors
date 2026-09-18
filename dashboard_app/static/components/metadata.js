@@ -1,6 +1,6 @@
 // PANEL: Test Metadata — editing, saving and derived motion setpoints.
 // Markup: index.html; appearance: dashboard.css (search Test Metadata).
-import {elements, setText} from "../dom.js";
+import {elements, setText} from "../app-lean.js";
 import {API, postJson} from "../api.js";
 
 export function createMetadataComponent({

@@ -105,6 +105,19 @@ DXMR90_CORE_METRICS: tuple[Metric, ...] = tuple(
 )
 
 
+def finite_number(value: object, field: str) -> float:
+    """Normalize numeric command inputs consistently across real and simulated transports."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite number") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{field} must be a finite number")
+    return number
+
+
 @dataclass(frozen=True)
 class SourceReading:
     """One source update, timestamped in supervisor elapsed time."""
@@ -452,17 +465,7 @@ class SimulatedStepperSource:
         self._brushless_motor_on = False
         self._brushless_motor_setpoint_us = DEFAULT_BRUSHLESS_PULSE_US
 
-    @staticmethod
-    def _finite_number(value: object, field: str) -> float:
-        if isinstance(value, bool):
-            raise ValueError(f"{field} must be a finite number")
-        try:
-            number = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{field} must be a finite number") from exc
-        if not math.isfinite(number):
-            raise ValueError(f"{field} must be a finite number")
-        return number
+    _finite_number = staticmethod(finite_number)
 
     def move(
         self,
@@ -1364,14 +1367,7 @@ class UsbStepperSource:
 
     @staticmethod
     def _manual_speed_sps(speed_mm_s: object) -> int:
-        if isinstance(speed_mm_s, bool):
-            raise ValueError("speed_mm_s must be a finite number")
-        try:
-            speed = float(speed_mm_s)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("speed_mm_s must be a finite number") from exc
-        if not math.isfinite(speed):
-            raise ValueError("speed_mm_s must be a finite number")
+        speed = finite_number(speed_mm_s, "speed_mm_s")
         if speed < DEFAULT_STEPPER_MIN_SPEED_MM_S or speed > DEFAULT_STEPPER_MAX_SPEED_MM_S:
             raise ValueError(
                 f"speed_mm_s must be from {DEFAULT_STEPPER_MIN_SPEED_MM_S:g} through "
@@ -1393,17 +1389,7 @@ class UsbStepperSource:
             raise ValueError("pulse_us must be an integer from 1000 through 2000")
         return pulse
 
-    @staticmethod
-    def _finite_number(value: object, field: str) -> float:
-        if isinstance(value, bool):
-            raise ValueError(f"{field} must be a finite number")
-        try:
-            number = float(value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{field} must be a finite number") from exc
-        if not math.isfinite(number):
-            raise ValueError(f"{field} must be a finite number")
-        return number
+    _finite_number = staticmethod(finite_number)
 
     def _require_connected(self) -> dict[str, float | int | bool | str | None]:
         if not self._transport_connected() or self._last_values is None:
