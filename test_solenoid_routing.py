@@ -119,6 +119,62 @@ class SolenoidRoutingTests(unittest.TestCase):
                     runtime.toggle_solenoid(3)
             runtime.stop()
 
+    def test_dashboard_direction_mapping_in_both_modes(self):
+        with TemporaryDirectory() as directory:
+            runtime = self.runtime(directory)
+            self.stepper.set_local_run = Mock()
+            self.stepper.move = Mock()
+            runtime._confirm_stepper_locked = Mock(return_value={})
+            for requested, wire in ((1, -1), (-1, 1), (0, 0)):
+                runtime.set_stepper_local_run({'direction': requested})
+                self.stepper.set_local_run.assert_called_with(wire)
+            for label, distance in (('forward', -10), ('reverse', 10)):
+                runtime.move_stepper({'direction':label, 'distance_mm':10, 'speed_mm_s':1})
+                self.assertEqual(self.stepper.move.call_args.args[0], distance)
+            runtime.stop()
+
+    def test_each_solenoid_starts_recording_and_only_manual_stop_finishes(self):
+        for index in range(4):
+            with self.subTest(solenoid=index + 1), TemporaryDirectory() as directory:
+                self.setUp()
+                runtime = self.runtime(directory)
+                self.assertFalse(runtime.recording)
+                runtime.toggle_solenoid(index)
+                self.assertTrue(runtime.recording)
+                recorder = runtime.recorder
+                # Relay confirmation performs one additional poll; each poll writes once.
+                self.assertEqual(recorder._row_count, 2 if index == 3 else 1)
+                runtime.toggle_solenoid((index + 1) % 4)
+                self.assertIs(runtime.recorder, recorder)
+                runtime.toggle_solenoid(index)  # Closing does not stop recording.
+                self.assertTrue(runtime.recording)
+                runtime.set_recording(False)
+                self.assertIsNotNone(runtime.latest_recording)
+                with runtime._condition:
+                    runtime._poll_locked(0.2)
+                self.assertFalse(runtime.recording)  # Other valve still open.
+                runtime.toggle_solenoid(index)  # A new activation starts a new run.
+                self.assertTrue(runtime.recording)
+                self.assertIsNot(runtime.recorder, recorder)
+                runtime.stop()
+
+    def test_telemetry_activation_and_reconnect_do_not_require_browser_command(self):
+        with TemporaryDirectory() as directory:
+            runtime = self.runtime(directory)
+            self.stepper.set_solenoid(3, True)
+            with runtime._condition:
+                runtime._poll_locked(0.1)
+            self.assertTrue(runtime.recording)
+            runtime.set_recording(False)
+            self.stepper.emit = False
+            with runtime._condition:
+                runtime._poll_locked(2)
+            self.stepper.emit = True
+            with runtime._condition:
+                runtime._poll_locked(2.1)
+            self.assertFalse(runtime.recording)
+            runtime.stop()
+
     def test_relay_remains_available_with_esp32_off_but_old_firmware_never_falls_back(self):
         from networked_sensors.supervisor_core import DisabledSource
         self.sources[0] = DisabledSource('esp32', 0.1, self.esp32.expected_fields)

@@ -293,6 +293,13 @@ label {
 .dot.bad {
   background: var(--red);
 }
+/* Top status pills carry the status color; detail-table dots remain unchanged. */
+.status-strip .pill { font-size: 1.05rem; }
+.status-strip .pill:has(.dot) { color: #fff; border-color: transparent; }
+.status-strip .pill:has(.dot.ok) { background: var(--green); }
+.status-strip .pill:has(.dot.warn) { background: var(--amber); }
+.status-strip .pill:has(.dot.bad) { background: var(--red); }
+.status-strip .dot { display: none; }
 
 /* Full-width dashboard layout. */
 main {

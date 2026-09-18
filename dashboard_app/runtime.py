@@ -144,6 +144,9 @@ class DashboardRuntime:
         self.history: deque[dict[str, object]] = deque(maxlen=history_limit)
         self.metadata = dict(DEFAULT_METADATA)
         self.recording = False
+        # Remember last known states through disconnects; Stop must stay stopped
+        # until a new activation, not restart on every poll of an open valve.
+        self._recording_solenoid_states = [False] * ESP32_SOLENOID_COUNT
         self.run_started_iso: str | None = None
         self.run_stopped_iso: str | None = None
         self.recorder: FlowRunRecorder | None = None
@@ -201,6 +204,16 @@ class DashboardRuntime:
         self._apply_stepper_dro_velocity_locked(self.latest, elapsed_s)
         fresh_readings = self.merger.fresh_readings()
         self.history.append(self.latest)
+        activated = False
+        for index in range(ESP32_SOLENOID_COUNT):
+            prefix = f"solenoid{index + 1}"
+            state = self.latest.get(f"{prefix}_on")
+            if self.latest.get(f"{prefix}_connected") is True and type(state) is bool:
+                activated |= state and not self._recording_solenoid_states[index]
+                self._recording_solenoid_states[index] = state
+        if activated:
+            # This poll writes the first row below, including fresh source data.
+            self.set_recording(True, include_latest=False)
         if self.recording and self.recorder is not None:
             self.recorder.record_sample(self.latest, fresh_readings)
         self.sequence += 1
@@ -440,7 +453,7 @@ class DashboardRuntime:
                 return self.sequence, None
             return self.sequence, self.latest
 
-    def set_recording(self, recording: bool) -> dict[str, object]:
+    def set_recording(self, recording: bool, *, include_latest: bool = True) -> dict[str, object]:
         with self._condition:
             if recording:
                 if self.recording:
@@ -453,7 +466,7 @@ class DashboardRuntime:
                     metadata=self.metadata,
                     run_config=self.run_config_locked(),
                     source_fields=source_fields,
-                    first_sample=self.latest,
+                    first_sample=self.latest if include_latest else None,
                 )
                 self.recording = True
                 self.run_started_iso = self.recorder.started_iso
@@ -691,6 +704,11 @@ class DashboardRuntime:
                 )
             self._condition.wait(timeout=min(remaining, 0.1))
 
+    @staticmethod
+    def _dashboard_motion_sign(stepper: object) -> int:
+        """Installed Controllino: dashboard Forward/down is negative on the wire."""
+        return -1 if getattr(stepper, "mode", None) == "controllino" else 1
+
     def move_stepper(self, values: dict[str, object]) -> dict[str, object]:
         with self._condition:
             stepper = self._stepper_locked()
@@ -729,7 +747,7 @@ class DashboardRuntime:
                 raise RuntimeError("move direction is unavailable")
             signed_distance_mm = (
                 -travel_mm if selected_direction == "reverse" else travel_mm
-            )
+            ) * self._dashboard_motion_sign(stepper)
             command_id = values.get("command_id")
             before_sequence = current.get("stepper_status_sequence")
             stepper.move(  # type: ignore[attr-defined]
@@ -1045,8 +1063,9 @@ class DashboardRuntime:
             before_sequence = self._stepper_payload_locked().get(
                 "stepper_status_sequence"
             )
-            stepper.set_local_run(direction)  # type: ignore[attr-defined]
-            expected_direction = "positive" if direction == 1 else "negative"
+            wire_direction = direction * self._dashboard_motion_sign(stepper)
+            stepper.set_local_run(wire_direction)  # type: ignore[attr-defined]
+            expected_direction = "positive" if wire_direction == 1 else "negative"
             payload = self._confirm_stepper_locked(
                 stepper, before_sequence, "software run",
                 lambda status: (

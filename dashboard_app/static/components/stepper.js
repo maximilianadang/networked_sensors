@@ -468,7 +468,10 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     setText(els.stepperLocal, `${localState} · ${d4Raw}`);
     els.stepperLocal.title = `${localState} / ${d4Raw}`;
     setText(els.stepperD5Label, "Direction (D5)");
-    const manualDirection = latest.stepper_manual_direction || "--";
+    const rawDirection = latest.stepper_manual_direction || "--";
+    const manualDirection = latest.stepper_mode === "controllino"
+      ? ({forward: "reverse", reverse: "forward"}[rawDirection] || rawDirection)
+      : rawDirection;
     const compactDirection = {
       forward: "FWD",
       reverse: "REV",

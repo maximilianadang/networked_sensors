@@ -201,6 +201,13 @@ label {
 .dot.ok { background: var(--green); }
 .dot.warn { background: var(--amber); }
 .dot.bad { background: var(--red); }
+/* Top status pills carry the status color; detail-table dots remain unchanged. */
+.status-strip .pill { font-size: 1.05rem; }
+.status-strip .pill:has(.dot) { color: #fff; border-color: transparent; }
+.status-strip .pill:has(.dot.ok) { background: var(--green); }
+.status-strip .pill:has(.dot.warn) { background: var(--amber); }
+.status-strip .pill:has(.dot.bad) { background: var(--red); }
+.status-strip .dot { display: none; }
 main { display: grid; gap: 6px; padding: 8px 16px; min-width: 0; }
 .toolbar { display: grid; grid-template-columns: 3fr 2fr 4fr; gap: 12px; align-items: stretch; }
 .toolbar-actions { display: grid; gap: 6px; }

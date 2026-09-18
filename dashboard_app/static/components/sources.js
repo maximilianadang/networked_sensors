@@ -11,8 +11,8 @@ const els = elements([
 
 function presentation(label, mode, connected) {
   if (mode === "off") return {label: `${label} off`, row: "Off", state: "warn"};
-  if (connected === true) return {label: `${label} live`, row: "Live", state: "ok"};
-  return {label: `${label} stale`, row: "Stale", state: "bad"};
+  if (connected === true) return {label, row: "Live", state: "ok"};
+  return {label, row: "Stale", state: "bad"};
 }
 
 export function renderSources(sample, historyLength) {
@@ -29,7 +29,7 @@ export function renderSources(sample, historyLength) {
   const controllerLabel = stepperMode === "controllino" ? "Controllino MAXI" : "Arduino Yun";
   const stepper = presentation(controllerLabel, stepperMode, stepperConnected);
   if (espConnected && (!pressureAdcReady || !flowAdcReady)) {
-    esp.label = "ESP32 live / ADC unavailable";
+    esp.label = "ESP32";
     esp.row = "Live / ADC partial";
     esp.state = "warn";
   }
@@ -42,6 +42,11 @@ export function renderSources(sample, historyLength) {
   setText(els.espStatus, esp.label);
   setText(els.dxStatus, dx.label);
   setText(els.stepperStatus, stepper.label);
+  for (const [element, status] of [[els.espStatus, esp], [els.dxStatus, dx], [els.stepperStatus, stepper]]) {
+    const pill = element.closest(".pill");
+    pill.title = `${status.label}: ${status.row}`;
+    pill.setAttribute("aria-label", pill.title);
+  }
   setText(els.espRowStatus, esp.row);
   setText(els.dxRowStatus, dx.row);
   setText(els.espMode, espMode);

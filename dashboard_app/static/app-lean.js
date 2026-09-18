@@ -12,7 +12,9 @@ import {createToolbarComponent} from "./components/toolbar-lean.js";
 const streamEls = elements(["streamDot", "streamStatus"]);
 
 function setStreamStatus(label, state) {
-  setText(streamEls.streamStatus, `Dashboard ${label.toLowerCase()}`);
+  setText(streamEls.streamStatus, "Dashboard");
+  streamEls.streamStatus.closest(".pill").setAttribute("aria-label", `Dashboard ${label}`);
+  streamEls.streamStatus.closest(".pill").title = `Dashboard ${label}`;
   setDot(streamEls.streamDot, state);
 }
 

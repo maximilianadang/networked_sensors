@@ -1,5 +1,11 @@
 # Lean dashboard
 
+Recording starts automatically when fresh telemetry shows any solenoid 1–4
+turning on (including a valve first observed on at startup). Additional activations
+join the same run. Closing valves does not stop recording; press **Stop** to finish
+and save. After Stop, an already-open valve or its reconnection does not restart
+recording; a newly observed activation does. Manual Start remains available.
+
 Run from this directory:
 
 ```bash

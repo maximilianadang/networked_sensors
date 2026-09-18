@@ -165,9 +165,10 @@ class Esp32FirmwareLayoutTests(unittest.TestCase):
         self.assertIn("Motion controller", INDEX_HTML)
         self.assertIn("Not recording", INDEX_HTML)
         self.assertIn(
-            "`Dashboard ${label.toLowerCase()}`",
+            'setText(streamEls.streamStatus, "Dashboard")',
             APP_JS,
         )
+        self.assertIn('setAttribute("aria-label", `Dashboard ${label}`)', APP_JS)
         self.assertIn(
             'stepperMode === "controllino" ? "Controllino MAXI" : "Arduino Yun"',
             SOURCES_JS,
