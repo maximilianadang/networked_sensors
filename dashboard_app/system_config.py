@@ -11,6 +11,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+try:
+    from ..supervisor_core import validate_servo_settings
+except ImportError:  # pragma: no cover - direct dashboard-lean.py execution
+    from supervisor_core import validate_servo_settings
+
 
 DEFAULT_SYSTEM_CONFIG_PATH = Path(__file__).resolve().parents[1] / "system_config.json"
 SYSTEM_CONFIG_VERSION = 1
@@ -91,25 +96,13 @@ class SystemConfig:
         ] = powder_mass_per_travel
         normalized["stepper"] = normalized_stepper
         normalized["geometry"] = normalized_geometry
-        normalized["servo"] = self.validate_servo(payload.get("servo", DEFAULT_SYSTEM_CONFIG["servo"]))
+        normalized["servo"] = validate_servo_settings(payload.get("servo", DEFAULT_SYSTEM_CONFIG["servo"]))
         return normalized
-
-    @staticmethod
-    def validate_servo(values: object) -> dict[str, Any]:
-        """MS62 nominal clockwise mapping; never silently clip a requested angle."""
-        if not isinstance(values, dict):
-            raise ValueError("servo must be an object")
-        zero, angle = values.get("off_pulse_us"), values.get("displacement_deg")
-        if type(zero) is not int or not 500 <= zero <= 2500:
-            raise ValueError("Servo zero must be an integer from 500 to 2500 us")
-        if type(angle) not in (int, float) or not math.isfinite(angle) or not 0 <= angle <= (zero-500)*270/2000:
-            raise ValueError("Clockwise displacement exceeds the available servo travel")
-        return {"off_pulse_us": zero, "displacement_deg": angle}
 
     def set_servo(self, values: dict[str, Any]) -> None:
         with self._lock:
             updated = deepcopy(self._values)
-            updated["servo"] = self.validate_servo(values)
+            updated["servo"] = validate_servo_settings(values)
             if self.path is not None:
                 self._write_atomic(updated)
             self._values = updated

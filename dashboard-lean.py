@@ -6,10 +6,12 @@ Run ./dashboard-lean.py for Controllino Ethernet. For Yun LAN, add
 For Yun USB, use --stepper-source usb --stepper-port /dev/ttyACM0.
 Upload via tools/firmware_upload.ipynb; provision Yun LAN with
 devices/yun/provision_yun.sh. Full tests and guides live on dev-organized.
+Boundary regression tests here: python -m unittest discover -s tests -v.
 
-This entry point owns CLI validation
-and server lifecycle. Browser assets use the shared dashboard_app API and
-runtime.
+Where to edit: supervisor_core.py owns device protocols/control rules;
+dashboard_app/runtime.py owns sampling, settings, recording, and coordination;
+dashboard_app/http.py and static/* own the HTTP API and webpage. This entry
+point only owns CLI validation and server lifecycle.
 """
 
 import argparse
@@ -20,7 +22,7 @@ from pathlib import Path
 
 import supervisor_core as core
 from dashboard_app import DashboardRuntime, DashboardServer, build_handler
-from dashboard_app.runtime import DEFAULT_HISTORY_LIMIT
+from dashboard_app.runtime import DEFAULT_HISTORY_LIMIT, DEFAULT_STALE_AFTER_S
 from dashboard_app.system_config import DEFAULT_SYSTEM_CONFIG_PATH
 from recorder import DEFAULT_RECORD_DIR
 
@@ -49,7 +51,7 @@ OPTIONS = (
     ("dxmr90-data-path", "direct", core.DXMR90_DATA_PATHS),
     ("dxmr90-rate-hz", core.DEFAULT_DXMR90_REAL_RATE_HZ, None),
     ("drop-after-s", core.DEFAULT_DROP_AFTER_S, None),
-    ("stale-after-s", core.DEFAULT_STALE_AFTER_S, None),
+    ("stale-after-s", DEFAULT_STALE_AFTER_S, None),
     ("history-limit", DEFAULT_HISTORY_LIMIT, None),
     ("record-dir", Path(DEFAULT_RECORD_DIR), None),
     ("system-config", Path(DEFAULT_SYSTEM_CONFIG_PATH), None),

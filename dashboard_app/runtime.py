@@ -1,4 +1,9 @@
-"""Realtime dashboard state and operator command boundary."""
+"""Experiment state, cross-device sampling, recording, and request coordination.
+
+DeviceControls (supervisor_core.py) owns device rules and confirmations.
+This module owns locks/waits and persisted application settings; http.py and
+static/* own the webpage. No wire encoding or controller polarity belongs here.
+"""
 
 from __future__ import annotations
 
@@ -8,50 +13,19 @@ import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator, Mapping
 
 try:
     from ..recorder import FlowRunRecorder, list_recordings, resolve_artifact
-    from ..supervisor_core import (
-        DEFAULT_ESP32_BASE_URL,
-        DEFAULT_ESP32_TIMEOUT_S,
-        DEFAULT_STEPPER_HOME_SPEED_MM_S,
-        DEFAULT_STEPPER_MAX_DISTANCE_MM,
-        DEFAULT_STEPPER_MAX_SPEED_MM_S,
-        DEFAULT_STEPPER_MIN_SPEED_MM_S,
-        DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
-        DEFAULT_STEPPER_NETWORK_URL,
-        DEFAULT_STEPPER_STEPS_PER_MM,
-        ESP32_SOLENOID_COUNT,
-        MAX_BRUSHLESS_PULSE_US,
-        MIN_BRUSHLESS_PULSE_US,
-        SourceMerger,
-        make_sources,
-        solenoid_source_name,
-    )
-except ImportError:  # pragma: no cover - direct dashboard.py execution
+    from .. import supervisor_core as core
+except ImportError:  # pragma: no cover - direct dashboard-lean.py execution
     from recorder import FlowRunRecorder, list_recordings, resolve_artifact
-    from supervisor_core import (
-        DEFAULT_ESP32_BASE_URL,
-        DEFAULT_ESP32_TIMEOUT_S,
-        DEFAULT_STEPPER_HOME_SPEED_MM_S,
-        DEFAULT_STEPPER_MAX_DISTANCE_MM,
-        DEFAULT_STEPPER_MAX_SPEED_MM_S,
-        DEFAULT_STEPPER_MIN_SPEED_MM_S,
-        DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
-        DEFAULT_STEPPER_NETWORK_URL,
-        DEFAULT_STEPPER_STEPS_PER_MM,
-        ESP32_SOLENOID_COUNT,
-        MAX_BRUSHLESS_PULSE_US,
-        MIN_BRUSHLESS_PULSE_US,
-        SourceMerger,
-        make_sources,
-        solenoid_source_name,
-    )
+    import supervisor_core as core
 
 from .system_config import SystemConfig
 
 
+DEFAULT_STALE_AFTER_S = 5.0
 DEFAULT_HISTORY_LIMIT = 600
 DEFAULT_METADATA = {
     "sample_number": "",
@@ -69,6 +43,127 @@ DRO_VELOCITY_MIN_SPAN_S = 0.15
 DRO_VELOCITY_STOP_DEADBAND_MM_S = 0.04
 
 
+class SourceMerger:
+    """Latest-value merge with per-source health and age fields."""
+
+    OPEN_FLOW_PAIRS = (
+        ("esp32_sol1", "esp32_f1_gmin"),
+        ("esp32_sol2", "esp32_f2_gmin"),
+        ("esp32_sol3", "esp32_f3_gmin"),
+    )
+
+    def __init__(
+        self,
+        sources: list[core.SourceAdapter],
+        stale_after_s: float = DEFAULT_STALE_AFTER_S,
+    ) -> None:
+        self.sources = sources
+        self.stale_after_s = stale_after_s
+        self._latest: dict[str, core.SourceReading] = {}
+        self._fresh_readings: list[core.SourceReading] = []
+
+    def poll(self, elapsed_s: float, timestamp: datetime) -> dict[str, object]:
+        self._fresh_readings = []
+        for source in self.sources:
+            reading = source.poll(elapsed_s)
+            if reading is not None:
+                self._latest[source.name] = reading
+                self._fresh_readings.append(reading)
+
+        sample: dict[str, object] = {
+            "timestamp_iso": timestamp.isoformat(timespec="milliseconds"),
+            "elapsed_s": round(elapsed_s, 3),
+        }
+        for source in self.sources:
+            reading = self._latest.get(source.name)
+            if reading is None:
+                sample[f"{source.name}_mode"] = source.mode
+                sample[f"{source.name}_connected"] = False
+                sample[f"{source.name}_age_ms"] = None
+                sample.update({field: None for field in source.expected_fields})
+                transport_error_field = f"{source.name}_transport_error"
+                if transport_error_field in source.expected_fields:
+                    sample[transport_error_field] = getattr(source, "last_error", None)
+                continue
+            age_s = max(0.0, elapsed_s - reading.elapsed_s)
+            sample[f"{source.name}_mode"] = reading.mode
+            sample[f"{source.name}_connected"] = age_s <= self.stale_after_s
+            sample[f"{source.name}_age_ms"] = round(age_s * 1000.0, 1)
+            sample.update({field: None for field in source.expected_fields})
+            sample.update(reading.values)
+            transport_error_field = f"{source.name}_transport_error"
+            if transport_error_field in source.expected_fields:
+                sample[transport_error_field] = getattr(source, "last_error", None)
+        sample.update(core.solenoid_status(sample))
+
+        sample["esp32_open_flow_gmin"] = self._sum_open_flows(
+            sample,
+            self.OPEN_FLOW_PAIRS,
+        )
+        sample["dxmr90_open_total_mass_flow_g_min"] = self._sum_open_flows(
+            sample,
+            (("solenoid4_on", "dxmr90_total_mass_flow_g_min"),),
+        )
+        return sample
+
+    @staticmethod
+    def _sum_open_flows(
+        sample: Mapping[str, object],
+        pairs: tuple[tuple[str, str], ...],
+    ) -> float | None:
+        """Sum measured flow only for channels whose valve state is open."""
+
+        total = 0.0
+        for solenoid_field, flow_field in pairs:
+            open_state = sample.get(solenoid_field)
+            if not isinstance(open_state, bool):
+                return None
+            if not open_state:
+                continue
+            raw_value = sample.get(flow_field)
+            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                return None
+            value = float(raw_value)
+            if not math.isfinite(value):
+                return None
+            total += value
+        return round(total, 6)
+
+    def fresh_readings(self) -> tuple[core.SourceReading, ...]:
+        return tuple(self._fresh_readings)
+
+
+
+def iter_merged_samples(
+    samples: int,
+    rate_hz: float = 10.0,
+    sources: list[core.SourceAdapter] | None = None,
+    scenario: str = "healthy",
+    drop_after_s: float = core.DEFAULT_DROP_AFTER_S,
+    stale_after_s: float = DEFAULT_STALE_AFTER_S,
+    start_time: datetime | None = None,
+) -> Iterator[dict[str, object]]:
+    """Yield deterministic merged samples without requiring wall-clock sleeps."""
+
+    if samples < 1:
+        return
+    if rate_hz <= 0:
+        raise ValueError("rate_hz must be positive")
+
+    period_s = 1.0 / rate_hz
+    source_list = (
+        core.make_simulated_sources(scenario=scenario, drop_after_s=drop_after_s)
+        if sources is None
+        else sources
+    )
+    merger = SourceMerger(source_list, stale_after_s=stale_after_s)
+    timestamp0 = start_time or datetime.now(timezone.utc)
+    for index in range(samples):
+        elapsed_s = index * period_s
+        yield merger.poll(elapsed_s, timestamp0 + timedelta(seconds=elapsed_s))
+
+
+
 class DashboardRuntime:
     """Realtime selected-source supervisor stream shared by HTTP handlers."""
 
@@ -82,8 +177,8 @@ class DashboardRuntime:
         history_limit: int,
         record_dir: Path,
         esp32_source: str,
-        esp32_base_url: str = DEFAULT_ESP32_BASE_URL,
-        esp32_timeout: float = DEFAULT_ESP32_TIMEOUT_S,
+        esp32_base_url: str = core.DEFAULT_ESP32_BASE_URL,
+        esp32_timeout: float = core.DEFAULT_ESP32_TIMEOUT_S,
         dxmr90_source: str,
         stepper_source: str,
         stepper_port: str,
@@ -96,8 +191,8 @@ class DashboardRuntime:
         dxmr90_word_order: str,
         dxmr90_data_path: str,
         dxmr90_rate_hz: float,
-        stepper_network_url: str = DEFAULT_STEPPER_NETWORK_URL,
-        stepper_network_timeout: float = DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
+        stepper_network_url: str = core.DEFAULT_STEPPER_NETWORK_URL,
+        stepper_network_timeout: float = core.DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
         system_config_path: Path | None = None,
     ) -> None:
         if rate_hz <= 0:
@@ -129,7 +224,7 @@ class DashboardRuntime:
         self.dxmr90_word_order = dxmr90_word_order
         self.dxmr90_data_path = dxmr90_data_path
         self.dxmr90_rate_hz = dxmr90_rate_hz
-        self.sources = make_sources(
+        self.sources = core.make_sources(
             esp32_source=esp32_source,
             esp32_base_url=esp32_base_url,
             esp32_timeout=esp32_timeout,
@@ -151,13 +246,14 @@ class DashboardRuntime:
             dxmr90_data_path=dxmr90_data_path,
             dxmr90_rate_hz=dxmr90_rate_hz,
         )
+        self.devices = core.DeviceControls(self.sources)
         self.merger = SourceMerger(self.sources, stale_after_s=stale_after_s)
         self.history: deque[dict[str, object]] = deque(maxlen=history_limit)
         self.metadata = dict(DEFAULT_METADATA)
         self.recording = False
         # Remember last known states through disconnects; Stop must stay stopped
         # until a new activation, not restart on every poll of an open valve.
-        self._recording_solenoid_states = [False] * ESP32_SOLENOID_COUNT
+        self._recording_solenoid_states = [False] * core.ESP32_SOLENOID_COUNT
         self.run_started_iso: str | None = None
         self.run_stopped_iso: str | None = None
         self.recorder: FlowRunRecorder | None = None
@@ -216,7 +312,7 @@ class DashboardRuntime:
         fresh_readings = self.merger.fresh_readings()
         self.history.append(self.latest)
         activated = False
-        for index in range(ESP32_SOLENOID_COUNT):
+        for index in range(core.ESP32_SOLENOID_COUNT):
             prefix = f"solenoid{index + 1}"
             state = self.latest.get(f"{prefix}_on")
             if self.latest.get(f"{prefix}_connected") is True and type(state) is bool:
@@ -424,17 +520,17 @@ class DashboardRuntime:
 
         return {
             "history_limit": self.history_limit,
-            "solenoid_count": ESP32_SOLENOID_COUNT,
+            "solenoid_count": core.ESP32_SOLENOID_COUNT,
             "stepper": {
                 "max_distance_mm": min(
                     self.system_config.stepper_max_travel_mm,
-                    DEFAULT_STEPPER_MAX_DISTANCE_MM,
+                    core.DEFAULT_STEPPER_MAX_DISTANCE_MM,
                 ),
                 "max_travel_mm": self.system_config.stepper_max_travel_mm,
-                "min_speed_mm_s": DEFAULT_STEPPER_MIN_SPEED_MM_S,
-                "max_speed_mm_s": DEFAULT_STEPPER_MAX_SPEED_MM_S,
-                "default_speed_mm_s": DEFAULT_STEPPER_HOME_SPEED_MM_S,
-                "home_speed_mm_s": DEFAULT_STEPPER_HOME_SPEED_MM_S,
+                "min_speed_mm_s": core.DEFAULT_STEPPER_MIN_SPEED_MM_S,
+                "max_speed_mm_s": core.DEFAULT_STEPPER_MAX_SPEED_MM_S,
+                "default_speed_mm_s": core.DEFAULT_STEPPER_HOME_SPEED_MM_S,
+                "home_speed_mm_s": core.DEFAULT_STEPPER_HOME_SPEED_MM_S,
             },
             "geometry": {
                 "powder_mass_per_stepper_travel_g_per_mm": (
@@ -511,69 +607,29 @@ class DashboardRuntime:
             self._condition.notify_all()
             return dict(self.metadata)
 
+    # Operator requests: application validation, locking, confirmation, persistence.
+    # Hardware-specific choices live in DeviceControls, not in these HTTP-facing methods.
     def toggle_solenoid(self, index: int) -> dict[str, object]:
-        if type(index) is not int or not 0 <= index < ESP32_SOLENOID_COUNT:
-            raise ValueError("solenoid index must be 0, 1, 2, or 3")
-        # Serialize read/modify/write, but release the merge lock during I/O.
+        # Serialize read/modify/write without holding the merge lock during I/O.
         with self._solenoid_command_lock:
             with self._condition:
-                stepper = next(source for source in self.sources if source.name == "stepper")
-                owner = solenoid_source_name(index, stepper.mode)
-                source = next(source for source in self.sources if source.name == owner)
-                if not self.latest or self.latest.get(f"solenoid{index + 1}_connected") is not True:
-                    raise RuntimeError(f"{owner} solenoid control stream is not live")
-                if owner == "stepper":
-                    current = self._stepper_payload_locked()
-                    state = not current.get("stepper_solenoid4_on")
-                    before_sequence = current.get("stepper_status_sequence")
-            if owner == "stepper":
-                source.set_solenoid(index, state)
-            else:
-                state = source.toggle_solenoid(index)
+                sample = dict(self.latest or {})
+                current = self.devices.status(self.latest)
+            receipt = self.devices.toggle_solenoid(index, sample, current)
             with self._condition:
-                self._poll_locked(time.monotonic() - self.monotonic0)
-                if owner == "stepper":
-                    self._confirm_stepper_locked(
-                        source, before_sequence, "solenoid 4 state",
-                        lambda payload: payload.get("stepper_solenoid4_on") is state,
-                    )
+                self._finish_command_locked(receipt)
+                if receipt.matches is not None:
                     self._poll_locked(time.monotonic() - self.monotonic0)
                 return {
-                    "index": index,
-                    "state": state,
+                    **receipt.result,
                     "solenoids": [self.latest.get(f"solenoid{i + 1}_on")
-                                  for i in range(ESP32_SOLENOID_COUNT)],
+                                  for i in range(core.ESP32_SOLENOID_COUNT)],
                     "sample": self.latest,
                 }
 
-    def _require_stepper_locked(self, *capabilities: str, error: str) -> object:
-        """Find the selected transport and check the requested control capabilities."""
-        stepper = next((source for source in self.sources if source.name == "stepper"), None)
-        if stepper is None or any(not hasattr(stepper, name) for name in capabilities):
-            raise RuntimeError(error)
-        return stepper
-
-    def _stepper_payload_locked(self) -> dict[str, object]:
-        stepper = self._require_stepper_locked(error="stepper source is unavailable")
-        payload: dict[str, object] = {
-            "stepper_mode": stepper.mode,
-            "stepper_connected": False,
-            "stepper_age_ms": None,
-        }
-        if self.latest is not None:
-            for key, value in self.latest.items():
-                if key.startswith("stepper_"):
-                    payload[key] = value
-        if hasattr(stepper, "status"):
-            payload.update(stepper.status())  # type: ignore[attr-defined]
-        return payload
-
     def stepper_status(self) -> dict[str, object]:
         with self._condition:
-            return {
-                "stepper": self._stepper_payload_locked(),
-                "sample": self.latest,
-            }
+            return {"stepper": self.devices.status(self.latest), "sample": self.latest}
 
     def set_stepper_dro_zero(self) -> dict[str, object]:
         """Snapshot a fresh stopped DRO reading as a display-only zero."""
@@ -613,42 +669,40 @@ class DashboardRuntime:
                 "sample": latest,
             }
 
-    def _confirm_stepper_locked(
-        self, stepper: object, before_sequence: object, description: str,
-        matches: Callable[[dict[str, object]], bool],
-    ) -> dict[str, object]:
-        """Wait under the condition lock for a fresh matching status.
 
-        Condition.wait releases the lock so polling and E-STOP can proceed.
-        Each caller supplies its explicit success predicate; a command write
-        or acknowledgement alone never proves the requested state was reached.
+    def _confirm_command_locked(self, receipt: core.CommandReceipt) -> dict[str, object]:
+        """Wait for device-defined evidence, releasing the lock between checks.
+
+        Polling and E-STOP must remain able to proceed during this wait. The
+        existing 1.5 s confirmation window is unchanged; sending is not success.
         """
         deadline = time.monotonic() + 1.5
         while True:
-            payload = self._stepper_payload_locked()
-            error = getattr(stepper, "pending_command_error", None)
-            if error:
-                raise RuntimeError(f"motion controller rejected {description}: {error}")
-            if payload.get("stepper_status_sequence") != before_sequence and matches(payload):
+            payload = self.devices.status(self.latest)
+            if receipt.confirmed(payload):
                 return payload
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError(
-                    f"motion controller did not confirm {description} within 1.5 seconds"
+                    f"motion controller did not confirm {receipt.description} within 1.5 seconds"
                 )
             self._condition.wait(timeout=min(remaining, 0.1))
 
-    @staticmethod
-    def _dashboard_motion_sign(stepper: object) -> int:
-        """Installed Controllino: dashboard Forward/down is negative on the wire."""
-        return -1 if getattr(stepper, "mode", None) == "controllino" else 1
+    def _finish_command_locked(self, receipt: core.CommandReceipt, *, poll: bool = True) -> dict[str, object]:
+        if poll:
+            self._poll_locked(time.monotonic() - self.monotonic0)
+        payload = self._confirm_command_locked(receipt)
+        return {**receipt.result, "stepper": payload, "sample": self.latest}
+
+    def _stepper_command(self, command: Callable, *args: object, poll: bool = True) -> dict[str, object]:
+        """Shared orchestration for commands whose writes use the runtime lock."""
+        with self._condition:
+            receipt = command(self.devices.status(self.latest), *args)
+            return self._finish_command_locked(receipt, poll=poll)
 
     def move_stepper(self, values: dict[str, object]) -> dict[str, object]:
         with self._condition:
-            stepper = self._require_stepper_locked(
-                'move',
-                error='stepper source does not support motion controls',
-            )
+            self.devices.require_stepper("move", error="stepper source does not support motion controls")
             if "distance_mm" not in values:
                 raise ValueError("distance_mm is required")
             if "speed_mm_s" not in values:
@@ -659,452 +713,64 @@ class DashboardRuntime:
             try:
                 travel_mm = float(raw_distance)
             except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "distance_mm must be a positive finite travel magnitude"
-                ) from exc
+                raise ValueError("distance_mm must be a positive finite travel magnitude") from exc
             if not math.isfinite(travel_mm) or travel_mm <= 0:
                 raise ValueError("distance_mm must be a positive finite travel magnitude")
             if travel_mm > self.system_config.stepper_max_travel_mm:
                 raise ValueError("distance_mm exceeds configured max_travel_mm")
-
-            # Snapshot the physical D5 selection and turn the operator's
-            # positive magnitude into the signed internal/wire command. The
-            # USB adapter and firmware both re-check D5, so a selector change
-            # during this handoff rejects or aborts instead of reversing.
-            current = self._stepper_payload_locked()
-            selected_direction = (
-                values.get("direction")
-                if getattr(stepper, "mode", None) == "controllino"
-                else current.get("stepper_authorized_direction")
-            )
-            if selected_direction == "both":
-                # Simulation has no physical D5 input; use Forward by default.
-                selected_direction = "forward"
-            if selected_direction not in ("forward", "reverse"):
-                raise RuntimeError("move direction is unavailable")
-            signed_distance_mm = (
-                -travel_mm if selected_direction == "reverse" else travel_mm
-            ) * self._dashboard_motion_sign(stepper)
-            command_id = values.get("command_id")
-            before_sequence = current.get("stepper_status_sequence")
-            stepper.move(  # type: ignore[attr-defined]
-                signed_distance_mm,
-                values["speed_mm_s"],
-                command_id,
-            )
-            expected_id = getattr(stepper, "pending_command_id", None)
-            elapsed_s = time.monotonic() - self.monotonic0
-            self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
-                self._confirm_stepper_locked(
-                    stepper, before_sequence, "the move",
-                    lambda payload: (
-                        payload.get("stepper_command_id") == expected_id
-                        and payload.get("stepper_state")
-                        in ("moving", "completed", "limit_blocked")
-                    ),
-                )
-            return {
-                "stepper": self._stepper_payload_locked(),
-                "sample": self.latest,
-                "travel_mm": travel_mm,
-                "resolved_direction": selected_direction,
-                "signed_distance_mm": signed_distance_mm,
-            }
+            receipt = self.devices.move(self.devices.status(self.latest), {**values, "distance_mm": travel_mm})
+            return self._finish_command_locked(receipt)
 
     def stop_stepper(self) -> dict[str, object]:
-        with self._condition:
-            stepper = self._require_stepper_locked(
-                'move',
-                error='stepper source does not support motion controls',
-            )
-            before_sequence = self._stepper_payload_locked().get(
-                "stepper_status_sequence"
-            )
-            stepper.stop()  # type: ignore[attr-defined]
-            elapsed_s = time.monotonic() - self.monotonic0
-            self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
-                self._confirm_stepper_locked(
-                    stepper, before_sequence, "Stop",
-                    lambda payload: (
-                        payload.get("stepper_moving") is False
-                    ),
-                )
-            return {
-                "stepper": self._stepper_payload_locked(),
-                "sample": self.latest,
-            }
+        return self._stepper_command(self.devices.stop)
 
     def emergency_stop_stepper(self) -> dict[str, object]:
-        """Dispatch E-STOP before any blocking source poll, then confirm it.
-
-        This command deliberately bypasses the runtime condition for its first
-        write. A slow or unreachable DXMR90 poll may hold that shared lock, but
-        it must not delay delivery of the short E-STOP command to the Yún.
-        Status acknowledgement still uses the normal merged-data condition.
-        """
-
-        stepper = self._require_stepper_locked(
-            'emergency_stop', 'reset_emergency_stop',
-            error='stepper source does not support software E-STOP',
-        )
-        status = (
-            stepper.status()  # type: ignore[attr-defined]
-            if hasattr(stepper, "status")
-            else {}
-        )
-        before_sequence = status.get("stepper_status_sequence")
-        stepper.emergency_stop()  # type: ignore[attr-defined]
-
+        """Send BEFORE taking the runtime lock, so a slow poll cannot delay E-STOP."""
+        receipt = self.devices.emergency_stop(self.devices.status())
         with self._condition:
-            elapsed_s = time.monotonic() - self.monotonic0
-            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
-                self._confirm_stepper_locked(
-                    stepper, before_sequence, "software E-STOP",
-                    lambda payload: (
-                        payload.get("stepper_estop_latched") is True
-                        and payload.get("stepper_moving") is False
-                        and (
-                            payload.get("stepper_brushless_motor_capable") is not True
-                            or payload.get("stepper_brushless_motor_on") is False
-                        )
-                        and (
-                            payload.get("stepper_solenoid4_capable") is not True
-                            or payload.get("stepper_solenoid4_on") is False
-                        )
-                        and (
-                            payload.get("stepper_servo_capable") is not True
-                            or payload.get("stepper_servo_enabled") is False
-                        )
-                    ),
-                )
-            else:
-                self._poll_locked(elapsed_s)
-            return {
-                "confirmed": True,
-                "stepper": self._stepper_payload_locked(),
-                "sample": self.latest,
-            }
-
-    def toggle_stepper_brushless_motor(self) -> dict[str, object]:
-        """Toggle the D12 ESC between OFF and its configured ON pulse."""
-
-        with self._condition:
-            stepper = self._require_stepper_locked(
-                'set_brushless_motor',
-                error='stepper source does not support brushless motor control',
-            )
-            current = self._stepper_payload_locked()
-            if current.get("stepper_brushless_motor_capable") is not True:
-                raise RuntimeError(
-                    "Yún firmware does not support brushless motor control"
-                )
-            requested_on = current.get("stepper_brushless_motor_on") is not True
-            if requested_on and current.get("stepper_estop_latched") is True:
-                raise RuntimeError(
-                    "reset the software E-STOP before starting the brushless motor"
-                )
-            before_sequence = current.get("stepper_status_sequence")
-            stepper.set_brushless_motor(requested_on)  # type: ignore[attr-defined]
-            elapsed_s = time.monotonic() - self.monotonic0
-            self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
-                self._confirm_stepper_locked(
-                    stepper, before_sequence, "brushless motor state",
-                    lambda payload: (
-                        payload.get("stepper_brushless_motor_on")
-                        == requested_on
-                    ),
-                )
-            confirmed = self._stepper_payload_locked()
-            return {
-                "confirmed": True,
-                "on": requested_on,
-                "pulse_us": confirmed.get(
-                    "stepper_brushless_motor_pulse_us"
-                ),
-                "stepper": confirmed,
-                "sample": self.latest,
-            }
-
-    def set_stepper_brushless_pulse(
-        self,
-        values: dict[str, object],
-    ) -> dict[str, object]:
-        """Set and confirm the configured 1000..2000 us brushless ON pulse."""
-
-        with self._condition:
-            if "pulse_us" not in values:
-                raise ValueError("pulse_us is required")
-            raw_pulse = values["pulse_us"]
-            if isinstance(raw_pulse, bool):
-                raise ValueError(
-                    "pulse_us must be an integer from 1000 through 2000"
-                )
-            try:
-                requested_pulse = int(raw_pulse)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "pulse_us must be an integer from 1000 through 2000"
-                ) from exc
-            if (
-                requested_pulse != raw_pulse
-                or not MIN_BRUSHLESS_PULSE_US
-                <= requested_pulse
-                <= MAX_BRUSHLESS_PULSE_US
-            ):
-                raise ValueError(
-                    "pulse_us must be an integer from 1000 through 2000"
-                )
-            stepper = self._require_stepper_locked(
-                "set_brushless_motor",
-                error="stepper source does not support brushless motor control",
-            )
-            stepper = self._require_stepper_locked(
-                "set_brushless_pulse_us",
-                error="stepper source does not support brushless pulse-width control",
-            )
-            current = self._stepper_payload_locked()
-            if (
-                current.get("stepper_brushless_motor_variable_capable")
-                is not True
-            ):
-                raise RuntimeError(
-                    "Yún firmware does not support brushless pulse-width control"
-                )
-            before_sequence = current.get("stepper_status_sequence")
-            stepper.set_brushless_pulse_us(  # type: ignore[attr-defined]
-                requested_pulse
-            )
-            elapsed_s = time.monotonic() - self.monotonic0
-            self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
-                self._confirm_stepper_locked(
-                    stepper, before_sequence, "brushless pulse width",
-                    lambda payload: (
-                        payload.get("stepper_brushless_motor_setpoint_us")
-                        == requested_pulse
-                    ),
-                )
-            confirmed = self._stepper_payload_locked()
-            return {
-                "confirmed": True,
-                "pulse_us": confirmed.get(
-                    "stepper_brushless_motor_pulse_us"
-                ),
-                "setpoint_us": confirmed.get(
-                    "stepper_brushless_motor_setpoint_us"
-                ),
-                "stepper": confirmed,
-                "sample": self.latest,
-            }
-
-    def set_stepper_servo(self, values: dict[str, object]) -> dict[str, object]:
-        pulse = values.get("pulse_us")
-        release_ms = 0
-        with self._servo_command_lock:
-            with self._condition:
-                stepper = self._require_stepper_locked(
-                    'move',
-                    error='stepper source does not support motion controls',
-                )
-                current = self._stepper_payload_locked()
-                if not current.get("stepper_connected") or not hasattr(stepper, "set_servo_pulse"):
-                    raise RuntimeError("Position-servo controller is unavailable")
-                before_sequence = current.get("stepper_status_sequence")
-                action = values.get("action")
-                settings = self.system_config.snapshot()["servo"]
-                if action is not None:
-                    if action not in ("endpoint", "settings", "on", "off"):
-                        raise ValueError("Unknown servo action")
-                    if not current.get("stepper_servo_capable"):
-                        raise RuntimeError("Servo firmware required")
-                    if action == "endpoint":
-                        if current.get("stepper_servo_enabled") is not False or current.get("stepper_servo_releasing"):
-                            raise RuntimeError("Turn the servo Off and wait for its return to finish before setting zero")
-                        # Explicit movement, not a relabeling of the current position.
-                        settings["off_pulse_us"] = 2500
-                    elif action != "off" and "displacement_deg" in values:
-                        settings["displacement_deg"] = values["displacement_deg"]
-                    settings = self.system_config.validate_servo(settings)
-                    if action == "settings":
-                        self.system_config.set_servo(settings)
-                        self._apply_stepper_dro_zero_locked(self.latest)
-                        return {"confirmed": True, "sample": self.latest}
-                    # Installed MS62: decreasing pulse width moves clockwise.
-                    pulse = round(settings["off_pulse_us"] - (
-                        settings["displacement_deg"] * 2000 / 270 if action == "on" else 0))
-                    release_ms = 1500 if action in ("off", "endpoint") else 0
-            if release_ms:
-                stepper.set_servo_pulse(pulse, release_ms=release_ms)
-            else:
-                stepper.set_servo_pulse(pulse)
-            with self._condition:
-                self._poll_locked(time.monotonic() - self.monotonic0)
-                confirmed = self._confirm_stepper_locked(
-                    stepper, before_sequence, "servo position",
-                    lambda p: (p.get("stepper_servo_enabled") is (pulse != 0) or
-                               (release_ms and p.get("stepper_servo_enabled") is False))
-                    and (pulse == 0 or p.get("stepper_servo_pulse_us") == pulse),
-                )
-                if action in ("on", "off", "endpoint"):
-                    self.system_config.set_servo(settings)
-                    self._apply_stepper_dro_zero_locked(self.latest)
-                return {"confirmed": True, "stepper": confirmed, "sample": self.latest}
+            # Real adapters confirm from their independent status readers; simulation polls.
+            return self._finish_command_locked(receipt, poll=receipt.matches is None)
 
     def reset_stepper_emergency_stop(self) -> dict[str, object]:
-        """Reset the software latch and require fresh device confirmation."""
+        return self._stepper_command(self.devices.reset_emergency_stop)
 
-        with self._condition:
-            stepper = self._require_stepper_locked(
-                'emergency_stop', 'reset_emergency_stop',
-                error='stepper source does not support software E-STOP',
-            )
-            before_sequence = self._stepper_payload_locked().get(
-                "stepper_status_sequence"
-            )
-            stepper.reset_emergency_stop()  # type: ignore[attr-defined]
-            elapsed_s = time.monotonic() - self.monotonic0
-            self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
-                self._confirm_stepper_locked(
-                    stepper, before_sequence, "E-STOP reset",
-                    lambda payload: (
-                        payload.get("stepper_estop_latched") is False
-                        and payload.get("stepper_moving") is False
-                    ),
-                )
-            return {
-                "confirmed": True,
-                "stepper": self._stepper_payload_locked(),
-                "sample": self.latest,
-            }
-
-    def set_stepper_control_mode(
-        self,
-        values: dict[str, object],
-    ) -> dict[str, object]:
-        with self._condition:
-            stepper = self._require_stepper_locked(
-                'set_control_mode',
-                error='stepper source does not support control modes',
-            )
-            if "web_position" not in values:
-                raise ValueError("web_position is required")
-            requested = values["web_position"]
-            if not isinstance(requested, bool):
-                raise ValueError("web_position must be true or false")
-            expected_mode = "web_position" if requested else "local_velocity"
-            before_sequence = self._stepper_payload_locked().get(
-                "stepper_status_sequence"
-            )
-            stepper.set_control_mode(requested)  # type: ignore[attr-defined]
-            elapsed_s = time.monotonic() - self.monotonic0
-            self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
-                self._confirm_stepper_locked(
-                    stepper, before_sequence, "the control mode",
-                    lambda payload: (
-                        payload.get("stepper_control_mode") == expected_mode
-                    ),
-                )
-            return {
-                "confirmed": True,
-                "requested_control_mode": expected_mode,
-                "stepper": self._stepper_payload_locked(),
-                "sample": self.latest,
-            }
+    def set_stepper_control_mode(self, values: dict[str, object]) -> dict[str, object]:
+        return self._stepper_command(self.devices.control_mode, values)
 
     def set_stepper_local_run(self, values: dict[str, object]) -> dict[str, object]:
-        with self._condition:
-            stepper = self._require_stepper_locked(
-                'set_local_run',
-                error='software run controls require the Controllino Ethernet source',
-            )
-            direction = values.get("direction")
-            if isinstance(direction, bool) or direction not in (-1, 0, 1):
-                raise ValueError("direction must be -1, 0, or 1")
-            before_sequence = self._stepper_payload_locked().get(
-                "stepper_status_sequence"
-            )
-            wire_direction = direction * self._dashboard_motion_sign(stepper)
-            stepper.set_local_run(wire_direction)  # type: ignore[attr-defined]
-            expected_direction = "positive" if wire_direction == 1 else "negative"
-            payload = self._confirm_stepper_locked(
-                stepper, before_sequence, "software run",
-                lambda status: (
-                    status.get("stepper_moving") is False if direction == 0 else
-                    status.get("stepper_moving") is True
-                    and status.get("stepper_direction") == expected_direction
-                ),
-            )
-            return {
-                "confirmed": True, "direction": direction,
-                "stepper": payload, "sample": self.latest,
-            }
+        return self._stepper_command(self.devices.local_run, values, poll=False)
 
     def home_stepper(self) -> dict[str, object]:
-        with self._condition:
-            stepper = self._require_stepper_locked(
-                'home',
-                error='stepper source does not support Home',
-            )
-            before_sequence = self._stepper_payload_locked().get(
-                "stepper_status_sequence"
-            )
-            stepper.home()  # type: ignore[attr-defined]
-            elapsed_s = time.monotonic() - self.monotonic0
-            self._poll_locked(elapsed_s)
-            if getattr(stepper, "mode", None) in ("usb", "network", "controllino"):
-                self._confirm_stepper_locked(
-                    stepper, before_sequence, "Home",
-                    lambda payload: (
-                        payload.get("stepper_state") in ("homing", "ready")
-                    ),
-                )
-            return {
-                "confirmed": True,
-                "stepper": self._stepper_payload_locked(),
-                "sample": self.latest,
-            }
+        return self._stepper_command(self.devices.home)
 
     def set_stepper_speed(self, values: dict[str, object]) -> dict[str, object]:
-        with self._condition:
-            stepper = self._require_stepper_locked(
-                'set_speed',
-                error='stepper source does not support manual speed tuning',
-            )
-            if "speed_mm_s" not in values:
-                raise ValueError("speed_mm_s is required")
-            requested_speed = values["speed_mm_s"]
-            if isinstance(requested_speed, bool):
-                raise ValueError("speed_mm_s must be a finite number")
-            try:
-                requested_speed_value = float(requested_speed)
-                expected_speed = (
-                    round(requested_speed_value * DEFAULT_STEPPER_STEPS_PER_MM)
-                    / DEFAULT_STEPPER_STEPS_PER_MM
-                )
-            except (TypeError, ValueError) as exc:
-                raise ValueError("speed_mm_s must be a finite number") from exc
-            before_sequence = self._stepper_payload_locked().get(
-                "stepper_status_sequence"
-            )
-            stepper.set_speed(values["speed_mm_s"])  # type: ignore[attr-defined]
+        return self._stepper_command(self.devices.speed, values, poll=False)
 
-            payload = self._confirm_stepper_locked(
-                stepper, before_sequence, "the requested speed",
-                lambda status: (
-                    isinstance(status.get("stepper_command_speed_mm_s"), (int, float))
-                    and not isinstance(status.get("stepper_command_speed_mm_s"), bool)
-                    and abs(status["stepper_command_speed_mm_s"] - expected_speed) < 0.0001
-                ),
-            )
-            return {
-                "confirmed": True, "requested_speed_mm_s": expected_speed,
-                "stepper": payload, "sample": self.latest,
-            }
+    def toggle_stepper_brushless_motor(self) -> dict[str, object]:
+        result = self._stepper_command(self.devices.toggle_brushless)
+        result["pulse_us"] = result["stepper"].get("stepper_brushless_motor_pulse_us")
+        return result
+
+    def set_stepper_brushless_pulse(self, values: dict[str, object]) -> dict[str, object]:
+        result = self._stepper_command(self.devices.brushless_pulse, values)
+        result["pulse_us"] = result["stepper"].get("stepper_brushless_motor_pulse_us")
+        result["setpoint_us"] = result["stepper"].get("stepper_brushless_motor_setpoint_us")
+        return result
+
+    def set_stepper_servo(self, values: dict[str, object]) -> dict[str, object]:
+        with self._servo_command_lock:
+            with self._condition:
+                current = self.devices.status(self.latest)
+                settings = self.system_config.snapshot()["servo"]
+            # Sending may block; keep other requests and sampling free to proceed.
+            settings, receipt = self.devices.servo(current, values, settings)
+            with self._condition:
+                result = (self._finish_command_locked(receipt) if receipt is not None
+                          else {"confirmed": True, "sample": self.latest})
+                if values.get("action") is not None:
+                    self.system_config.set_servo(settings)
+                    self._apply_stepper_dro_zero_locked(self.latest)
+                return result
 
     def recordings_payload(self) -> dict[str, object]:
         with self._condition:

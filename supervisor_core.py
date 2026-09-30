@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Core schema, simulated sources, and merge loop for the bench supervisor."""
+"""Device adapters, wire protocols, simulation, and device-control rules.
+
+No dashboard state, persistence, HTTP, or cross-device sampling lives here.
+DeviceControls is the operator-command boundary; adapters below it own I/O."""
 
 from __future__ import annotations
 
@@ -10,10 +13,9 @@ import socket
 import termios
 import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
 from http.client import HTTPException
-from typing import BinaryIO, Iterator, Mapping, Protocol
+from typing import BinaryIO, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import ProxyHandler, Request, build_opener
@@ -58,9 +60,7 @@ DEFAULT_ESP32_RECONNECT_S = 0.5
 DXMR90_PERIOD_S = 1.0
 STEPPER_PERIOD_S = 0.1
 DEFAULT_DXMR90_REAL_RATE_HZ = 10.0
-MERGE_PERIOD_S = 0.1
 DEFAULT_DROP_AFTER_S = 2.0
-DEFAULT_STALE_AFTER_S = 5.0
 SIMULATION_SCENARIOS = (
     "healthy",
     "esp32_stale",
@@ -129,7 +129,7 @@ class SourceReading:
 
 
 class SourceAdapter(Protocol):
-    """Minimal synchronous source adapter contract for Step 1."""
+    """Device-owned polling contract; runtime coordinates readings across sources."""
 
     name: str
     mode: str
@@ -140,6 +140,280 @@ class SourceAdapter(Protocol):
         """Return a fresh reading if this source is due, otherwise None."""
 
 
+def validate_servo_settings(values: object) -> dict[str, object]:
+    """MS62 nominal clockwise mapping; never silently clip a requested angle."""
+    if not isinstance(values, dict):
+        raise ValueError("servo must be an object")
+    zero, angle = values.get("off_pulse_us"), values.get("displacement_deg")
+    if type(zero) is not int or not 500 <= zero <= 2500:
+        raise ValueError("Servo zero must be an integer from 500 to 2500 us")
+    if (type(angle) not in (int, float) or not math.isfinite(angle)
+            or not 0 <= angle <= (zero - 500) * 270 / 2000):
+        raise ValueError("Clockwise displacement exceeds the available servo travel")
+    return {"off_pulse_us": zero, "displacement_deg": angle}
+
+
+@dataclass
+class CommandReceipt:
+    """Sent command and its device-specific evidence of acceptance.
+
+    This does not poll or wait. Runtime supplies fresh status and owns the wait
+    deadline. None means this command needs no asynchronous confirmation (e.g.
+    an ESP32 toggle returns its state directly). Result fields preserve the API.
+    """
+
+    source: SourceAdapter
+    before_sequence: object
+    description: str
+    matches: Callable[[dict[str, object]], bool] | None
+    result: dict[str, object] = field(default_factory=dict)
+
+    def confirmed(self, status: dict[str, object]) -> bool:
+        if self.matches is None:
+            return True
+        error = getattr(self.source, "pending_command_error", None)
+        if error:
+            raise RuntimeError(f"motion controller rejected {self.description}: {error}")
+        return status.get("stepper_status_sequence") != self.before_sequence and self.matches(status)
+
+
+class DeviceControls:
+    """Operator intent -> device command; no application state or waiting.
+
+    Each method sends once and returns a receipt. Status is a cached snapshot,
+    never a network read. Adapters below own encoding, transport locks, and I/O;
+    this boundary owns polarity, capabilities, relay routing, and confirmations.
+    """
+
+    def __init__(self, sources: list[SourceAdapter]) -> None:
+        self.sources = {source.name: source for source in sources}
+
+    def require_stepper(self, *capabilities: str, error: str) -> SourceAdapter:
+        stepper = self.sources.get("stepper")
+        if stepper is None or any(not hasattr(stepper, name) for name in capabilities):
+            raise RuntimeError(error)
+        return stepper
+
+    def status(self, sample: Mapping[str, object] | None = None) -> dict[str, object]:
+        stepper = self.require_stepper(error="stepper source is unavailable")
+        payload = {"stepper_mode": stepper.mode, "stepper_connected": False, "stepper_age_ms": None}
+        payload.update((key, value) for key, value in (sample or {}).items() if key.startswith("stepper_"))
+        if hasattr(stepper, "status"):
+            payload.update(stepper.status())
+        return payload
+
+    @staticmethod
+    def _receipt(
+        stepper: SourceAdapter, current: dict[str, object], description: str,
+        matches: Callable[[dict[str, object]], bool], *, always: bool = False, **result: object,
+    ) -> CommandReceipt:
+        if not always and stepper.mode not in ("usb", "network", "controllino"):
+            matches = None
+        return CommandReceipt(stepper, current.get("stepper_status_sequence"), description, matches, result)
+
+    @staticmethod
+    def _motion_sign(stepper: SourceAdapter) -> int:
+        # Installed Controllino: operator Forward/down is negative on the wire.
+        return -1 if stepper.mode == "controllino" else 1
+
+    def move(self, current: dict[str, object], values: dict[str, object]) -> CommandReceipt:
+        stepper = self.require_stepper("move", error="stepper source does not support motion controls")
+        travel_mm = values["distance_mm"]  # Positive magnitude checked against application travel settings.
+        direction = (values.get("direction") if stepper.mode == "controllino"
+                     else current.get("stepper_authorized_direction"))
+        if direction == "both":  # Simulation has no physical D5 selector.
+            direction = "forward"
+        if direction not in ("forward", "reverse"):
+            raise RuntimeError("move direction is unavailable")
+        signed_distance = (-travel_mm if direction == "reverse" else travel_mm) * self._motion_sign(stepper)
+        stepper.move(signed_distance, values["speed_mm_s"], values.get("command_id"))
+        # Capture before polling: a telemetry poll can clear the pending ID.
+        expected_id = getattr(stepper, "pending_command_id", None)
+        return self._receipt(
+            stepper, current, "the move",
+            lambda p: p.get("stepper_command_id") == expected_id
+            and p.get("stepper_state") in ("moving", "completed", "limit_blocked"),
+            travel_mm=travel_mm, resolved_direction=direction, signed_distance_mm=signed_distance,
+        )
+
+    def stop(self, current: dict[str, object]) -> CommandReceipt:
+        stepper = self.require_stepper("move", error="stepper source does not support motion controls")
+        stepper.stop()
+        return self._receipt(stepper, current, "Stop", lambda p: p.get("stepper_moving") is False)
+
+    def emergency_stop(self, current: dict[str, object]) -> CommandReceipt:
+        stepper = self.require_stepper(
+            "emergency_stop", "reset_emergency_stop", error="stepper source does not support software E-STOP",
+        )
+        stepper.emergency_stop()
+        return self._receipt(
+            stepper, current, "software E-STOP",
+            lambda p: p.get("stepper_estop_latched") is True and p.get("stepper_moving") is False
+            and all(p.get(f"stepper_{device}_capable") is not True or p.get(f"stepper_{state}") is False
+                    for device, state in (("brushless_motor", "brushless_motor_on"),
+                                          ("solenoid4", "solenoid4_on"), ("servo", "servo_enabled"))),
+            confirmed=True,
+        )
+
+    def reset_emergency_stop(self, current: dict[str, object]) -> CommandReceipt:
+        stepper = self.require_stepper(
+            "emergency_stop", "reset_emergency_stop", error="stepper source does not support software E-STOP",
+        )
+        stepper.reset_emergency_stop()
+        return self._receipt(
+            stepper, current, "E-STOP reset",
+            lambda p: p.get("stepper_estop_latched") is False and p.get("stepper_moving") is False,
+            confirmed=True,
+        )
+
+    def control_mode(self, current: dict[str, object], values: dict[str, object]) -> CommandReceipt:
+        stepper = self.require_stepper("set_control_mode", error="stepper source does not support control modes")
+        if "web_position" not in values:
+            raise ValueError("web_position is required")
+        requested = values["web_position"]
+        if not isinstance(requested, bool):
+            raise ValueError("web_position must be true or false")
+        mode = "web_position" if requested else "local_velocity"
+        stepper.set_control_mode(requested)
+        return self._receipt(
+            stepper, current, "the control mode", lambda p: p.get("stepper_control_mode") == mode,
+            confirmed=True, requested_control_mode=mode,
+        )
+
+    def local_run(self, current: dict[str, object], values: dict[str, object]) -> CommandReceipt:
+        stepper = self.require_stepper(
+            "set_local_run", error="software run controls require the Controllino Ethernet source",
+        )
+        direction = values.get("direction")
+        if isinstance(direction, bool) or direction not in (-1, 0, 1):
+            raise ValueError("direction must be -1, 0, or 1")
+        wire_direction = direction * self._motion_sign(stepper)
+        stepper.set_local_run(wire_direction)
+        expected_direction = "positive" if wire_direction == 1 else "negative"
+        return self._receipt(
+            stepper, current, "software run",
+            lambda p: p.get("stepper_moving") is False if direction == 0 else
+            p.get("stepper_moving") is True and p.get("stepper_direction") == expected_direction,
+            always=True, confirmed=True, direction=direction,
+        )
+
+    def home(self, current: dict[str, object]) -> CommandReceipt:
+        stepper = self.require_stepper("home", error="stepper source does not support Home")
+        stepper.home()
+        return self._receipt(
+            stepper, current, "Home", lambda p: p.get("stepper_state") in ("homing", "ready"), confirmed=True,
+        )
+
+    def speed(self, current: dict[str, object], values: dict[str, object]) -> CommandReceipt:
+        stepper = self.require_stepper("set_speed", error="stepper source does not support manual speed tuning")
+        if "speed_mm_s" not in values:
+            raise ValueError("speed_mm_s is required")
+        requested = values["speed_mm_s"]
+        if isinstance(requested, bool):
+            raise ValueError("speed_mm_s must be a finite number")
+        try:
+            expected = round(float(requested) * DEFAULT_STEPPER_STEPS_PER_MM) / DEFAULT_STEPPER_STEPS_PER_MM
+        except (TypeError, ValueError) as exc:
+            raise ValueError("speed_mm_s must be a finite number") from exc
+        stepper.set_speed(requested)
+        return self._receipt(
+            stepper, current, "the requested speed",
+            lambda p: isinstance(p.get("stepper_command_speed_mm_s"), (int, float))
+            and not isinstance(p.get("stepper_command_speed_mm_s"), bool)
+            and abs(p["stepper_command_speed_mm_s"] - expected) < 0.0001,
+            always=True, confirmed=True, requested_speed_mm_s=expected,
+        )
+
+    def toggle_brushless(self, current: dict[str, object]) -> CommandReceipt:
+        stepper = self.require_stepper(
+            "set_brushless_motor", error="stepper source does not support brushless motor control",
+        )
+        if current.get("stepper_brushless_motor_capable") is not True:
+            raise RuntimeError("Yún firmware does not support brushless motor control")
+        requested = current.get("stepper_brushless_motor_on") is not True
+        if requested and current.get("stepper_estop_latched") is True:
+            raise RuntimeError("reset the software E-STOP before starting the brushless motor")
+        stepper.set_brushless_motor(requested)
+        return self._receipt(
+            stepper, current, "brushless motor state", lambda p: p.get("stepper_brushless_motor_on") == requested,
+            confirmed=True, on=requested,
+        )
+
+    def brushless_pulse(self, current: dict[str, object], values: dict[str, object]) -> CommandReceipt:
+        if "pulse_us" not in values:
+            raise ValueError("pulse_us is required")
+        requested = UsbStepperSource._brushless_pulse_us(values["pulse_us"])
+        self.require_stepper("set_brushless_motor", error="stepper source does not support brushless motor control")
+        stepper = self.require_stepper(
+            "set_brushless_pulse_us", error="stepper source does not support brushless pulse-width control",
+        )
+        if current.get("stepper_brushless_motor_variable_capable") is not True:
+            raise RuntimeError("Yún firmware does not support brushless pulse-width control")
+        stepper.set_brushless_pulse_us(requested)
+        return self._receipt(
+            stepper, current, "brushless pulse width",
+            lambda p: p.get("stepper_brushless_motor_setpoint_us") == requested, confirmed=True,
+        )
+
+    def servo(
+        self, current: dict[str, object], values: dict[str, object], settings: dict[str, object],
+    ) -> tuple[dict[str, object], CommandReceipt | None]:
+        """Resolve MS62 motion; caller persists settings only after confirmation."""
+        stepper = self.require_stepper("move", error="stepper source does not support motion controls")
+        if not current.get("stepper_connected") or not hasattr(stepper, "set_servo_pulse"):
+            raise RuntimeError("Position-servo controller is unavailable")
+        pulse, release_ms = values.get("pulse_us"), 0
+        action = values.get("action")
+        settings = dict(settings)
+        if action is not None:
+            if action not in ("endpoint", "settings", "on", "off"):
+                raise ValueError("Unknown servo action")
+            if not current.get("stepper_servo_capable"):
+                raise RuntimeError("Servo firmware required")
+            if action == "endpoint":
+                if current.get("stepper_servo_enabled") is not False or current.get("stepper_servo_releasing"):
+                    raise RuntimeError("Turn the servo Off and wait for its return to finish before setting zero")
+                settings["off_pulse_us"] = 2500  # Explicit move to the counterclockwise endpoint.
+            elif action != "off" and "displacement_deg" in values:
+                settings["displacement_deg"] = values["displacement_deg"]
+            settings = validate_servo_settings(settings)
+            if action == "settings":
+                return settings, None
+            # Installed MS62: decreasing pulse width moves clockwise.
+            pulse = round(settings["off_pulse_us"] - (
+                settings["displacement_deg"] * 2000 / 270 if action == "on" else 0))
+            release_ms = 1500 if action in ("off", "endpoint") else 0
+        if release_ms:
+            stepper.set_servo_pulse(pulse, release_ms=release_ms)
+        else:
+            stepper.set_servo_pulse(pulse)
+        return settings, self._receipt(
+            stepper, current, "servo position",
+            lambda p: (p.get("stepper_servo_enabled") is (pulse != 0)
+                       or (release_ms and p.get("stepper_servo_enabled") is False))
+            and (pulse == 0 or p.get("stepper_servo_pulse_us") == pulse),
+            always=True, confirmed=True,
+        )
+
+    def toggle_solenoid(self, index: int, sample: Mapping[str, object], current: dict[str, object]) -> CommandReceipt:
+        if type(index) is not int or not 0 <= index < ESP32_SOLENOID_COUNT:
+            raise ValueError("solenoid index must be 0, 1, 2, or 3")
+        owner = solenoid_source_name(index, self.sources["stepper"].mode)
+        source = self.sources[owner]
+        if sample.get(f"solenoid{index + 1}_connected") is not True:
+            raise RuntimeError(f"{owner} solenoid control stream is not live")
+        if owner == "stepper":
+            state = not current.get("stepper_solenoid4_on")
+            source.set_solenoid(index, state)
+            return self._receipt(
+                source, current, "solenoid 4 state", lambda p: p.get("stepper_solenoid4_on") is state,
+                always=True, index=index, state=state,
+            )
+        state = source.toggle_solenoid(index)
+        return CommandReceipt(source, None, "solenoid state", None, {"index": index, "state": state})
+
+
+# Device adapters: simulation, Yún USB/LAN, Controllino USB/Ethernet, ESP32, DXMR90.
 class DisabledSource:
     """Schema-preserving source placeholder for absent hardware."""
 
@@ -1904,6 +2178,22 @@ def solenoid_source_name(index: int, stepper_mode: str) -> str:
     return "stepper" if index == 3 and stepper_mode == "controllino" else "esp32"
 
 
+def solenoid_status(sample: Mapping[str, object]) -> dict[str, object]:
+    """Normalize valve ownership/capability without losing the raw source fields."""
+    status = {}
+    for index in range(ESP32_SOLENOID_COUNT):
+        owner = solenoid_source_name(index, str(sample.get("stepper_mode", "off")))
+        field = "stepper_solenoid4_on" if owner == "stepper" else f"esp32_sol{index + 1}"
+        connected = sample.get(f"{owner}_connected") is True
+        if owner == "stepper":
+            connected = (connected and sample.get("stepper_solenoid4_capable") is True
+                         and not sample.get("stepper_transport_error"))
+        status[f"solenoid{index + 1}_source"] = owner
+        status[f"solenoid{index + 1}_connected"] = bool(connected)
+        status[f"solenoid{index + 1}_on"] = sample.get(field) if connected else None
+    return status
+
+
 class ControllinoProtocol:
     """Machine semantics shared by USB and Ethernet; transports only move bytes."""
 
@@ -2576,104 +2866,6 @@ class RealDxmr90Source:
             self._thread.join(timeout=max(1.0, self.timeout + self.period_s))
 
 
-class SourceMerger:
-    """Latest-value merge with per-source health and age fields."""
-
-    OPEN_FLOW_PAIRS = (
-        ("esp32_sol1", "esp32_f1_gmin"),
-        ("esp32_sol2", "esp32_f2_gmin"),
-        ("esp32_sol3", "esp32_f3_gmin"),
-    )
-
-    def __init__(
-        self,
-        sources: list[SourceAdapter],
-        stale_after_s: float = DEFAULT_STALE_AFTER_S,
-    ) -> None:
-        self.sources = sources
-        self.stale_after_s = stale_after_s
-        self._latest: dict[str, SourceReading] = {}
-        self._fresh_readings: list[SourceReading] = []
-
-    def poll(self, elapsed_s: float, timestamp: datetime) -> dict[str, object]:
-        self._fresh_readings = []
-        for source in self.sources:
-            reading = source.poll(elapsed_s)
-            if reading is not None:
-                self._latest[source.name] = reading
-                self._fresh_readings.append(reading)
-
-        sample: dict[str, object] = {
-            "timestamp_iso": timestamp.isoformat(timespec="milliseconds"),
-            "elapsed_s": round(elapsed_s, 3),
-        }
-        for source in self.sources:
-            reading = self._latest.get(source.name)
-            if reading is None:
-                sample[f"{source.name}_mode"] = source.mode
-                sample[f"{source.name}_connected"] = False
-                sample[f"{source.name}_age_ms"] = None
-                sample.update({field: None for field in source.expected_fields})
-                transport_error_field = f"{source.name}_transport_error"
-                if transport_error_field in source.expected_fields:
-                    sample[transport_error_field] = getattr(source, "last_error", None)
-                continue
-            age_s = max(0.0, elapsed_s - reading.elapsed_s)
-            sample[f"{source.name}_mode"] = reading.mode
-            sample[f"{source.name}_connected"] = age_s <= self.stale_after_s
-            sample[f"{source.name}_age_ms"] = round(age_s * 1000.0, 1)
-            sample.update({field: None for field in source.expected_fields})
-            sample.update(reading.values)
-            transport_error_field = f"{source.name}_transport_error"
-            if transport_error_field in source.expected_fields:
-                sample[transport_error_field] = getattr(source, "last_error", None)
-        for index in range(ESP32_SOLENOID_COUNT):
-            owner = solenoid_source_name(index, str(sample.get("stepper_mode", "off")))
-            field = "stepper_solenoid4_on" if owner == "stepper" else f"esp32_sol{index + 1}"
-            connected = sample.get(f"{owner}_connected") is True
-            if owner == "stepper":
-                connected = (connected and sample.get("stepper_solenoid4_capable") is True
-                             and not sample.get("stepper_transport_error"))
-            sample[f"solenoid{index + 1}_source"] = owner
-            sample[f"solenoid{index + 1}_connected"] = bool(connected)
-            sample[f"solenoid{index + 1}_on"] = sample.get(field) if connected else None
-
-        sample["esp32_open_flow_gmin"] = self._sum_open_flows(
-            sample,
-            self.OPEN_FLOW_PAIRS,
-        )
-        sample["dxmr90_open_total_mass_flow_g_min"] = self._sum_open_flows(
-            sample,
-            (("solenoid4_on", "dxmr90_total_mass_flow_g_min"),),
-        )
-        return sample
-
-    @staticmethod
-    def _sum_open_flows(
-        sample: Mapping[str, object],
-        pairs: tuple[tuple[str, str], ...],
-    ) -> float | None:
-        """Sum measured flow only for channels whose valve state is open."""
-
-        total = 0.0
-        for solenoid_field, flow_field in pairs:
-            open_state = sample.get(solenoid_field)
-            if not isinstance(open_state, bool):
-                return None
-            if not open_state:
-                continue
-            raw_value = sample.get(flow_field)
-            if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
-                return None
-            value = float(raw_value)
-            if not math.isfinite(value):
-                return None
-            total += value
-        return round(total, 6)
-
-    def fresh_readings(self) -> tuple[SourceReading, ...]:
-        return tuple(self._fresh_readings)
-
 
 def make_simulated_sources(
     scenario: str = "healthy",
@@ -2809,32 +3001,3 @@ def make_sources(
         )
 
     return [esp32, dxmr90, stepper]
-
-
-def iter_merged_samples(
-    samples: int,
-    rate_hz: float = 10.0,
-    sources: list[SourceAdapter] | None = None,
-    scenario: str = "healthy",
-    drop_after_s: float = DEFAULT_DROP_AFTER_S,
-    stale_after_s: float = DEFAULT_STALE_AFTER_S,
-    start_time: datetime | None = None,
-) -> Iterator[dict[str, object]]:
-    """Yield deterministic merged samples without requiring wall-clock sleeps."""
-
-    if samples < 1:
-        return
-    if rate_hz <= 0:
-        raise ValueError("rate_hz must be positive")
-
-    period_s = 1.0 / rate_hz
-    source_list = (
-        make_simulated_sources(scenario=scenario, drop_after_s=drop_after_s)
-        if sources is None
-        else sources
-    )
-    merger = SourceMerger(source_list, stale_after_s=stale_after_s)
-    timestamp0 = start_time or datetime.now(timezone.utc)
-    for index in range(samples):
-        elapsed_s = index * period_s
-        yield merger.poll(elapsed_s, timestamp0 + timedelta(seconds=elapsed_s))
