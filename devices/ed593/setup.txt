@@ -1,0 +1,63 @@
+ED-593 read-only setup
+
+Proposed bench address: 10.77.0.11, subnet 255.255.255.0. This address has
+not been assigned or checked on the network. Change --ed593-host if needed.
+Use channels TC0 through TC3 for the four probes; disable unused TC4–TC7.
+Select the thermocouple type matching each physical probe; the application
+never writes channel/type configuration. Enable open-wire detection on the
+device. Select Celsius temperature format and ASCII/DCON, address 01,
+TCP port 9500. Checksum setting must match --ed593-checksum (off by default).
+
+Launch real reader:
+  python dashboard-lean.py --ed593-source real --ed593-host 10.77.0.11
+Simulation:
+  python dashboard-lean.py --esp32-source sim --dxmr90-source sim --stepper-source sim --ed593-source sim
+Default ED-593 mode is off until commissioning. Polling defaults to 1 Hz;
+--ed593-rate-hz and --ed593-timeout are configurable. These are communication
+settings, not experiment acceptance thresholds.
+
+The reader sends only $aaM0 (model identity), $aa2 (configuration),
+$aa6 (enabled channels), $aaB
+(channel diagnostic mask) and #aa (all eight temperature readings). Replies
+are CR-terminated; checksums, when enabled, are the hexadecimal sum of ASCII
+bytes modulo 256. Unsupported/ambiguous replies fail closed and are retained
+as transport errors. Celsius/configuration and diagnostic-mask assumptions
+must be verified against the device's own Console command reference during
+commissioning; no live ED-593 hardware has been tested here.
+
+A complete successful poll updates response freshness. This is not proof of
+a new physical conversion: ED-593 has no per-channel timestamp in these
+replies. Required-device readiness is enabled and no diagnostic fault; the
+bit mask combines over-range, under-range and open-wire faults rather than
+identifying them separately. Unused channels do not gate a health row unless
+listed in device. Faulted/disabled channels have no usable reading.
+Channel data is recorded with the other sources when recording is active.
+
+Spreadsheet columns:
+  telemetry_health: source=ed593, max_age_ms, health=ok, device,
+                    timeout_s; device uses tc0;tc1;tc2;tc3.
+  reading_state: source=ed593, device=tc0..tc7, min_c, max_c, timeout_s.
+    max_age_ms optionally requires source freshness; health=ok optionally
+    requires error-free transport telemetry. Use telemetry_health rows with device
+    targets for channel readiness/enabled/fault checks. Blank age/health to omit them.
+    Request/motion columns stay blank. All bounds are inclusive.
+With both optional telemetry columns blank, only finite in-bounds temperature
+passes. Latest values can be old. The adapter still masks disabled/faulted
+channels as unavailable; spreadsheet options do not change sensor acquisition.
+Missing/nonfinite readings, out-of-bounds values, and failures of any selected
+telemetry requirement halt row execution immediately.
+Each reading row checks once. It does not keep monitoring after advancing,
+and halting execution does not automatically undo previously set outputs.
+Initial communicator health rows are optional. examples/temperatures.csv uses
+illustrative 3000 ms freshness, 10 s timeouts and 0–100 C bounds: replace them
+with experiment-specific values. They are not hardware safety limits.
+
+Vendor references:
+https://docs.brainboxes.com/get-started/ed/analogue/how-to-measure-temperature-using-rtd-ed-582-and-thermocouple-ed-593
+https://docs.brainboxes.com/reference/protocols/ed-analogue-ascii-protocol
+https://www.brainboxes.com/files/catalog/product/ED/ED-582/documents/ED-582-ASCII-Commands.pdf
+https://www.brainboxes.com/files/catalog/product/ED/ED-593/documents/ED-593-datasheet.pdf
+The ED-593 setup guide documents #01 for temperatures and says Modbus is not
+currently supported, despite datasheet claims. This implementation uses ASCII.
+The related ED-582 command manual documents temperature-unit bits and channel
+fault masks; confirm these on the ED-593 before relying on real-device checks.

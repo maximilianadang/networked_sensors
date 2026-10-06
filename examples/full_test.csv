@@ -1,0 +1,13 @@
+action,source,device,max_age_ms,health,timeout_s,set_point,min_mm,max_mm,min_c,max_c,speed_mm_s,duration_s,direction,pulse_us
+requested_state,recording,,,,10,on,,,,,,,,
+reading_state,controllino,dro,1000,ok,10,on,0,100,,,,,,
+requested_state,controllino,brushless_motor,1000,ok,10,pulse,,,,,,,,1200
+requested_state,controllino,brushless_motor,1000,ok,10,on,,,,,,,,
+requested_state,esp32,solenoid1,1000,ok,10,open,,,,,,,,
+requested_state,esp32,solenoid2,1000,ok,10,open,,,,,,,,
+requested_state,controllino,stepper,1000,ok,10,positional,,,,,,,,
+requested_state,controllino,stepper,1000,ok,15,move,,,,,1,10,forward,
+requested_state,esp32,solenoid2,1000,ok,10,closed,,,,,,,,
+requested_state,esp32,solenoid1,1000,ok,10,closed,,,,,,,,
+requested_state,controllino,brushless_motor,1000,ok,10,off,,,,,,,,
+reading_state,controllino,dro,,,10,off,,,,,,,,

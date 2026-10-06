@@ -1341,6 +1341,7 @@ export function createMetadataComponent({
 
 function sourceElements() { return elements([
   "espDot", "espStatus", "dxDot", "dxStatus", "stepperDot", "stepperStatus",
+  "edDot", "edStatus", "edMode", "edAge", "edTransport", "edChannels",
   "historyStatus", "espRowDot", "espRowStatus", "dxRowDot", "dxRowStatus",
   "espMode", "espAge", "espPressureAdc", "espFlowAdc", "espPressure",
   "espFlow", "espTransport", "dxMode", "dxAge", "dxPort1", "dxPort2"
@@ -1362,6 +1363,32 @@ export function renderSources(sample, historyLength) {
   const stepperMode = sample.stepper_mode || "--";
   const pressureAdcReady = sample.esp32_pressure_adc_ready === true;
   const flowAdcReady = sample.esp32_flow_adc_ready === true;
+  const edMode = sample.ed593_mode || "off";
+  const ed = presentation("ED-593", edMode, sample.ed593_connected);
+  if (edMode !== "off" && sample.ed593_transport_error) {
+    ed.state = "bad";
+    ed.row = "Transport error";
+  }
+  setDot(sourceEls.edDot, ed.state);
+  setText(sourceEls.edStatus, ed.label);
+  setText(sourceEls.edMode, edMode);
+  setText(sourceEls.edAge, ageText(sample, "ed593_age_ms"));
+  setText(sourceEls.edTransport, edMode === "off" ? "Disabled" : sample.ed593_transport_error || "No reported transport error");
+  sourceEls.edChannels.replaceChildren();
+  for (let i = 0; i < 8; i++) {
+    const row = document.createElement("tr");
+    const enabled = sample[`ed593_tc${i}_enabled`];
+    const fault = sample[`ed593_tc${i}_fault`];
+    const live = sample.ed593_connected === true && !sample.ed593_transport_error;
+    for (const value of [`TC ${i}`, live ? numberValue(sample, `ed593_tc${i}_temperature_c`, 2) : "--",
+                         enabled === true ? "Yes" : enabled === false ? "No" : "Unknown",
+                         fault === true ? "Yes" : fault === false ? "No" : "Unknown"]) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.appendChild(cell);
+    }
+    sourceEls.edChannels.appendChild(row);
+  }
   const esp = presentation("ESP32", espMode, espConnected);
   const dx = presentation("DXMR90", dxMode, dxConnected);
   const controllerLabel = stepperMode === "controllino" ? "Controllino MAXI" : "Arduino Yun";
@@ -1380,7 +1407,7 @@ export function renderSources(sample, historyLength) {
   setText(sourceEls.espStatus, esp.label);
   setText(sourceEls.dxStatus, dx.label);
   setText(sourceEls.stepperStatus, stepper.label);
-  for (const [element, status] of [[sourceEls.espStatus, esp], [sourceEls.dxStatus, dx], [sourceEls.stepperStatus, stepper]]) {
+  for (const [element, status] of [[sourceEls.edStatus, ed], [sourceEls.espStatus, esp], [sourceEls.dxStatus, dx], [sourceEls.stepperStatus, stepper]]) {
     const pill = element.closest(".pill");
     pill.title = `${status.label}: ${status.row}`;
     pill.setAttribute("aria-label", pill.title);
@@ -1477,6 +1504,9 @@ export const API = Object.freeze({
   stopRun: "/api/run/stop",
   exportLatest: "/api/export/latest",
   metadata: "/api/metadata",
+  experimentLoad: "/api/experiment/load",
+  experimentStart: "/api/experiment/start",
+  experimentExample: "/api/experiment/example.csv",
   solenoidToggle: index => `/api/solenoid/toggle?n=${index}`,
   stepperMove: "/api/stepper/move",
   stepperStop: "/api/stepper/stop",
@@ -1541,6 +1571,159 @@ export function downloadLatestExport() {
   link.remove();
 }
 
+// Experiment Start is separate from the toolbar's recording Start.
+export function createExperimentComponent() {
+  const el = elements([
+    "experimentStatus", "experimentFile", "experimentCsv", "experimentExample",
+    "experimentLoad", "experimentStart", "experimentPreview", "experimentFeedback",
+    "experimentChecks"
+  ]);
+  let snapshot = null;
+  let name = "experiment.csv";
+  let dirty = false;
+  let pending = false;
+
+  function updateControls() {
+    const running = snapshot?.state === "running";
+    el.experimentFile.disabled = pending || running;
+    el.experimentCsv.disabled = pending || running;
+    el.experimentExample.disabled = pending || running;
+    el.experimentLoad.disabled = pending || running || !el.experimentCsv.value.trim();
+    el.experimentStart.disabled = pending || running || dirty || !snapshot?.program?.length;
+  }
+
+  function render(incoming) {
+    if (!incoming || (snapshot && incoming.revision < snapshot.revision)) return;
+    const changedProgram = !snapshot || incoming.program_id !== snapshot.program_id;
+    snapshot = incoming;
+    if (changedProgram && !dirty) {
+      name = snapshot.name || name;
+      el.experimentCsv.value = snapshot.program.length
+        ? [snapshot.columns.join(","), ...snapshot.program.map(row =>
+            snapshot.columns.map(column => row[column]).join(","))].join("\n") + "\n"
+        : "";
+    }
+    const labels = {
+      empty: "No spreadsheet loaded", ready: "Ready", running: `Checking row ${snapshot.current_row}`,
+      completed: "Completed", failed: "Failed"
+    };
+    setText(el.experimentStatus, labels[snapshot.state] || snapshot.state);
+    const head = el.experimentPreview.querySelector("thead");
+    const body = el.experimentPreview.querySelector("tbody");
+    head.replaceChildren();
+    body.replaceChildren();
+    const header = document.createElement("tr");
+    for (const column of ["Row", ...snapshot.columns, "Result"]) {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      cell.textContent = column;
+      header.appendChild(cell);
+    }
+    head.appendChild(header);
+    snapshot.program.forEach((action, index) => {
+      const result = snapshot.results[index]?.status || "pending";
+      const row = document.createElement("tr");
+      row.dataset.status = result;
+      for (const value of [index + 1, ...snapshot.columns.map(column => action[column]), result]) {
+        const cell = document.createElement("td");
+        cell.textContent = String(value);
+        row.appendChild(cell);
+      }
+      body.appendChild(row);
+    });
+    const latestResult = snapshot.results.at(-1);
+    let message = snapshot.name ? `${snapshot.name}: ${labels[snapshot.state]}.` : "Load a spreadsheet to begin.";
+    if (snapshot.state === "running") message += " Waiting for all requirements to pass.";
+    if (snapshot.state === "running" && latestResult?.motion_started) message += " Motion started; waiting for firmware pulse completion.";
+    if (snapshot.state === "running" && latestResult?.request_pending) message += " Command response pending; monitoring continues.";
+    if (snapshot.state === "failed") {
+      message += ` Row ${latestResult.row}: ${latestResult.reason}.`;
+      if (latestResult.monitor_row) message += ` Persistent DRO check from row ${latestResult.monitor_row} failed.`;
+      if (latestResult.error) message += ` ${latestResult.error}`;
+      if (latestResult.stop_pending) message += " Stop request pending.";
+      if (latestResult.request_error) message += ` Command outcome: ${latestResult.request_error}`;
+      if (latestResult.stop_error) message += ` Stop request failed: ${latestResult.stop_error}`;
+    }
+    setText(el.experimentFeedback, message);
+    el.experimentChecks.replaceChildren();
+    const displayedChecks = Object.entries(latestResult?.checks || {}).map(([name, check]) => [name, name, check]);
+    for (const monitor of Object.values(snapshot.monitors || {})) {
+      if (monitor.active) {
+        for (const [name, check] of Object.entries(monitor.checks || {})) {
+          displayedChecks.push([`DRO monitor (row ${monitor.row}) / ${name}`, name, check]);
+        }
+      }
+    }
+    for (const [displayName, checkName, check] of displayedChecks) {
+      const item = document.createElement("li");
+      item.dataset.ok = String(check.ok);
+      const outcome = check.ok ? "Pass" : snapshot.state === "failed" ? "Fail" : "Waiting";
+      const evidence = checkName === "freshness"
+        ? `${check.age_ms ?? "unknown"} ms age; maximum ${check.max_age_ms} ms`
+        : checkName === "health"
+          ? `${check.transport_error_available ? check.transport_error || "no reported transport error" : "transport-error telemetry unavailable"}; dashboard connected flag: ${check.connected ?? "unknown"} (diagnostic)`
+          : checkName === "requested_state" || check.evidence === "electrical_output"
+            ? `requested ${check.requested}; observed ${check.observed === true ? "on" : check.observed === false ? "off" : check.observed ?? "unknown"}${check.evidence === "electrical_output" ? ` (inferred from ${check.valve_type} valve output: ${check.output_on === true ? "energized" : check.output_on === false ? "de-energized" : "unknown"})` : ""}`
+          : checkName === "temperature"
+            ? `${check.observed ?? "unknown"} °C; allowed ${check.min_c}–${check.max_c} °C; enabled ${check.enabled ?? "unknown"}; fault ${check.fault ?? "unknown"}`
+          : checkName === "position"
+            ? `${check.observed ?? "unknown"} mm (raw DRO position); allowed ${check.min_mm}–${check.max_mm} mm`
+          : checkName === "move"
+            ? `command ${check.command_id ?? "unknown"}; expected ${check.expected_command_id}; state ${check.state ?? "unknown"}; remaining ${check.remaining_mm ?? "unknown"} mm`
+          : Object.entries(check.observed).map(([field, value]) => `${field}: ${value ?? "unknown"}`).join(", ");
+      item.textContent = `${displayName}: ${outcome} · ${evidence}`;
+      el.experimentChecks.appendChild(item);
+    }
+    for (const [device, request] of Object.entries(latestResult?.request?.targets || {})) {
+      const item = document.createElement("li");
+      item.textContent = `${device}: ${request.status === "failed" ? `request failed · ${request.error}` : `requested ${request.set_point}`}`;
+      el.experimentChecks.appendChild(item);
+    }
+    updateControls();
+  }
+
+  async function perform(execute) {
+    if (pending || snapshot?.state === "running") return;
+    pending = true;
+    updateControls();
+    try { await execute(); }
+    catch (error) { setText(el.experimentFeedback, error.message); }
+    finally { pending = false; updateControls(); }
+  }
+
+  el.experimentCsv.addEventListener("input", () => { dirty = true; updateControls(); });
+  el.experimentFile.addEventListener("change", () => void perform(async () => {
+    const file = el.experimentFile.files[0];
+    if (!file) return;
+    if (file.size > 256 * 1024) throw new Error("Spreadsheet exceeds 256 KiB");
+    name = file.name;
+    el.experimentCsv.value = await file.text();
+    dirty = true;
+    setText(el.experimentFeedback, "Review the CSV, then load the spreadsheet.");
+  }));
+  el.experimentExample.addEventListener("click", () => void perform(async () => {
+    const response = await fetch(API.experimentExample);
+    if (!response.ok) throw new Error("Could not read the ESP32 example");
+    el.experimentCsv.value = await response.text();
+    name = "esp32_health.csv";
+    dirty = true;
+    setText(el.experimentFeedback, "Review the example thresholds, then load the spreadsheet.");
+  }));
+  el.experimentLoad.addEventListener("click", () => void perform(async () => {
+    const payload = await postJson(API.experimentLoad, {csv: el.experimentCsv.value, name});
+    if (snapshot && payload.experiment.program_id < snapshot.program_id) {
+      throw new Error("The spreadsheet was replaced; review and load your CSV again.");
+    }
+    dirty = false;
+    render(payload.experiment);
+  }));
+  el.experimentStart.addEventListener("click", () => void perform(async () => {
+    render((await postJson(API.experimentStart, {program_id: snapshot.program_id})).experiment);
+  }));
+  updateControls();
+  return {render};
+}
+
 // ============================================================================
 // 9. STARTUP — bind panels, stream/poll updates, charts and keyboard shortcuts
 // ============================================================================
@@ -1560,6 +1743,7 @@ export async function startDashboard() {
   let toolbar;
   let stepper;
   let metadata;
+  const experiment = createExperimentComponent();
 
   let chartFrame = null;
   function scheduleCharts() {
@@ -1621,6 +1805,7 @@ export async function startDashboard() {
 
   function applyState(payload) {
     if (payload.run) state.run = payload.run;
+    experiment.render(payload.experiment);
     if (payload.sample) applySample(payload.sample, false);
     if (payload.metadata) metadata.fill(payload.metadata);
     toolbar.renderRun(state.run);
@@ -1640,6 +1825,7 @@ export async function startDashboard() {
       try {
         const payload = await getJson(API.latest);
         if (payload.run) state.run = payload.run;
+        experiment.render(payload.experiment);
         if (payload.sample) applySample(payload.sample);
         else toolbar.renderRun(state.run);
         setStreamStatus("Polling", "warn");
@@ -1673,6 +1859,9 @@ export async function startDashboard() {
     });
     events.addEventListener("state", event => {
       setRunState(JSON.parse(event.data));
+    });
+    events.addEventListener("experiment", event => {
+      experiment.render(JSON.parse(event.data));
     });
     events.addEventListener("error", () => {
       setStreamStatus("Reconnecting", "warn");

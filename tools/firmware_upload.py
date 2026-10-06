@@ -44,6 +44,7 @@ class FirmwareTarget:
     default_payload: str
     monitor_baud: int
     safety_note: str
+    build_properties: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,20 @@ TARGETS: Mapping[str, FirmwareTarget] = {
             "confirm its startup output states, and make all connected equipment "
             "safe before continuing."
         ),
+    ),
+    "controllino-esc": FirmwareTarget(
+        key="controllino-esc",
+        label="CONTROLLINO MAXI Automation (brushless ESC)",
+        fqbn="CONTROLLINO_Boards:avr:controllino_maxi_automation",
+        default_payload="controllino_motion_control.ino",
+        monitor_baud=9600,
+        safety_note=(
+            "Uploading resets the controller. Disconnect the ESC motor supply "
+            "and make the connected equipment safe. This build replaces the "
+            "servo output with a 50 Hz ESC signal on Arduino pin 12, starting "
+            "at 1000 us OFF. Inspect wiring_controllino.h before connecting."
+        ),
+        build_properties=("compiler.cpp.extra_flags=-DCONTROLLINO_AUX_SERVO=0",),
     ),
     "yun": FirmwareTarget(
         key="yun",
@@ -470,6 +485,14 @@ def select_port(
     )
 
 
+def compile_arguments(target: FirmwareTarget, sketch_dir: str, build_dir: str) -> list[str]:
+    """Use the same explicit variant options for preview and actual compilation."""
+    arguments = ["compile", "--fqbn", target.fqbn, "--output-dir", build_dir]
+    for value in target.build_properties:
+        arguments.extend(["--build-property", value])
+    return [*arguments, sketch_dir]
+
+
 def command_preview(
     target: FirmwareTarget,
     payload: Path,
@@ -486,15 +509,7 @@ def command_preview(
         "<auto-selected USB port>" if port.strip().lower() == "auto" else port
     )
     commands = [
-        [
-            *prefix,
-            "compile",
-            "--fqbn",
-            target.fqbn,
-            "--output-dir",
-            build_dir,
-            sketch_dir,
-        ],
+        [*prefix, *compile_arguments(target, sketch_dir, build_dir)],
         [
             *prefix,
             "upload",
@@ -559,14 +574,7 @@ def compile_and_upload(
         staged_files = stage_sketch(source, sketch_dir)
 
         run_arduino_cli(
-            [
-                "compile",
-                "--fqbn",
-                target.fqbn,
-                "--output-dir",
-                str(build_dir),
-                str(sketch_dir),
-            ],
+            compile_arguments(target, str(sketch_dir), str(build_dir)),
             executable=toolchain.executable,
             config_file=toolchain.config_file,
         )

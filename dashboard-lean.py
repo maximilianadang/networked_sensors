@@ -37,6 +37,12 @@ OPTIONS = (
     ("esp32-url", core.DEFAULT_ESP32_BASE_URL, None),
     ("esp32-timeout", core.DEFAULT_ESP32_TIMEOUT_S, None),
     ("dxmr90-source", "real", core.SOURCE_MODES),
+    ("ed593-source", "off", core.SOURCE_MODES),
+    ("ed593-host", core.DEFAULT_ED593_HOST, None),
+    ("ed593-port", core.DEFAULT_ED593_PORT, None),
+    ("ed593-address", 1, None),
+    ("ed593-timeout", 1.0, None),
+    ("ed593-rate-hz", 1.0, None),
     ("stepper-source", "controllino", core.STEPPER_SOURCE_MODES),
     ("stepper-port", core.DEFAULT_STEPPER_USB_PORT, None),
     ("stepper-baud", core.DEFAULT_STEPPER_USB_BAUD, None),
@@ -81,6 +87,7 @@ def parse_args(argv=None):
             type=Path if isinstance(default, Path) else type(default),
             help=f"{name.replace('-', ' ')} (default: {default})",
         )
+    parser.add_argument("--ed593-checksum", action="store_true", help="use DCON checksums (must match device configuration)")
     parser.add_argument("--verbose-http", action="store_true", help="log HTTP requests")
     env_args = [
         f"--{name}={os.environ[env]}"
@@ -90,12 +97,14 @@ def parse_args(argv=None):
     for name, value in vars(args).items():
         if isinstance(value, float) and not math.isfinite(value):
             parser.error(f"--{name.replace('_', '-')} must be finite")
-        if name in ("port", "dxmr90_port") and not 1 <= value <= 65535:
+        if name in ("port", "dxmr90_port", "ed593_port") and not 1 <= value <= 65535:
             parser.error(f"--{name.replace('_', '-')} must be between 1 and 65535")
         if name in ("drop_after_s", "stale_after_s") and value < 0:
             parser.error(f"--{name.replace('_', '-')} must be non-negative")
         if (name.endswith(("timeout", "rate_hz")) or name == "history_limit") and value <= 0:
             parser.error(f"--{name.replace('_', '-')} must be positive")
+    if not 0 <= args.ed593_address <= 255:
+        parser.error("--ed593-address must be between 0 and 255")
     return args
 
 

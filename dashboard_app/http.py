@@ -12,6 +12,17 @@ from .runtime import DashboardRuntime
 
 
 DASHBOARD_ASSET_DIR = Path(__file__).with_name("static")
+EXPERIMENT_EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples"
+EXPERIMENT_EXAMPLES = {
+    "/api/experiment/example.csv": "esp32_health.csv",
+    "/api/experiment/source-health.csv": "source_health.csv",
+    "/api/experiment/start-recording.csv": "start_recording.csv",
+    "/api/experiment/move-stepper.csv": "move_stepper.csv",
+    "/api/experiment/actuators.csv": "actuators.csv",
+    "/api/experiment/temperatures.csv": "temperatures.csv",
+    "/api/experiment/motion-readings.csv": "motion_readings.csv",
+    "/api/experiment/dro-monitor.csv": "dro_monitor.csv",
+}
 DASHBOARD_ASSET_TYPES = {
     "/assets/dashboard-lean.css": "text/css; charset=utf-8",
     "/assets/app-lean.js": "text/javascript; charset=utf-8",
@@ -66,6 +77,10 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTT
                     self._send_json(runtime.dashboard_config())
                 elif path == "/api/latest":
                     self._send_json(runtime.latest_payload())
+                elif path == "/api/experiment":
+                    self._send_json({"experiment": runtime.experiment_state()})
+                elif path in EXPERIMENT_EXAMPLES:
+                    self._send_file(EXPERIMENT_EXAMPLE_DIR / EXPERIMENT_EXAMPLES[path])
                 elif path == "/api/history":
                     limit = int(query.get("limit", ["240"])[0])
                     self._send_json(runtime.history_payload(limit))
@@ -106,6 +121,10 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTT
                 elif path == "/api/metadata":
                     metadata = runtime.update_metadata(parse_body(self))
                     self._send_json({"metadata": metadata})
+                elif path == "/api/experiment/load":
+                    self._send_json({"experiment": runtime.load_experiment(parse_body(self))})
+                elif path == "/api/experiment/start":
+                    self._send_json({"experiment": runtime.start_experiment(parse_body(self))})
                 elif path == "/api/solenoid/toggle":
                     index = int(query.get("n", [""])[0])
                     self._send_json(runtime.toggle_solenoid(index))
@@ -229,6 +248,12 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTT
                 run_payload = state_payload.get("run", {})
                 if isinstance(run_payload, dict):
                     self._send_sse_event("state", run_payload)
+                run_status = tuple(run_payload.get(key) for key in (
+                    "recording", "run_started_iso", "run_stopped_iso",
+                ))
+                experiment = state_payload["experiment"]
+                self._send_sse_event("experiment", experiment)
+                experiment_revision = experiment["revision"]
                 while True:
                     sequence, sample = runtime.wait_for_sample(sequence)
                     if sample is None:
@@ -236,6 +261,18 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTT
                         self.wfile.flush()
                         continue
                     self._send_sse_event("sample", sample)
+                    state_payload = runtime.state()
+                    current_run = state_payload["run"]
+                    current_status = tuple(current_run.get(key) for key in (
+                        "recording", "run_started_iso", "run_stopped_iso",
+                    ))
+                    if current_status != run_status:
+                        self._send_sse_event("state", current_run)
+                        run_status = current_status
+                    experiment = state_payload["experiment"]
+                    if experiment["revision"] != experiment_revision:
+                        self._send_sse_event("experiment", experiment)
+                        experiment_revision = experiment["revision"]
             except (BrokenPipeError, ConnectionResetError, OSError):
                 return
 

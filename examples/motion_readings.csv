@@ -1,0 +1,4 @@
+action,source,max_age_ms,health,timeout_s,device,min_mm,max_mm,set_point
+telemetry_health,esp32,1000,ok,10,pressure_adc;flow_adc,,,
+telemetry_health,controllino,1000,ok,10,dro,,,
+reading_state,controllino,1000,ok,10,dro,0,100,check

@@ -10,7 +10,9 @@ from __future__ import annotations
 import math
 import threading
 import time
+import uuid
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
@@ -23,6 +25,7 @@ except ImportError:  # pragma: no cover - direct dashboard-lean.py execution
     import supervisor_core as core
 
 from .system_config import SystemConfig
+from .experiment import ActuatorAction, ExperimentRunner, MoveStepperAction, RequestedStateAction, StepperModeAction, source_adapter_name
 
 
 DEFAULT_STALE_AFTER_S = 5.0
@@ -194,6 +197,13 @@ class DashboardRuntime:
         stepper_network_url: str = core.DEFAULT_STEPPER_NETWORK_URL,
         stepper_network_timeout: float = core.DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
         system_config_path: Path | None = None,
+        ed593_source: str = "off",
+        ed593_host: str = core.DEFAULT_ED593_HOST,
+        ed593_port: int = core.DEFAULT_ED593_PORT,
+        ed593_address: int = 1,
+        ed593_timeout: float = 1.0,
+        ed593_rate_hz: float = 1.0,
+        ed593_checksum: bool = False,
     ) -> None:
         if rate_hz <= 0:
             raise ValueError("rate_hz must be positive")
@@ -224,6 +234,10 @@ class DashboardRuntime:
         self.dxmr90_word_order = dxmr90_word_order
         self.dxmr90_data_path = dxmr90_data_path
         self.dxmr90_rate_hz = dxmr90_rate_hz
+        self.ed593_settings = dict(ed593_source=ed593_source, ed593_host=ed593_host,
+                                   ed593_port=ed593_port, ed593_address=ed593_address,
+                                   ed593_timeout=ed593_timeout, ed593_rate_hz=ed593_rate_hz,
+                                   ed593_checksum=ed593_checksum)
         self.sources = core.make_sources(
             esp32_source=esp32_source,
             esp32_base_url=esp32_base_url,
@@ -245,6 +259,7 @@ class DashboardRuntime:
             dxmr90_word_order=dxmr90_word_order,
             dxmr90_data_path=dxmr90_data_path,
             dxmr90_rate_hz=dxmr90_rate_hz,
+            **self.ed593_settings,
         )
         self.devices = core.DeviceControls(self.sources)
         self.merger = SourceMerger(self.sources, stale_after_s=stale_after_s)
@@ -272,6 +287,12 @@ class DashboardRuntime:
         self._thread: threading.Thread | None = None
         self._solenoid_command_lock = threading.Lock()
         self._servo_command_lock = threading.Lock()
+        self._experiment_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="experiment-io")
+        self._experiment_futures: set[Future] = set()
+        self._experiment_cancel = threading.Event()
+        self.experiment = ExperimentRunner(
+            request_state=self._submit_experiment_command, abort_state=self._submit_experiment_stop,
+        )
         with self._condition:
             self._poll_locked(0.0)
 
@@ -284,10 +305,17 @@ class DashboardRuntime:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._experiment_cancel.set()
         with self._condition:
+            self.experiment.fail("runtime_stopped", time.monotonic() - self.monotonic0)
             self._condition.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        # Finish any already-started dispatch, then its ordered stop, before
+        # closing transports. Command adapters have bounded I/O timeouts.
+        self._experiment_executor.shutdown(wait=True)
+        with self._condition:
+            self.experiment.on_io_event(time.monotonic() - self.monotonic0)
         if self.recording:
             self.set_recording(False)
         for source in self.sources:
@@ -309,6 +337,13 @@ class DashboardRuntime:
         self.latest = self.merger.poll(elapsed_s, timestamp)
         self._apply_stepper_dro_zero_locked(self.latest)
         self._apply_stepper_dro_velocity_locked(self.latest, elapsed_s)
+        stepper = self.devices.sources.get("stepper")
+        self.experiment.on_sample(self.latest, elapsed_s, {
+            "recording": self.recording,
+            "stepper_command_error": getattr(stepper, "pending_command_error", None),
+        })
+        if self.experiment.state == "failed":
+            self._experiment_cancel.set()
         fresh_readings = self.merger.fresh_readings()
         self.history.append(self.latest)
         activated = False
@@ -456,6 +491,7 @@ class DashboardRuntime:
             "esp32_base_url": self.esp32_base_url,
             "esp32_timeout": self.esp32_timeout,
             "dxmr90_source": self.dxmr90_source,
+            **self.ed593_settings,
             "stepper_source": self.stepper_source,
             "stepper_port": self.stepper_port,
             "stepper_baud": self.stepper_baud,
@@ -493,6 +529,7 @@ class DashboardRuntime:
             "esp32_source": self.esp32_source,
             "esp32_base_url": self.esp32_base_url,
             "dxmr90_source": self.dxmr90_source,
+            **self.ed593_settings,
             "stepper_source": self.stepper_source,
             "stepper_port": self.stepper_port,
             "stepper_baud": self.stepper_baud,
@@ -513,6 +550,7 @@ class DashboardRuntime:
                 "run": self.run_state_locked(),
                 "metadata": dict(self.metadata),
                 "history_size": len(self.history),
+                "experiment": self.experiment.snapshot(),
             }
 
     def dashboard_config(self) -> dict[str, object]:
@@ -541,7 +579,139 @@ class DashboardRuntime:
 
     def latest_payload(self) -> dict[str, object]:
         with self._condition:
-            return {"sample": self.latest, "run": self.run_state_locked()}
+            return {
+                "sample": self.latest, "run": self.run_state_locked(),
+                "experiment": self.experiment.snapshot(),
+            }
+
+    def experiment_state(self) -> dict[str, object]:
+        with self._condition:
+            return self.experiment.snapshot()
+
+    def _track_experiment_io(self, future: Future) -> Future:
+        self._experiment_futures.add(future)
+        def completed(done: Future) -> None:
+            # Wake consumers; runner events/results are applied under the runtime
+            # lock on a poll, never mutated on the device I/O worker.
+            with self._condition:
+                self._experiment_futures.discard(done)
+                self._condition.notify_all()
+        future.add_done_callback(completed)
+        return future
+
+    def _submit_experiment_command(self, action: RequestedStateAction | MoveStepperAction | StepperModeAction | ActuatorAction) -> object:
+        if isinstance(action, RequestedStateAction):
+            # Recording is local application state, with no device transport.
+            return self._request_experiment_state(action)
+        sample = dict(self.latest or {})
+        return self._track_experiment_io(self._experiment_executor.submit(
+            self._request_experiment_state, action, sample))
+
+    def _submit_experiment_stop(self, action: MoveStepperAction) -> Future:
+        self._experiment_cancel.set()
+        # Same queue preserves dispatch-before-stop ordering even when a move
+        # request is still awaiting its acknowledgement at monitor failure.
+        return self._track_experiment_io(self._experiment_executor.submit(
+            self._abort_experiment_state, action))
+
+    def _require_experiment_io_idle(self) -> None:
+        if any(not future.done() for future in self._experiment_futures):
+            raise RuntimeError("An experiment command or stop is still in flight; wait for its outcome")
+
+    def _request_experiment_state(self, action: RequestedStateAction | MoveStepperAction | StepperModeAction | ActuatorAction, sample: Mapping[str, object] | None = None) -> object:
+        sample = dict(self.latest or {}) if sample is None else sample
+        if self._experiment_cancel.is_set():
+            raise RuntimeError("Experiment command cancelled before dispatch")
+        if isinstance(action, ActuatorAction):
+            current = self.devices.status(sample)
+            if action.device == "brushless_motor":
+                if action.set_point == "pulse":
+                    self.devices.brushless_pulse(current, {"pulse_us": action.pulse_us})
+                else:
+                    self.devices.brushless_state(current, action.set_point == "on")
+            else:
+                targets = [(device, int(device[-1]) - 1) for device in action.devices]
+                # Validate every owner before dispatching any part of the row.
+                for device, index in targets:
+                    owner = core.solenoid_source_name(index, str(current.get("stepper_mode", "off")))
+                    if owner != source_adapter_name(action.source):
+                        display_owner = "controllino" if owner == "stepper" else owner
+                        raise RuntimeError(f"{device} is controlled by {display_owner}, not spreadsheet source {action.source}")
+                results = {}
+                # No telemetry polling/confirmation between these requests.
+                # Individual wire requests still follow the source protocol.
+                for device, index in targets:
+                    try:
+                        if self._experiment_cancel.is_set():
+                            raise RuntimeError("Experiment command cancelled before dispatch")
+                        self.devices.solenoid_state(index, action.output_on, sample, current)
+                        results[device] = {"status": "requested", "set_point": action.set_point}
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        results[device] = {"status": "failed", "set_point": action.set_point, "error": str(exc)}
+                return {"targets": results}
+            return
+        if isinstance(action, StepperModeAction):
+            self.devices.control_mode(self.devices.status(sample), {
+                "web_position": action.firmware_mode == "web_position",
+            })
+            return
+        if isinstance(action, MoveStepperAction):
+            values = self._validated_move_values({
+                "distance_mm": action.distance_mm, "speed_mm_s": action.speed_mm_s,
+                "direction": action.direction, "command_id": "experiment-" + uuid.uuid4().hex,
+            })
+            current = self.devices.status(sample)
+            if current.get("stepper_mode") == "sim":
+                current["stepper_authorized_direction"] = action.direction
+            elif current.get("stepper_mode") != "controllino" and current.get("stepper_authorized_direction") != action.direction:
+                raise RuntimeError("Set the physical direction selector to match the spreadsheet direction")
+            receipt = self.devices.move(current, values)
+            return {
+                "command_id": values["command_id"], "distance_mm": action.distance_mm,
+                "signed_distance_mm": receipt.result["signed_distance_mm"],
+                "signed_pulse_count": round(receipt.result["signed_distance_mm"] * core.DEFAULT_STEPPER_STEPS_PER_MM),
+                "pulse_rate_sps": round(action.speed_mm_s * core.DEFAULT_STEPPER_STEPS_PER_MM),
+            }
+        if action.source != "recording" or action.set_point != "on":
+            raise ValueError("Unsupported experiment requested state")
+        # _poll_locked writes this sample exactly once after the request.
+        self.set_recording(True, include_latest=False)
+
+    def _abort_experiment_state(self, action: MoveStepperAction) -> None:
+        # Send once without recursively polling or waiting inside the runner.
+        self.devices.stop(self.devices.status())
+
+    def load_experiment(self, values: dict[str, object]) -> dict[str, object]:
+        name = values.get("name", "experiment.csv")
+        if not isinstance(name, str) or not name.strip() or len(name) > 128:
+            raise ValueError("Spreadsheet name must contain 1 to 128 characters")
+        with self._condition:
+            self.experiment.on_io_event(time.monotonic() - self.monotonic0)
+            self._require_experiment_io_idle()
+            self.experiment.load(values.get("csv"), name.strip(), time.monotonic() - self.monotonic0,
+                                 max_travel_mm=self.system_config.stepper_max_travel_mm)
+            self._experiment_cancel.clear()
+            self.sequence += 1
+            self._condition.notify_all()
+            return self.experiment.snapshot()
+
+    def start_experiment(self, values: dict[str, object]) -> dict[str, object]:
+        with self._condition:
+            self.experiment.on_io_event(time.monotonic() - self.monotonic0)
+            self._require_experiment_io_idle()
+            # Settings may have changed since loading; check before any row runs.
+            for row, action in enumerate(self.experiment.program, 1):
+                if isinstance(action, MoveStepperAction):
+                    try:
+                        core.validate_stepper_move(action.distance_mm, action.speed_mm_s,
+                                                   max_travel_mm=self.system_config.stepper_max_travel_mm)
+                    except ValueError as exc:
+                        raise ValueError(f"Row {row}: {exc}") from exc
+            self.experiment.start(time.monotonic() - self.monotonic0, values.get("program_id"))
+            self._experiment_cancel.clear()
+            self.sequence += 1
+            self._condition.notify_all()
+            return self.experiment.snapshot()
 
     def history_payload(self, limit: int) -> dict[str, object]:
         with self._condition:
@@ -695,31 +865,32 @@ class DashboardRuntime:
         return {**receipt.result, "stepper": payload, "sample": self.latest}
 
     def _stepper_command(self, command: Callable, *args: object, poll: bool = True) -> dict[str, object]:
-        """Shared orchestration for commands whose writes use the runtime lock."""
+        """Snapshot under the runtime lock, send without it, then confirm."""
         with self._condition:
-            receipt = command(self.devices.status(self.latest), *args)
+            current = self.devices.status(self.latest)
+        receipt = command(current, *args)
+        with self._condition:
             return self._finish_command_locked(receipt, poll=poll)
 
     def move_stepper(self, values: dict[str, object]) -> dict[str, object]:
         with self._condition:
-            self.devices.require_stepper("move", error="stepper source does not support motion controls")
-            if "distance_mm" not in values:
-                raise ValueError("distance_mm is required")
-            if "speed_mm_s" not in values:
-                raise ValueError("speed_mm_s is required")
-            raw_distance = values["distance_mm"]
-            if isinstance(raw_distance, bool):
-                raise ValueError("distance_mm must be a positive finite travel magnitude")
-            try:
-                travel_mm = float(raw_distance)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("distance_mm must be a positive finite travel magnitude") from exc
-            if not math.isfinite(travel_mm) or travel_mm <= 0:
-                raise ValueError("distance_mm must be a positive finite travel magnitude")
-            if travel_mm > self.system_config.stepper_max_travel_mm:
-                raise ValueError("distance_mm exceeds configured max_travel_mm")
-            receipt = self.devices.move(self.devices.status(self.latest), {**values, "distance_mm": travel_mm})
+            current = self.devices.status(self.latest)
+            validated = self._validated_move_values(values)
+        receipt = self.devices.move(current, validated)
+        with self._condition:
             return self._finish_command_locked(receipt)
+
+    def _validated_move_values(self, values: dict[str, object]) -> dict[str, object]:
+        self.devices.require_stepper("move", error="stepper source does not support motion controls")
+        if "distance_mm" not in values:
+            raise ValueError("distance_mm is required")
+        if "speed_mm_s" not in values:
+            raise ValueError("speed_mm_s is required")
+        travel_mm, speed = core.validate_stepper_move(
+            values["distance_mm"], values["speed_mm_s"],
+            max_travel_mm=self.system_config.stepper_max_travel_mm,
+        )
+        return {**values, "distance_mm": travel_mm, "speed_mm_s": speed}
 
     def stop_stepper(self) -> dict[str, object]:
         return self._stepper_command(self.devices.stop)

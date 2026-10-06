@@ -1,0 +1,7 @@
+action,source,max_age_ms,health,timeout_s,device,min_c,max_c,set_point
+telemetry_health,esp32,1000,ok,10,pressure_adc;flow_adc,,,
+telemetry_health,ed593,3000,ok,10,tc0;tc1;tc2;tc3,,,
+reading_state,ed593,3000,ok,10,tc0,0,100,check
+reading_state,ed593,3000,ok,10,tc1,0,100,check
+reading_state,ed593,3000,ok,10,tc2,0,100,check
+reading_state,ed593,3000,ok,10,tc3,0,100,check

@@ -1,0 +1,5 @@
+action,source,max_age_ms,health,device,timeout_s,set_point
+telemetry_health,esp32,1000,ok,pressure_adc;flow_adc,10,
+telemetry_health,dxmr90,1000,ok,,10,
+telemetry_health,controllino,1000,ok,stepper;dro;servo;solenoid4,10,
+requested_state,recording,,,,10,on

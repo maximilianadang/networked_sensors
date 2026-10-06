@@ -1,0 +1,116 @@
+Controllino MAXI Automation: DRO and proposed limit inputs
+
+Status: DRO telemetry is implemented. Both physical limit switches are absent;
+firmware continues to report d6=-1 and d8=-1 until installation/configuration.
+No firmware pin mapping or interlock behavior is changed by these read-only
+spreadsheet checks.
+
+Proposed mechanical limit-switch wiring:
+  Positive limit: dedicated screw-terminal DI0, Arduino A12 (PK4).
+  Negative limit: dedicated screw-terminal DI1, Arduino A13 (PK5).
+These pins are unused in wiring_controllino.h. This preserves analog inputs and
+IN0/IN1 external-interrupt inputs. DI0/DI1 are inputs, not DO0/DO1 outputs.
+
+Use normally closed dry contacts from +24 V to the respective input terminal,
+with the controller on the same supply/reference. Expected inactive reading:
+HIGH (contact closed). Expected active reading: LOW (contact opened). An open
+wire is indistinguishable from an activated switch. This recommendation assumes
+mechanical dry contacts; powered electronic sensors need their output type and
+voltage checked before choosing wiring. Use industrial screw terminals for 24 V,
+not the X1/X2 logic-level headers. Validate both levels and input behavior on the
+installed board before enabling firmware reporting.
+
+Sources:
+https://www.controllino.com/wp-content/uploads/2021/03/CONTROLLINO-MAXI-Automation-Pinout.pdf
+https://www.controllino.com/wp-content/uploads/2023/05/CONTROLLINO_MAXI_AUTOMATION_Technical_Block_Diagram.pdf
+
+Existing DRO wiring (unchanged): X1 SCL / Arduino 21 is clock; X1 Digital 4 /
+Arduino 6 is data, through the existing level shifter.
+
+Spreadsheet interface:
+  source=controllino identifies the communicating controller. The stepper
+  remains a target in device, not a spreadsheet source.
+  telemetry_health device=dro:
+    Source reception age <= max_age_ms; transport-error field available and empty.
+    DRO: reported capability true and effective age (firmware sample age + cached source age) <= max_age_ms.
+  reading_state device=dro: finite raw position within inclusive min_mm/max_mm,
+    plus only the optional telemetry requirements selected in the row.
+    Dashboard zero offset is not
+    applied. Bounds may be negative; no firmware freshness flag is substituted
+    for the worksheet threshold.
+  reading_state timeout_s is required. Optional requirements are independent:
+    max_age_ms: source freshness and effective DRO measurement freshness.
+    health=ok: available transport-error telemetry with no error.
+    Blank either column to omit that requirement; with both blank, only
+      finite in-bounds position determines pass/fail, even if the value is old.
+    Readiness/capability checks belong to telemetry_health rows targeting device.
+  telemetry_health and requested_state retain their existing requirements.
+  Blank all pulse/motion operands and reading columns that do not apply.
+  Limit switches belong to the controller safety layer; spreadsheets cannot
+    select them in device or reading_state rows. Existing controller
+    limit telemetry and motion fault handling remain intact.
+  set_point=check (or blank): each reading row checks once.
+  set_point=on on controllino/dro: passes the initial check, then keeps the
+    same position validity/bounds and selected health check active across later
+    rows, including motion. max_age_ms only gates the initial row and is not a
+    persistent failure condition. Telemetry updates and timer ticks evaluate the
+    retained conditions. Disable explicitly
+    with a reading_state/controllino/dro row, set_point=off, timeout_s, and blank
+    threshold, pulse, and motion columns. Disable rows are checked against the monitor
+    before disabling it; failure cannot be bypassed by a disable row. Programs
+    with missing/duplicate enable or unmatched disable are rejected at load.
+    timeout_s limits the row; it does not expire the persistent check. On monitor
+    failure, halt spreadsheet execution and use the existing stop request for an
+    in-progress spreadsheet move. Preserve stop failure evidence; no automatic
+    solenoid/ESC cleanup. Successful programs disable their monitor explicitly.
+  A failed reading immediately halts execution. A once-only row passes and
+    advances when all pass. Failure halts spreadsheet execution; these checks
+    do not send actuator commands, stop physical motion, or close valves.
+
+The legacy wire fields d6/d8 designate positive/negative limits in the protocol;
+they do not prescribe Controllino physical pins 6/8. Physical pin 6 is DRO data.
+
+examples/motion_readings.csv shows the full sequence including an optional
+initial ESP32 health row. All thresholds/bounds in it are illustrative operator
+choices, not prescribed defaults or validated mechanical travel limits. The
+example requires an available DRO; absent limits do not affect its checks.
+
+Experiment command I/O scheduling:
+  Device commands execute on a single worker outside the runtime sampling lock.
+  Completed command futures are consumed as events on a later runtime poll;
+    command acknowledgements never substitute for actual-state confirmation.
+  Pending commands do not prevent source sampling, DRO checks, or deadlines.
+  On failure, cancel queued dispatch and skip remaining grouped targets that
+    have not been sent. Already-sent requests cannot be undone by cancellation.
+  Stops use the same queue so a move awaiting acknowledgement is followed by
+    its stop, never the reverse. Monitoring and failure reporting continue
+    during both requests. Stop transmission can still wait for an in-flight
+    command/transport timeout; this is not a firmware safety interlock.
+  Retain pending/completed/failed stop evidence and late command outcomes. Do
+    not allow load/restart while old command/stop I/O remains in flight.
+  Manual motion commands also send without holding the sampling lock.
+
+Move timing and completion:
+  Move timeout_s covers dispatch/response and fresh matching started telemetry,
+    not motion duration. max_age_ms/health gate dispatch and start confirmation.
+  Once the matching command reports moving, remove the start deadline and wait
+    for that command's firmware pulse completion plus moving=false. A short move
+    may report completed before a moving sample is observed, which also suffices.
+  After confirmed start, transient source age or transport errors do not fail
+    the move row, and there is no implicit completion timeout. Keep waiting.
+  Matching controller aborted/E-STOP/limit-blocked/fault states still fail the
+    row. Any explicit persistent reading monitor remains independent and can
+    fail the experiment according to its own selected bounds/health requirements.
+  Pulse completion establishes commanded travel, not physical DRO arrival.
+
+Unified spreadsheet target column:
+  device replaces the former required_devices column. No readiness flag is added.
+  telemetry_health: device lists readiness/capability targets; blank checks source
+    health/freshness only. Semicolon-separated names must be unique and supported.
+  reading_state: device names the sensor whose value is compared. max_age_ms and
+    health retain their independent optional meanings; health=ok remains a check
+    for available transport-error telemetry with no error. No implicit readiness
+    criterion is added to reading rows; put readiness checks in health rows.
+  requested_state: device lists actuator targets (compatible solenoids may share
+    one row). device=stepper explicitly identifies mode/move targets. Existing
+    blank stepper targets are inferred from the move/mode action.

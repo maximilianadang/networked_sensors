@@ -1,0 +1,7 @@
+action,source,device,max_age_ms,health,timeout_s,set_point,min_mm,max_mm,min_c,max_c,speed_mm_s,duration_s,direction,pulse_us
+telemetry_health,esp32,pressure_adc;flow_adc,1000,ok,10,,,,,,,,,
+telemetry_health,controllino,stepper;dro,1000,ok,10,,,,,,,,,
+reading_state,controllino,dro,1000,ok,10,on,0,100,,,,,,
+requested_state,controllino,stepper,1000,ok,10,positional,,,,,,,,
+requested_state,controllino,stepper,1000,ok,15,move,,,,,1,10,forward,
+reading_state,controllino,dro,,,10,off,,,,,,,,

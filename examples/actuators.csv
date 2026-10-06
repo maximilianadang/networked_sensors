@@ -1,0 +1,7 @@
+action,source,max_age_ms,health,timeout_s,set_point,device,pulse_us
+telemetry_health,esp32,1000,ok,10,,pressure_adc;flow_adc,
+requested_state,esp32,1000,ok,10,open,solenoid1;solenoid2;solenoid3,
+requested_state,esp32,1000,ok,10,closed,solenoid1;solenoid2;solenoid3,
+requested_state,controllino,1000,ok,10,pulse,brushless_motor,1200
+requested_state,controllino,1000,ok,10,on,brushless_motor,
+requested_state,controllino,1000,ok,10,off,brushless_motor,

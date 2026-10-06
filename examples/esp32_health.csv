@@ -1,0 +1,2 @@
+action,source,max_age_ms,health,device,timeout_s
+telemetry_health,esp32,1000,ok,pressure_adc;flow_adc,10

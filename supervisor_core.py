@@ -20,6 +20,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import ProxyHandler, Request, build_opener
 
+from read_ed593_ascii import DEFAULT_HOST as DEFAULT_ED593_HOST, DEFAULT_PORT as DEFAULT_ED593_PORT
+
 try:
     from .read_dxmr90_modbus import (
         CORE_NAMES,
@@ -116,6 +118,23 @@ def finite_number(value: object, field: str) -> float:
     if not math.isfinite(number):
         raise ValueError(f"{field} must be a finite number")
     return number
+
+
+def validate_stepper_move(distance_mm: object, speed_mm_s: object, *,
+                          max_travel_mm: float = DEFAULT_STEPPER_MAX_DISTANCE_MM) -> tuple[float, float]:
+    """Validate command operands without consulting live controller state."""
+    distance = finite_number(distance_mm, "distance_mm")
+    if distance <= 0:
+        raise ValueError("distance_mm must be a positive finite travel magnitude")
+    if distance > max_travel_mm:
+        raise ValueError("distance_mm exceeds configured max_travel_mm")
+    if distance > DEFAULT_STEPPER_MAX_DISTANCE_MM:
+        raise ValueError(f"abs(distance_mm) must not exceed {DEFAULT_STEPPER_MAX_DISTANCE_MM:g}")
+    if round(distance * DEFAULT_STEPPER_STEPS_PER_MM) == 0:
+        raise ValueError("distance_mm is smaller than one provisional step")
+    speed = finite_number(speed_mm_s, "speed_mm_s")
+    UsbStepperSource._manual_speed_sps(speed)
+    return distance, speed
 
 
 @dataclass(frozen=True)
@@ -325,12 +344,16 @@ class DeviceControls:
         )
 
     def toggle_brushless(self, current: dict[str, object]) -> CommandReceipt:
+        return self.brushless_state(current, current.get("stepper_brushless_motor_on") is not True)
+
+    def brushless_state(self, current: dict[str, object], requested: bool) -> CommandReceipt:
+        if type(requested) is not bool:
+            raise ValueError("brushless motor state must be true or false")
         stepper = self.require_stepper(
             "set_brushless_motor", error="stepper source does not support brushless motor control",
         )
         if current.get("stepper_brushless_motor_capable") is not True:
             raise RuntimeError("Yún firmware does not support brushless motor control")
-        requested = current.get("stepper_brushless_motor_on") is not True
         if requested and current.get("stepper_estop_latched") is True:
             raise RuntimeError("reset the software E-STOP before starting the brushless motor")
         stepper.set_brushless_motor(requested)
@@ -394,6 +417,23 @@ class DeviceControls:
             and (pulse == 0 or p.get("stepper_servo_pulse_us") == pulse),
             always=True, confirmed=True,
         )
+
+    def solenoid_state(self, index: int, on: bool, sample: Mapping[str, object], current: dict[str, object]) -> CommandReceipt:
+        if type(index) is not int or not 0 <= index < ESP32_SOLENOID_COUNT or type(on) is not bool:
+            raise ValueError("solenoid requires index 0..3 and a boolean state")
+        owner = solenoid_source_name(index, self.sources["stepper"].mode)
+        source = self.sources[owner]
+        if hasattr(source, "set_solenoid"):
+            source.set_solenoid(index, on)
+        else:
+            # ESP32 exposes a toggle endpoint. Never toggle an unknown state,
+            # retry a toggle, or invert a valve already in the requested state.
+            observed = sample.get(f"esp32_sol{index + 1}")
+            if type(observed) is not bool:
+                raise RuntimeError("ESP32 solenoid state is unavailable")
+            if observed is not on and source.toggle_solenoid(index) is not on:
+                raise RuntimeError("ESP32 toggle did not produce the requested solenoid state")
+        return CommandReceipt(source, None, "solenoid state", None, {"index": index, "state": on})
 
     def toggle_solenoid(self, index: int, sample: Mapping[str, object], current: dict[str, object]) -> CommandReceipt:
         if type(index) is not int or not 0 <= index < ESP32_SOLENOID_COUNT:
@@ -581,7 +621,9 @@ class SimulatedDxmr90Source(PeriodicSource):
 
     name = "dxmr90"
     period_s = DXMR90_PERIOD_S
-    expected_fields = tuple(f"dxmr90_{metric.name}" for metric in DXMR90_CORE_METRICS)
+    expected_fields = tuple(f"dxmr90_{metric.name}" for metric in DXMR90_CORE_METRICS) + (
+        "dxmr90_transport_error",
+    )
 
     def _read(self, elapsed_s: float) -> Mapping[str, float | int | bool | str | None]:
         heartbeat = int(elapsed_s // self.period_s) + 1
@@ -1816,16 +1858,9 @@ class UsbStepperSource:
         command_id: object | None = None,
     ) -> Mapping[str, float | int | bool | str | None]:
         distance = self._finite_number(distance_mm, "distance_mm")
+        validate_stepper_move(abs(distance), speed_mm_s)
         speed_sps = self._manual_speed_sps(speed_mm_s)
-        if distance == 0:
-            raise ValueError("distance_mm must be non-zero")
-        if abs(distance) > DEFAULT_STEPPER_MAX_DISTANCE_MM:
-            raise ValueError(
-                f"abs(distance_mm) must not exceed {DEFAULT_STEPPER_MAX_DISTANCE_MM:g}"
-            )
         delta_steps = int(round(distance * DEFAULT_STEPPER_STEPS_PER_MM))
-        if delta_steps == 0:
-            raise ValueError("distance_mm is smaller than one provisional step")
 
         values = self._require_connected()
         if values.get("stepper_estop_latched"):
@@ -2928,6 +2963,13 @@ def make_sources(
     dxmr90_word_order: str = "high-low",
     dxmr90_data_path: str = "direct",
     dxmr90_rate_hz: float = DEFAULT_DXMR90_REAL_RATE_HZ,
+    ed593_source: str = "off",
+    ed593_host: str = DEFAULT_ED593_HOST,
+    ed593_port: int = DEFAULT_ED593_PORT,
+    ed593_address: int = 1,
+    ed593_timeout: float = 1.0,
+    ed593_rate_hz: float = 1.0,
+    ed593_checksum: bool = False,
 ) -> list[SourceAdapter]:
     """Create source arms with independent sim/real/off selection."""
 
@@ -3000,4 +3042,14 @@ def make_sources(
             SimulatedStepperSource.expected_fields,
         )
 
-    return [esp32, dxmr90, stepper]
+    from read_ed593_ascii import EXPECTED_FIELDS, RealEd593Source, SimulatedEd593Source
+    if ed593_source == "real":
+        ed593 = RealEd593Source(ed593_host, ed593_port, ed593_address,
+                               ed593_timeout, ed593_checksum, ed593_rate_hz)
+    elif ed593_source == "sim":
+        ed593 = SimulatedEd593Source()
+    elif ed593_source == "off":
+        ed593 = DisabledSource("ed593", 1.0, EXPECTED_FIELDS)
+    else:
+        raise ValueError("ED-593 source must be real, sim, or off")
+    return [esp32, dxmr90, stepper, ed593]
