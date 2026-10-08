@@ -87,6 +87,23 @@ TARGETS: Mapping[str, FirmwareTarget] = {
         ),
         build_properties=("compiler.cpp.extra_flags=-DCONTROLLINO_AUX_SERVO=0",),
     ),
+    "controllino-ak80-6": FirmwareTarget(
+        key="controllino-ak80-6",
+        label="CONTROLLINO MAXI Automation (CubeMars AK80-6 CAN)",
+        fqbn="CONTROLLINO_Boards:avr:controllino_maxi_automation",
+        default_payload="controllino_motion_control.ino",
+        monitor_baud=115200,
+        safety_note=(
+            "This build replaces the PWM auxiliary with CubeMars Servo CAN. "
+            "Use autowp-mcp2515 1.3.1, a 16 MHz MCP2515 at 500 kbps, and verify "
+            "logic-level CS pin 9 wiring and motor ID 104. Uploading resets the "
+            "controller. Keep the motor supply off during upload; verify motor-side "
+            "communication timeout before any powered run. Stop requests zero "
+            "current (coast), not braking. Limit: 400 output RPM; dashboard ramp: 80 RPM/s with a live control lease. "
+            "USB telemetry uses 115200 baud; set --stepper-baud 115200 on the host."
+        ),
+        build_properties=("compiler.cpp.extra_flags=-DCONTROLLINO_AUX_KIND=2",),
+    ),
     "yun": FirmwareTarget(
         key="yun",
         label="Arduino Yún Rev2 ATmega32U4",

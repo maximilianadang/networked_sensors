@@ -22,10 +22,12 @@ EXPERIMENT_EXAMPLES = {
     "/api/experiment/temperatures.csv": "temperatures.csv",
     "/api/experiment/motion-readings.csv": "motion_readings.csv",
     "/api/experiment/dro-monitor.csv": "dro_monitor.csv",
+    "/api/experiment/cubemars.csv": "cubemars.csv",
 }
 DASHBOARD_ASSET_TYPES = {
     "/assets/dashboard-lean.css": "text/css; charset=utf-8",
     "/assets/app-lean.js": "text/javascript; charset=utf-8",
+    "/assets/can-motor.js": "text/javascript; charset=utf-8",
 }
 
 
@@ -138,6 +140,8 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTT
                     self._send_json(runtime.reset_stepper_emergency_stop())
                 elif path == "/api/stepper/motor/toggle":
                     self._send_json(runtime.toggle_stepper_brushless_motor())
+                elif path == "/api/stepper/motor/can":
+                    self._send_json(runtime.set_cubemars_motor(parse_body(self)))
                 elif path == "/api/stepper/servo":
                     self._send_json(runtime.set_stepper_servo(parse_body(self)))
                 elif path == "/api/stepper/motor/pulse":

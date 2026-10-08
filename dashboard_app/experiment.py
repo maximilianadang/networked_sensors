@@ -16,6 +16,7 @@ import math
 from concurrent.futures import Future
 from copy import deepcopy
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from io import StringIO
 from typing import Callable, Mapping
 
@@ -29,12 +30,12 @@ BASE_CSV_COLUMNS = (
     "action", "source", "max_age_ms", "health", "timeout_s",
 )
 MOVE_COLUMNS = ("speed_mm_s", "duration_s", "direction")
-DEVICE_COLUMNS = ("device", "pulse_us")
+DEVICE_COLUMNS = ("device", "pulse_us", "rpm")
 READING_COLUMNS = ("min_c", "max_c", "min_mm", "max_mm")
 CSV_COLUMNS = (
     "action", "source", "device", "max_age_ms", "health", "timeout_s",
     "set_point", "min_mm", "max_mm", "min_c", "max_c",
-    "speed_mm_s", "duration_s", "direction", "pulse_us",
+    "speed_mm_s", "duration_s", "direction", "pulse_us", "rpm",
 )
 MAX_CSV_BYTES = 256 * 1024
 MAX_ROWS = 1000
@@ -55,6 +56,7 @@ DEVICE_REQUIREMENTS = {
         "pulse_measurement": ("stepper_pulse_measurement_capable",),
         "servo": ("stepper_servo_capable",),
         "brushless_motor": ("stepper_brushless_motor_capable",),
+        "can_motor": ("stepper_can_motor_capable", "stepper_can_motor_ready"),
         "solenoid4": ("stepper_solenoid4_capable",),
     },
 }
@@ -115,6 +117,10 @@ def device_check(sample: Mapping[str, object], source: str, device: str,
     fields = DEVICE_REQUIREMENTS[source][device]
     evidence = {field: sample.get(field) for field in fields}
     ok = all(value is True for value in evidence.values())
+    if source == "controllino" and device == "can_motor":
+        evidence.update({field: sample.get(field) for field in
+                         ("stepper_can_motor_feedback_age_ms", "stepper_age_ms", "stepper_can_motor_fault")})
+        ok = ok and core.cubemars_feedback_fresh(sample, sample.get("stepper_age_ms"))
     if source == "ed593":
         evidence.update({f"ed593_{device}_enabled": sample.get(f"ed593_{device}_enabled"),
                          f"ed593_{device}_fault": sample.get(f"ed593_{device}_fault")})
@@ -168,7 +174,7 @@ class TelemetryHealthAction:
             "device": ";".join(self.devices),
             "timeout_s": self.timeout_s,
             "set_point": "",
-            **dict.fromkeys((*MOVE_COLUMNS, "pulse_us", *READING_COLUMNS), ""),
+            **dict.fromkeys((*MOVE_COLUMNS, "pulse_us", "rpm", *READING_COLUMNS), ""),
         }
 
     def evaluate(self, sample: Mapping[str, object]) -> dict[str, object]:
@@ -284,6 +290,8 @@ class ActuatorAction:
     health: str
     timeout_s: float
     pulse_us: int | None = None
+    rpm: int | None = None
+    duration_ms: int = 0
 
     @property
     def devices(self) -> tuple[str, ...]:
@@ -300,11 +308,23 @@ class ActuatorAction:
             "set_point": self.set_point, "max_age_ms": self.max_age_ms,
             "health": self.health, "timeout_s": self.timeout_s,
             "pulse_us": self.pulse_us if self.pulse_us is not None else "",
-            **dict.fromkeys((*MOVE_COLUMNS, *READING_COLUMNS), ""),
+            **dict.fromkeys((*MOVE_COLUMNS, "rpm", *READING_COLUMNS), ""),
+            **({"rpm": self.rpm, "duration_s": self.duration_ms / 1000 if self.rpm else ""}
+               if self.device == "can_motor" else {}),
         }
 
     def evaluate(self, sample: Mapping[str, object]) -> dict[str, object]:
         checks = source_checks(sample, self.source, self.max_age_ms, self.health)
+        if self.device == "can_motor":
+            target = sample.get("stepper_can_motor_target_rpm")
+            checks["requested_state"] = {
+                "ok": type(target) is int and target == self.rpm
+                      and (self.rpm != 0 or sample.get("stepper_can_motor_active") is False),
+                "requested": self.rpm, "observed": target, "evidence": "firmware_requested_state",
+                "measured_rpm": sample.get("stepper_can_motor_rpm"),
+                "feedback_age_ms": sample.get("stepper_can_motor_feedback_age_ms"),
+            }
+            return checks
         for device in self.devices:
             if device == "brushless_motor":
                 field = ("stepper_brushless_motor_setpoint_us" if self.set_point == "pulse"
@@ -345,7 +365,7 @@ class TemperatureReadingAction:
             "action": "reading_state", "source": self.source, "device": self.device,
             "max_age_ms": self.max_age_ms if self.max_age_ms is not None else "", "health": self.health,
             "timeout_s": self.timeout_s, "min_c": self.min_c, "max_c": self.max_c,
-            "set_point": "check", "pulse_us": "", **dict.fromkeys((*MOVE_COLUMNS, "min_mm", "max_mm"), ""),
+            "set_point": "check", "pulse_us": "", "rpm": "", **dict.fromkeys((*MOVE_COLUMNS, "min_mm", "max_mm"), ""),
         }
 
     def evaluate(self, sample: Mapping[str, object]) -> dict[str, object]:
@@ -433,6 +453,33 @@ def parse_program(csv_text: object, *, max_travel_mm: float = core.DEFAULT_STEPP
                 raise ValueError(f"Row {row}: expected {len(header)} cells")
             values = dict(zip(header, (cell.strip() for cell in cells)))
             timeout_s = _number(values["timeout_s"], "timeout_s", row, positive=True)
+            if (values["action"] == "requested_state" and values.get("device") == "can_motor"):
+                if values["source"] != "controllino" or values.get("set_point") != "speed" or values["health"] != "ok":
+                    raise ValueError(f"Row {row}: CAN motor requires controllino, set_point=speed and health=ok")
+                if any(values.get(column, "") for column in ("pulse_us", "speed_mm_s", "direction", *READING_COLUMNS)):
+                    raise ValueError(f"Row {row}: CAN motor uses only rpm and duration_s request columns")
+                try:
+                    rpm_number = Decimal(values.get("rpm", ""))
+                    if not rpm_number.is_finite() or rpm_number != rpm_number.to_integral_value():
+                        raise ValueError("rpm must be a finite integer")
+                    if rpm_number.copy_abs() > core.CUBEMARS_PROTOCOL_MAX_RPM:
+                        raise ValueError(f"rpm must be from {-core.CUBEMARS_PROTOCOL_MAX_RPM} through {core.CUBEMARS_PROTOCOL_MAX_RPM}")
+                    rpm = int(rpm_number)
+                    duration = Decimal(values.get("duration_s", "")) if rpm else Decimal(0)
+                    if not duration.is_finite() or not 0 <= duration <= Decimal(core.CUBEMARS_PROTOCOL_MAX_DURATION_MS) / 1000:
+                        raise ValueError("duration_s is outside the bounded CAN motor run limits")
+                    milliseconds = duration * 1000
+                    if not milliseconds.is_finite() or milliseconds != milliseconds.to_integral_value():
+                        raise ValueError("duration_s must resolve to a whole number of milliseconds")
+                    rpm, duration_ms = core.validate_cubemars_command(rpm, int(milliseconds))
+                except (ValueError, InvalidOperation) as exc:
+                    raise ValueError(f"Row {row}: {exc}") from exc
+                actions.append(ActuatorAction(values["source"], "can_motor", "speed",
+                    _number(values["max_age_ms"], "max_age_ms", row, positive=False),
+                    values["health"], timeout_s, rpm=rpm, duration_ms=duration_ms))
+                continue
+            if values.get("rpm", ""):
+                raise ValueError(f"Row {row}: rpm is only applicable to CAN motor requests")
             if values["action"] == "reading_state":
                 source, device = values["source"], values.get("device")
                 set_point = values.get("set_point", "") or "check"
@@ -818,6 +865,14 @@ class ExperimentRunner:
                     checks = action.evaluate(sample, move["expected_command_id"], started=True)
             elif isinstance(action, (StepperModeAction, ActuatorAction)):
                 checks = action.evaluate(sample)
+                if isinstance(action, ActuatorAction) and action.device == "can_motor":
+                    before = result.get("request", {}).get("before_sequence")
+                    sequence = sample.get("stepper_can_motor_command_sequence")
+                    checks["command_accepted"] = {
+                        "ok": type(before) is int and type(sequence) is int and sequence != before,
+                        "before_sequence": before, "observed_sequence": sequence,
+                        "evidence": "firmware_command_counter",
+                    }
                 error = (actual_states or {}).get("stepper_command_error")
                 if error and action.source == "controllino":
                     result["checks"] = checks

@@ -12,9 +12,14 @@
 #include <SPI.h>
 #include <Ethernet.h>
 #include <math.h>
+#include <errno.h>
 #include <util/atomic.h>
 #include "wiring_controllino.h"
 #include "absolute_dro_avr.h"
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+#include "cubemars_can.h"
+CubeMarsCan cubeMars(PIN_CAN_CS);
+#endif
 
 // ---------- 1. Pin map and fixed configuration ----------
 constexpr long MIN_SPS = 25, MAX_SPS = 2520, DEFAULT_SPS = 1000;
@@ -45,7 +50,7 @@ long cruiseSps = DEFAULT_SPS;
 volatile unsigned int auxTicks = ESC_OFF_US * ESC_TICKS_PER_US;
 unsigned int escOnUs = 1200;
 bool escOn = false;
-volatile bool auxPulseEnabled = !AUX_IS_SERVO;
+volatile bool auxPulseEnabled = AUX_IS_ESC;
 unsigned int servoPulseUs = SERVO_DEFAULT_US;
 volatile byte servoReleaseFrames = 0;  // 50 Hz countdown, independent of network/USB.
 
@@ -189,11 +194,48 @@ void serviceMotion() {
   serviceSpeed();
 }
 
+void serviceRealtime() {
+  dro.poll();
+  serviceMotion();
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+  cubeMars.service(millis());
+#endif
+}
+
+// Print's usual multi-byte writes can starve CAN RX/expiry while serial TX fills
+// or HTTP output waits. Service between bytes; CubeMars builds also bound the
+// W5100 retransmit/close waits in setup()/serviceNetwork(). No SPI runs in ISRs.
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+class ServicedPrint : public Print {
+ public:
+  explicit ServicedPrint(Print &output) : output_(output) {}
+  ~ServicedPrint() { flush(); }
+  size_t write(uint8_t value) override {
+    if (&output_ == &Serial) {
+      serviceRealtime();
+      return output_.write(value);  // At most one UART byte of back-pressure.
+    }
+    buffer_[length_++] = value;
+    if (length_ == sizeof(buffer_)) flush();
+    return 1;
+  }
+  void flush() {
+    if (!length_) return;
+    serviceRealtime();
+    output_.write(buffer_, length_); length_ = 0;
+    serviceRealtime();
+  }
+ private:
+  Print &output_;
+  uint8_t buffer_[32], length_ = 0;
+};
+#endif
+
 // ---------- 4. V1 command parser and compact status contract ----------
 bool parseLong(char *text, long &value) {
   if (!text || !*text) return false;
-  char *end; value = strtol(text, &end, 10);
-  return end != text && !*end;
+  char *end; errno = 0; value = strtol(text, &end, 10);
+  return end != text && !*end && errno != ERANGE;
 }
 void reject(const char *why) { accepted = false; error = why; }
 bool claimable(byte source) {
@@ -210,9 +252,26 @@ void processCommand(char *line, byte source) {
   accepted = true; error = "none";
   if (!strcmp(line, "V1 E1")) {
     estop = true;
-    if (AUX_IS_SERVO) setServoPulse(0); else setEsc(false); setSolenoid4(false); halt(ESTOPPED, "emergency_stop"); return;
+    if (AUX_IS_SERVO) setServoPulse(0); else if (AUX_IS_ESC) setEsc(false);
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+    cubeMars.release("emergency_stop", false);
+#endif
+    setSolenoid4(false); halt(ESTOPPED, "emergency_stop"); return;
   }
-  if (!strcmp(line, "V1 X")) { halt(ABORTED, "operator_stop"); return; }
+  if (!strcmp(line, "V1 X")) {
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+    cubeMars.release("operator_stop", false);
+#endif
+    halt(ABORTED, "operator_stop"); return;
+  }
+  // Torque release is available to either transport, even while faulted/E-stopped.
+  if (!strcmp(line, "V1 C0")) {
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+    cubeMars.release("operator_stop"); return;
+#else
+    return reject("cubemars_unavailable");
+#endif
+  }
   if (!claimable(source)) return;
   if (!strcmp(line, "V1 E0")) {
     if (moving()) return reject("busy");
@@ -223,6 +282,49 @@ void processCommand(char *line, byte source) {
     bool on = line[6] == '1';
     if (on && estop) return reject("emergency_stop");
     setSolenoid4(on); return accept(source);
+  }
+  if (!strncmp(line, "V1 C", 4)) {
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+    long rpm, duration;
+    char *separator = strchr(line + 4, ',');
+    if (!separator) return reject("can_command_grammar");
+    *separator = '\0';
+    if (!parseLong(line + 4, rpm) || !parseLong(separator + 1, duration))
+      return reject("can_command_grammar");
+    if (estop) return reject("emergency_stop");
+    if (duration < long(CubeMars::MIN_DURATION_MS) || duration > long(CubeMars::MAX_DURATION_MS))
+      return reject("can_duration_range");
+    const char *failure = cubeMars.start(rpm, uint32_t(duration), millis());
+    if (failure) return reject(failure);
+    return accept(source);
+#else
+    return reject("cubemars_unavailable");
+#endif
+  }
+  // M0/M1 are existing stepper mode commands; the manual motor M has operands.
+  if ((!strncmp(line, "V1 M", 4) && strchr(line + 4, ',')) ||
+      !strncmp(line, "V1 U", 4) || !strncmp(line, "V1 K", 4)) {
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+    if (estop) return reject("emergency_stop");
+    long rpm = 0, ramp = 0, token;
+    const bool renew = line[3] == 'K', update = line[3] == 'U';
+    char *tokenText = line + 4;
+    if (!renew) {
+      char *first = strchr(line + 4, ',');
+      char *second = first ? strchr(first + 1, ',') : nullptr;
+      if (!second) return reject("can_command_grammar");
+      *first = *second = '\0'; tokenText = second + 1;
+      if (!parseLong(line + 4, rpm) || !parseLong(first + 1, ramp))
+        return reject("can_command_grammar");
+    }
+    if (!parseLong(tokenText, token) || token < 1) return reject("can_manual_token");
+    const char *failure = renew ? cubeMars.renew(uint32_t(token), millis())
+        : cubeMars.manual(rpm, ramp, uint32_t(token), millis(), update);
+    if (failure) return reject(failure);
+    return accept(source);
+#else
+    return reject("cubemars_unavailable");
+#endif
   }
   if (!strncmp(line, "V1 A", 4)) {
     if (!AUX_IS_SERVO) return reject("servo_unavailable");
@@ -241,13 +343,13 @@ void processCommand(char *line, byte source) {
     setServoPulse(pulse, (releaseMs + 19) / 20); return accept(source);
   }
   if (!strcmp(line, "V1 B0") || !strcmp(line, "V1 B1")) {
-    if (AUX_IS_SERVO) return reject("esc_unavailable");
+    if (!AUX_IS_ESC) return reject("esc_unavailable");
     bool on = line[4] == '1';
     if (on && estop) return reject("emergency_stop");
     setEsc(on); return accept(source);
   }
   if (!strncmp(line, "V1 P", 4)) {
-    if (AUX_IS_SERVO) return reject("esc_unavailable");
+    if (!AUX_IS_ESC) return reject("esc_unavailable");
     long value;
     if (!parseLong(line + 4, value) || value < ESC_OFF_US || value > ESC_MAX_US)
       return reject("pulse_range");
@@ -297,7 +399,12 @@ void processCommand(char *line, byte source) {
   reject("unknown_command");
 }
 
-void writeStatus(Print &out, bool ack = false) {
+void writeStatus(Print &destination, bool ack = false) {
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+  ServicedPrint out(destination);
+#else
+  Print &out = destination;
+#endif
   if (ack) {
     out.print(F("{\"v\":1,\"t\":\"a\",\"ok\":")); out.print(accepted);
     out.print(F(",\"e\":\"")); out.print(error); out.println(F("\"}")); return;
@@ -315,7 +422,7 @@ void writeStatus(Print &out, bool ack = false) {
   out.print(F(",\"m\":")); out.print(mode);
   out.print(F(",\"h\":0,\"a\":1,\"e\":")); out.print(estop);
   out.print(F(",\"fw\":\"")); out.print(FIRMWARE_VERSION);
-  out.print(F("\",\"aux\":\"")); out.print(AUX_IS_SERVO ? F("servo") : F("esc"));
+  out.print(F("\",\"aux\":\"")); out.print(AUX_IS_CUBEMARS ? F("cubemars") : AUX_IS_SERVO ? F("servo") : F("esc"));
   out.print(F("\",\"apin\":")); out.print(PIN_AUX);
   if (AUX_IS_SERVO) {
     out.print(F(",\"sv\":")); out.print(auxPulseEnabled);
@@ -323,9 +430,12 @@ void writeStatus(Print &out, bool ack = false) {
     out.print(F(",\"smin\":")); out.print(SERVO_MIN_US);
     out.print(F(",\"smax\":")); out.print(SERVO_MAX_US);
     out.print(F(",\"srel\":1,\"sr\":")); out.print(servoReleaseFrames);
-  } else {
+  } else if (AUX_IS_ESC) {
   out.print(F(",\"bo\":")); out.print(escOn); out.print(F(",\"bp\":")); out.print(escOnUs);
   }
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+  cubeMars.writeStatus(out, millis());
+#endif
   out.print(F(",\"mv\":")); out.print(moving()); out.print(F(",\"st\":")); out.print(state);
   out.print(F(",\"p\":")); out.print(position()); out.print(F(",\"g\":")); out.print(target);
   out.print(F(",\"c\":")); out.print(commandId); out.print(F(",\"o\":")); out.print(owner);
@@ -339,6 +449,7 @@ byte usbLength = 0;
 
 void serviceUsb() {
   while (Serial.available()) {
+    serviceRealtime();
     char c = Serial.read();
     if (c == '\r') continue;
     if (c == '\n') {
@@ -368,8 +479,7 @@ void serviceNetwork() {
   char request[112] = {}; byte length = 0;
   unsigned long deadline = millis() + 100;
   while (client.connected() && long(deadline - millis()) > 0) {
-    dro.poll();
-    serviceMotion();
+    serviceRealtime();
     if (!client.available()) continue;
     char c = client.read();
     if (c == '\n') break;
@@ -380,7 +490,14 @@ void serviceNetwork() {
     value += 15; char *space = strchr(value, ' '); if (space) *space = 0;
     decodeUrl(value); processCommand(value, OWNER_NETWORK);
   }
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+  ServicedPrint response(client);
+  response.println(F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n"));
+  response.flush();
+  client.setConnectionTimeout(5);
+#else
   client.println(F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n"));
+#endif
   writeStatus(client, value != nullptr); delay(1); client.stop();
 }
 
@@ -389,26 +506,40 @@ void setup() {
   digitalWrite(PIN_ENABLE, DRIVER_DISABLED); pinMode(PIN_ENABLE, OUTPUT);
   digitalWrite(PIN_STEP, STEP_IDLE); digitalWrite(PIN_DIR, DIR_REVERSE);
   pinMode(PIN_STEP, OUTPUT); pinMode(PIN_DIR, OUTPUT);
-  digitalWrite(PIN_AUX, LOW); pinMode(PIN_AUX, OUTPUT);
+  digitalWrite(PIN_AUX, AUX_IS_CUBEMARS ? HIGH : LOW); pinMode(PIN_AUX, OUTPUT);
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+  digitalWrite(PIN_RTC_CS, LOW); pinMode(PIN_RTC_CS, OUTPUT);
+  digitalWrite(PIN_SPI_SS_ETHERNET_LIB, HIGH); pinMode(PIN_SPI_SS_ETHERNET_LIB, OUTPUT);
+#endif
 
   TCCR1A = 0; TCCR1B = _BV(WGM12) | _BV(CS11) | _BV(CS10);
   TIMSK1 &= ~_BV(OCIE1A);
-  TCCR3A = _BV(WGM31); TCCR3B = _BV(WGM33) | _BV(WGM32) | _BV(CS31);
-  ICR3 = 20000U * ESC_TICKS_PER_US - 1; OCR3A = auxTicks;
-  TIMSK3 = _BV(TOIE3) | _BV(OCIE3A);
+  if (!AUX_IS_CUBEMARS) {
+    TCCR3A = _BV(WGM31); TCCR3B = _BV(WGM33) | _BV(WGM32) | _BV(CS31);
+    ICR3 = 20000U * ESC_TICKS_PER_US - 1; OCR3A = auxTicks;
+    TIMSK3 = _BV(TOIE3) | _BV(OCIE3A);
+  }
 
   dro.begin(PIN_DRO_CLOCK, PIN_DRO_DATA, onDroClock);
-  Serial.begin(9600);
+  Serial.begin(AUX_IS_CUBEMARS ? 115200 : 9600);
   Ethernet.begin(mac, ip, dns, gateway, subnet); server.begin();
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+  // Bound the library's synchronous TCP send retries (LAN controller traffic).
+  Ethernet.setRetransmissionTimeout(5); Ethernet.setRetransmissionCount(1);
+  cubeMars.begin();
+#endif
   Serial.println(F("CONTROLLINO motion control ready: stopped and disabled."));
 }
 
 void loop() {
-  dro.poll();
-  serviceUsb(); serviceNetwork(); serviceMotion();
+  serviceRealtime();
+  serviceUsb(); serviceNetwork(); serviceRealtime();
   if (owner != OWNER_NONE && !moving() && !localCommand &&
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+      !cubeMars.run.active &&
+#endif
       millis() - ownerAtMs >= OWNER_RELEASE_MS) owner = OWNER_NONE;
-  unsigned long interval = moving() ? 100 : 1000;
+  unsigned long interval = AUX_IS_CUBEMARS || moving() ? 100 : 1000;
   if (statusPending || millis() - lastStatusMs >= interval) {
     writeStatus(Serial); lastStatusMs = millis(); statusPending = false;
   }

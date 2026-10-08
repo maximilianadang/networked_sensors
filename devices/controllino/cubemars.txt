@@ -1,0 +1,131 @@
+CubeMars AK80-6 KV100: third Controllino auxiliary variant
+
+Build and architecture
+  Target: controllino-ak80-6 in tools/firmware_upload.py or its notebook.
+  MCU: CONTROLLINO MAXI Automation, not the plain MAXI board profile.
+  Library: autowp-mcp2515@1.3.1 (only this variant needs it).
+  USB dashboard connection: --stepper-baud 115200. Other variants stay at 9600.
+  The existing controllino (MS62) and controllino-esc targets remain available.
+  Select exactly one auxiliary backend per build; there is one shared sketch.
+
+  cubemars_protocol.h owns CAN framing, feedback decoding, ramping, and run/lease policy.
+  cubemars_can.h owns MCP2515 I/O and the CAN telemetry snapshot.
+  Existing USB/Ethernet transport, command receipts, sampling, and CSV execution
+  are reused. can-motor.js adds a capability-selected panel using shared actions.
+  Firmware advertises speed, ramp, lease, duration, and feedback-age limits; the host and UI
+  consume them. Offline CSV lint checks protocol bounds, then dispatch checks
+  the installed firmware's limits. No duplicate firmware sketch or transport.
+
+Connection requirements
+  Seeed CAN-BUS Shield V2.0: 5 V supply, ground, 16 MHz MCP2515, 500 kbps CAN.
+  The motor's 500 kbps setting was written over UART and verified after a power
+  cycle on 2026-10-07; ID 104 and all other configuration bytes stayed unchanged.
+  CubeMars::BITRATE controls both MCP2515 configuration and reported telemetry.
+  HCDC D034 is a passive terminal breakout, not another microcontroller.
+  Controllino SPI: MISO=50, MOSI=51, SCK=52; use the logic-level headers.
+  CAN CS defaults to Arduino pin 9 (CONTROLLINO_CAN_CS). Verify the shield's
+  actual CS solder routing and the physical Controllino header landing first.
+  The shield's default SPI routing uses ICSP. An unpopulated HCDC ICSP header
+  does not connect those signals to its UNO 11/12/13 screw terminals.
+  Use HCDC green 5V/GND/9 for power, ground, and CS through the long stacked
+  UNO headers. Use the shield's blue SPI_A socket for MOSI/MISO/SCK directly.
+  Do not supply power through blue SPI_A VCC: the official V2.0 PCB leaves that
+  ICSP pad unconnected to the 5V net. The UNO power-header 5V pin feeds the board.
+  Controller endpoints (front view, paired rows counted from the top):
+    X1 row1 left=5V, right=GND; row11 left=MOSI51, right=MISO50;
+    X1 row12 left=SCK52; X2 row7 left=Arduino9/DO7 (CS).
+  Reserve the corresponding industrial DO7 output; it also follows CS.
+  CAN H connects to motor H; CAN L to motor L. Verify termination at the two
+  bus ends. Motor power remains separate from the shield's 5 V logic supply.
+  Never connect industrial 24 V outputs to the shield's logic pins.
+  Ethernet shares SPI on CS70; RTC CS72 is active HIGH and held LOW (inactive).
+  Stepper 3/5/7, DRO 21/6, and solenoid4 27 remain assigned as before.
+  CAN INT is not required; the firmware polls. Timer3 PWM is unused in this build.
+
+Initial operation
+  Motor ID defaults to 104, confirmed during earlier UART inspection. UART
+  communication does not verify CAN wiring, bitrate, or periodic CAN feedback.
+  Existing servo firmware supports speed commands; reflashing is not required
+  merely to change from UART configuration to CAN operation.
+  Verify valid function 0x29 feedback before motion. The firmware rejects runs
+  without it; startup frames 0x09/0x2C never count as live speed feedback.
+  Commissioned 2026-10-07 with production firmware 1.3.3 at 500 kbps: live
+  0x2968 feedback and one unloaded 1 output-RPM / 1000 ms run were verified.
+  Reported speed during that brief run was 0.48..1.19 RPM; timed expiry was
+  observed before an additional release, followed by 0 RPM with no motor fault
+  or CAN errors. This is a short commissioning check, not loaded speed tuning.
+  Defaults: +/-400 output RPM, 20..5000 ms per timed CSV/API request, 500 ms
+  maximum feedback age. Manual runs use a renewable lease instead of a duration.
+  Output RPM x 126 = ERPM (21 pole pairs and 6:1 reduction).
+  Speed uses extended CAN ID 0x368, four signed big-endian ERPM bytes.
+  V1 C5,1000 requests 5 output RPM for 1 second. V1 C0 requests torque release.
+  API: POST /api/stepper/motor/can with {"rpm":5,"duration_ms":1000}; release
+  with {"rpm":0}.
+
+Manual dashboard control (firmware 1.4.0)
+  Target speed replaces the manual duration field. Start begins a run;
+  Apply speed changes its target without restarting the ramp.
+  Dashboard acceleration is fixed at 80 output RPM/s (0 to 400 RPM in 5 s),
+  applied by the Controllino from current measured speed on Start and the
+  current ramped setpoint on Apply. Feedback shows target,
+  ramped command and measured speed separately. Speed remains bounded to +/-400.
+  Stop / release immediately sends zero current; it bypasses the ramp and coasts.
+  This page must stay visible and connected. Browser renewals keep a 1500 ms
+  firmware lease alive; leaving the tab requests release and stops renewing.
+  Fault, feedback loss, controller/motor restart, or lease expiry requires an
+  explicit new Start. Neither later feedback nor a delayed renewal starts motion.
+  UI target defaults to the requested 400 RPM. Motor-side settings remain unchanged.
+  The ramp is a setpoint limit; actual speed depends on voltage/load and feedback.
+
+  Same API endpoint: {"action":"start","rpm":5,"ramp_rpm_s":80,"token":123}
+  updates use action "update" with the same token; renew uses only action/token.
+  Tokens are positive signed 31-bit integers, newly chosen per explicit Start.
+  Firmware: V1 M400,80,123 starts; V1 U200,80,123 updates; V1 K123 renews.
+  U/K only operate on an active matching token. M rejects an already-active run.
+  V1 C0 is always the release command. The timed C command remains for CSV.
+  All modes reuse the same feedback, stop policy, CAN sender and host transport.
+  1.4.0 uploaded and flash-verified on 2026-10-07. Powered dashboard feedback
+  and a dashboard torque-release command were confirmed. A subsequent unloaded
+  20 output-RPM run for 8 seconds reached its target using the manual API with
+  renewals; CAN error flags and TX/RX error counters stayed zero, motor fault
+  stayed zero, and release left the motor stopped. Sustained 400 RPM operation
+  remains unverified: the user reported the supply entering CC during their
+  higher-speed attempt. The current-limit setting has not been confirmed.
+  Current commissioning dashboard: http://127.0.0.1:8765/ (other sensor sources off).
+  Launch: python dashboard-lean.py --host 127.0.0.1 --port 8765 \
+    --esp32-source off --dxmr90-source off --ed593-source off \
+    --stepper-source controllino-usb --stepper-port /dev/cu.usbmodem1101 \
+    --stepper-baud 115200
+  CSV example: examples/cubemars.csv. Acceptance is separate from actual motion;
+  rows advance on acceptance, not speed attainment or completion of the run.
+
+Diagnostics update (1.4.1 compiled, not uploaded; installed firmware is 1.4.0)
+  The host retains the shield cdiag registers in telemetry/history, including
+  the fast/slow SPI reads. The dashboard displays the reason for a stopped run.
+  Firmware 1.4.1 adds a first-stop latch (reason, flags, TX/RX error counters,
+  time, command sequence, and service gap), captured before overflow clearing.
+  Recovery and idle faults cannot overwrite that event; a newly accepted run
+  clears it. Stop protections, SPI clock, and CAN bitrate remain unchanged.
+  On 2026-10-07 the user observed the shared supply entering CC as the motor
+  stopped. Correct the supply current limit and verify sustained operation;
+  a historical can_bus_error alone cannot establish which event stopped a run.
+  Offline validation: 144 Python/native tests and mocked browser lifecycle tests.
+  All three Controllino variants compiled at 1.4.0; the CAN variant also compiled
+  with the 1.4.1 diagnostics. Physical results above apply to installed 1.4.0.
+
+Stops and commissioning
+  The observed boot marker 0x2C00 / FA FB FC FD is admitted even before the
+  motor applies ID 104. It cancels any run; node-0 feedback cannot refresh it.
+  Expiry, stale feedback, motor fault, restart, E-stop, and operator stop end
+  the run. Recovery never resumes it automatically. Release remains available
+  during faults/E-stop. Zero current releases torque and permits coasting.
+  Software release cannot stop a motor across a broken CAN connection. Motor-
+  side communication-loss behavior must be verified before powered runs.
+  Upload with motor power off; upload resets the controller. Then verify idle
+  CAN feedback and the physical pin routing before a short unloaded run.
+  Unit tests and compilation cannot establish actual wiring, motor firmware
+  compatibility, CAN acknowledgement, communication-loss behavior, or motion.
+
+Protocol source
+  CubeMars AK driver manual V1.0.17, sections 5.1.2, 5.1.4, 5.2.1:
+  https://www.cubemars.com/images/file/20250522/1747899365958473.pdf

@@ -1,0 +1,3 @@
+action,source,device,max_age_ms,health,timeout_s,set_point,rpm,duration_s
+telemetry_health,controllino,can_motor,500,ok,5,,,
+requested_state,controllino,can_motor,500,ok,5,speed,10,1

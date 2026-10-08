@@ -159,6 +159,106 @@ class SourceAdapter(Protocol):
         """Return a fresh reading if this source is due, otherwise None."""
 
 
+CUBEMARS_ERPM_PER_OUTPUT_RPM = 126  # AK80-6: 21 pole pairs × 6:1 reduction.
+CUBEMARS_PROTOCOL_MAX_RPM = 100000 // CUBEMARS_ERPM_PER_OUTPUT_RPM
+CUBEMARS_PROTOCOL_MAX_DURATION_MS = 0x7FFFFFFF  # Signed millis deadline horizon.
+CUBEMARS_DIAGNOSTIC_RANGES = {
+    "ef": (-1, 255), "tec": (-1, 255), "rec": (-1, 255),
+    "rxfail": (0, 0xFFFFFFFF), "rx": (0, 0xFFFFFFFF),
+    "id": (-1, 0x1FFFFFFF), "ext": (0, 1), "rtr": (0, 1), "dlc": (0, 255),
+    **dict.fromkeys(("le", "ls", "lt", "lr", "lst", "lsr", "se", "ss", "st", "srec", "sst", "ssrec"), (0, 255)),
+    **dict.fromkeys(("let", "ec", "sms", "sq", "sc", "mg", "sg", "spi"), (0, 0xFFFFFFFF)),
+}
+CUBEMARS_DIAGNOSTIC_HEX_LENGTHS = {"reg": (0, 30), "slow": (0, 16), "data": tuple(range(0, 17, 2))}
+CUBEMARS_DIAGNOSTIC_KEYS = tuple(CUBEMARS_DIAGNOSTIC_RANGES) + tuple(CUBEMARS_DIAGNOSTIC_HEX_LENGTHS) + ("sr",)
+
+
+def decode_cubemars_diagnostics(diagnostics: object) -> dict[str, object]:
+    """Preserve optional firmware evidence without changing motor control policy."""
+    if not isinstance(diagnostics, dict):
+        raise ValueError("CAN motor diagnostics must be an object")
+    for key, (lo, hi) in CUBEMARS_DIAGNOSTIC_RANGES.items():
+        if key in diagnostics and (type(diagnostics[key]) is not int or not lo <= diagnostics[key] <= hi):
+            raise ValueError(f"Invalid CAN motor diagnostic {key}")
+    for key, lengths in CUBEMARS_DIAGNOSTIC_HEX_LENGTHS.items():
+        if key in diagnostics:
+            value = diagnostics[key]
+            if (not isinstance(value, str) or len(value) not in lengths
+                    or any(char not in "0123456789abcdefABCDEF" for char in value)):
+                raise ValueError(f"Invalid CAN motor diagnostic {key}")
+    if "sr" in diagnostics and (not isinstance(diagnostics["sr"], str) or len(diagnostics["sr"]) > 64):
+        raise ValueError("Invalid CAN motor diagnostic sr")
+    return {"stepper_can_motor_diag_" + key: diagnostics.get(key) for key in CUBEMARS_DIAGNOSTIC_KEYS}
+
+
+def validate_cubemars_command(rpm: object, duration_ms: object = None, *,
+                              max_rpm: int = CUBEMARS_PROTOCOL_MAX_RPM,
+                              max_duration_ms: int = CUBEMARS_PROTOCOL_MAX_DURATION_MS) -> tuple[int, int]:
+    """Bound a single bench run. Zero always means torque release/coast."""
+    if type(rpm) is not int or not -max_rpm <= rpm <= max_rpm:
+        raise ValueError(f"rpm must be an integer from {-max_rpm} through {max_rpm}")
+    if rpm == 0:
+        return 0, 0  # Release does not depend on a duration operand.
+    if type(duration_ms) is not int or not 20 <= duration_ms <= max_duration_ms:
+        raise ValueError(f"duration_ms must be an integer from 20 through {max_duration_ms}")
+    return rpm, duration_ms
+
+
+def validate_cubemars_manual(action: object, token: object, rpm: object = None,
+                             ramp_rpm_s: object = None, *, max_rpm: int,
+                             max_ramp_rpm_s: int) -> tuple[int | None, int | None]:
+    """Validate explicit manual intent; renewal never supplies a new target."""
+    if action not in ("start", "update", "renew"):
+        raise ValueError("Unknown CAN motor action")
+    if type(token) is not int or not 1 <= token <= 0x7FFFFFFF:
+        raise ValueError("token must be an integer from 1 through 2147483647")
+    if action == "renew":
+        if rpm is not None or ramp_rpm_s is not None:
+            raise ValueError("renew accepts only action and token")
+        return None, None
+    if type(rpm) is not int or not rpm or not -max_rpm <= rpm <= max_rpm:
+        raise ValueError(f"rpm must be a nonzero integer from {-max_rpm} through {max_rpm}")
+    if type(ramp_rpm_s) is not int or not 1 <= ramp_rpm_s <= max_ramp_rpm_s:
+        raise ValueError(f"ramp_rpm_s must be an integer from 1 through {max_ramp_rpm_s}")
+    return rpm, ramp_rpm_s
+
+
+def require_cubemars_manual(values: Mapping[str, object], action: str, token: int) -> None:
+    if values.get("stepper_can_motor_manual_capable") is not True:
+        raise RuntimeError("Connected firmware does not support manual CAN motor control")
+    require_cubemars_run(values, 1)
+    if action == "start" and values.get("stepper_can_motor_active") is True:
+        raise RuntimeError("Release the active CAN motor command before starting a new session")
+    if action != "start" and (values.get("stepper_can_motor_active") is not True
+                              or values.get("stepper_can_motor_manual_token") != token):
+        raise RuntimeError("CAN motor manual session is inactive or belongs to another token")
+
+
+def cubemars_feedback_fresh(values: Mapping[str, object], source_age_ms: object = 0) -> bool:
+    age = values.get("stepper_can_motor_feedback_age_ms")
+    stale_ms = values.get("stepper_can_motor_stale_ms")
+    return (type(age) in (int, float) and type(source_age_ms) in (int, float)
+            and type(stale_ms) in (int, float) and math.isfinite(age)
+            and math.isfinite(source_age_ms) and math.isfinite(stale_ms)
+            and age >= 0 and source_age_ms >= 0 and age + source_age_ms <= stale_ms)
+
+
+def require_cubemars_run(values: Mapping[str, object], rpm: int) -> None:
+    if values.get("stepper_can_motor_capable") is not True:
+        raise RuntimeError("Connected firmware does not support the CAN motor")
+    if not rpm:
+        return  # Release remains available through stale feedback, faults and E-STOP.
+    if values.get("stepper_estop_latched") is True:
+        raise RuntimeError("Reset E-STOP before starting the CAN motor")
+    if values.get("stepper_can_motor_fault") != 0:
+        raise RuntimeError("Clear the CAN motor fault before starting")
+    if (values.get("stepper_can_motor_ready") is not True
+            or not cubemars_feedback_fresh(values, values.get("stepper_age_ms", 0))):
+        raise RuntimeError("CAN motor requires initialized CAN and fresh motor feedback")
+    if values.get("stepper_connected") is False or values.get("stepper_transport_error"):
+        raise RuntimeError("CAN motor controller is unavailable")
+
+
 def validate_servo_settings(values: object) -> dict[str, object]:
     """MS62 nominal clockwise mapping; never silently clip a requested angle."""
     if not isinstance(values, dict):
@@ -270,7 +370,8 @@ class DeviceControls:
             lambda p: p.get("stepper_estop_latched") is True and p.get("stepper_moving") is False
             and all(p.get(f"stepper_{device}_capable") is not True or p.get(f"stepper_{state}") is False
                     for device, state in (("brushless_motor", "brushless_motor_on"),
-                                          ("solenoid4", "solenoid4_on"), ("servo", "servo_enabled"))),
+                                          ("solenoid4", "solenoid4_on"), ("servo", "servo_enabled"),
+                                          ("can_motor", "can_motor_active"))),
             confirmed=True,
         )
 
@@ -377,6 +478,57 @@ class DeviceControls:
             stepper, current, "brushless pulse width",
             lambda p: p.get("stepper_brushless_motor_setpoint_us") == requested, confirmed=True,
         )
+
+    def cubemars(self, current: dict[str, object], values: dict[str, object]) -> CommandReceipt:
+        if "action" in values:
+            return self._cubemars_manual(current, values)
+        stepper = self.require_stepper("set_cubemars_speed", error="Stepper source does not support the CAN motor")
+        require_cubemars_run(current, 0)
+        rpm, duration_ms = validate_cubemars_command(
+            values.get("rpm"), values.get("duration_ms"),
+            max_rpm=current["stepper_can_motor_max_rpm"],
+            max_duration_ms=current["stepper_can_motor_max_duration_ms"])
+        require_cubemars_run(current, rpm)
+        before = current.get("stepper_can_motor_command_sequence")
+        stepper.set_cubemars_speed(rpm, duration_ms)
+        return self._receipt(
+            stepper, current, "CAN motor requested state",
+            lambda p: p.get("stepper_can_motor_command_sequence") != before
+            and p.get("stepper_can_motor_target_rpm") == rpm
+            and (rpm != 0 or p.get("stepper_can_motor_active") is False),
+            always=True, confirmed=True, confirmation="requested_state",
+            requested_rpm=rpm, duration_ms=duration_ms,
+        )
+
+    def _cubemars_manual(self, current: dict[str, object], values: dict[str, object]) -> CommandReceipt:
+        action, token = values.get("action"), values.get("token")
+        fields = {"action", "token"} if action == "renew" else {"action", "token", "rpm", "ramp_rpm_s"}
+        if set(values) != fields:
+            raise ValueError("Manual CAN motor request has missing or unexpected operands")
+        stepper = self.require_stepper("set_cubemars_manual", error="Stepper source does not support manual CAN control")
+        rpm, ramp = validate_cubemars_manual(
+            action, token, values.get("rpm"), values.get("ramp_rpm_s"),
+            max_rpm=current.get("stepper_can_motor_max_rpm") or CUBEMARS_PROTOCOL_MAX_RPM,
+            max_ramp_rpm_s=current.get("stepper_can_motor_max_ramp_rpm_s") or CUBEMARS_PROTOCOL_MAX_RPM)
+        require_cubemars_manual(current, action, token)
+        before = current.get("stepper_can_motor_command_sequence")
+        stepper.set_cubemars_manual(action, token, rpm, ramp)
+
+        def accepted(status: dict[str, object]) -> bool:
+            sequence = status.get("stepper_can_motor_command_sequence")
+            return (type(sequence) is int and type(before) is int
+                    and 0 < ((sequence - before) & 0xFFFFFFFF) < 0x80000000
+                    and status.get("stepper_can_motor_active") is True
+                    and status.get("stepper_can_motor_manual_token") == token
+                    and (action == "renew" or (
+                        status.get("stepper_can_motor_target_rpm") == rpm
+                        and status.get("stepper_can_motor_ramp_rpm_s") == ramp)))
+
+        result = {"action": action, "token": token}
+        if action != "renew":
+            result.update(requested_rpm=rpm, ramp_rpm_s=ramp)
+        return self._receipt(stepper, current, f"CAN motor manual {action}", accepted,
+                             always=True, confirmed=True, confirmation="requested_state", **result)
 
     def servo(
         self, current: dict[str, object], values: dict[str, object], settings: dict[str, object],
@@ -2239,11 +2391,22 @@ class ControllinoProtocol:
         "stepper_servo_capable", "stepper_servo_enabled", "stepper_servo_pulse_us",
         "stepper_servo_min_us", "stepper_servo_max_us",
         "stepper_servo_release_capable", "stepper_servo_releasing",
-    )
+        "stepper_can_motor_capable", "stepper_can_motor_ready", "stepper_can_motor_active",
+        "stepper_can_motor_target_rpm", "stepper_can_motor_rpm", "stepper_can_motor_current_a",
+        "stepper_can_motor_temperature_c", "stepper_can_motor_fault", "stepper_can_motor_feedback_age_ms",
+        "stepper_can_motor_error", "stepper_can_motor_remaining_ms", "stepper_can_motor_id",
+        "stepper_can_motor_bitrate", "stepper_can_motor_max_rpm", "stepper_can_motor_max_duration_ms",
+        "stepper_can_motor_stale_ms", "stepper_can_motor_command_sequence",
+        "stepper_can_motor_manual_capable", "stepper_can_motor_manual_token",
+        "stepper_can_motor_lease_ms", "stepper_can_motor_ramp_rpm_s",
+        "stepper_can_motor_applied_rpm", "stepper_can_motor_max_ramp_rpm_s",
+        "stepper_can_motor_default_ramp_rpm_s",
+    ) + tuple("stepper_can_motor_diag_" + key for key in CUBEMARS_DIAGNOSTIC_KEYS)
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
         self._synthetic_sequence = 0
+        self._cubemars_status_at: float | None = None
 
     def decode_status_line(
         self, body: str
@@ -2259,7 +2422,7 @@ class ControllinoProtocol:
         kind = payload.get("aux", "esc" if "bo" in payload else None)
         if version is not None and (not isinstance(version, str) or not version or len(version) > 32):
             raise ValueError("Controllino firmware version must be a short string")
-        if kind not in (None, "esc", "servo"):
+        if kind not in (None, "esc", "servo", "cubemars"):
             raise ValueError("Unknown Controllino auxiliary capability")
         servo = kind == "servo"
         if servo:
@@ -2276,6 +2439,39 @@ class ControllinoProtocol:
             if (type(payload.get("srel", 0)) is not int or payload.get("srel", 0) not in (0, 1)
                     or type(payload.get("sr", 0)) is not int or not 0 <= payload.get("sr", 0) <= 250):
                 raise ValueError("Invalid servo release telemetry")
+
+        can_motor = kind == "cubemars"
+        manual_can = False
+        if can_motor:
+            if not version or any(key in payload for key in ("bo", "bp", "sv", "sp")):
+                raise ValueError("CAN motor firmware requires a version and no ESC/servo fields")
+            ranges = {"apin": (0, 255), "cb": (0, 1), "cid": (0, 255), "cbr": (1, 1000000),
+                      "cr": (-CUBEMARS_PROTOCOL_MAX_RPM, CUBEMARS_PROTOCOL_MAX_RPM), "ce": (0, 1),
+                      "ca": (-1, 0xFFFFFFFF), "cv": (-0x80000000, 0x7FFFFFFF),
+                      "ci": (-32768, 32767), "ct": (-128, 127), "cf": (0, 255),
+                      "cd": (0, CUBEMARS_PROTOCOL_MAX_DURATION_MS), "cq": (0, 0xFFFFFFFF),
+                      "cmax": (1, CUBEMARS_PROTOCOL_MAX_RPM), "cdmax": (20, CUBEMARS_PROTOCOL_MAX_DURATION_MS),
+                      "cstale": (1, 0xFFFFFFFF)}
+            manual_ranges = {"cm": (0, 0x7FFFFFFF), "cleasems": (1, 0x7FFFFFFF),
+                             "cramp": (0, CUBEMARS_PROTOCOL_MAX_RPM), "cap": (-100000, 100000),
+                             "crmax": (1, CUBEMARS_PROTOCOL_MAX_RPM),
+                             "crdefault": (1, CUBEMARS_PROTOCOL_MAX_RPM)}
+            manual_can = any(key in payload for key in manual_ranges)
+            if manual_can:
+                ranges.update(manual_ranges)
+            if any(type(payload.get(key)) is not int or not lo <= payload[key] <= hi
+                   for key, (lo, hi) in ranges.items()):
+                raise ValueError("Invalid CAN motor telemetry integer or range")
+            if (not isinstance(payload.get("cx"), str) or len(payload["cx"]) > 64
+                    or abs(payload["cr"]) > payload["cmax"]
+                    or payload["cd"] > (payload["cleasems"] if manual_can and payload["cm"] else payload["cdmax"])
+                    or (payload.get("e") == 1 and payload["ce"])):
+                raise ValueError("Invalid CAN motor state telemetry")
+            if manual_can and (payload["cramp"] > payload["crmax"]
+                    or payload["crdefault"] > payload["crmax"]
+                    or (payload["cm"] and (not payload["ce"] or not payload["cr"] or not payload["cramp"]))
+                    or (not payload["cm"] and payload["cramp"])):
+                raise ValueError("Invalid manual CAN motor state telemetry")
 
         solenoid4 = payload.get("sol4")
         if "sol4" in payload and (type(solenoid4) is not int or solenoid4 not in (0, 1)):
@@ -2324,6 +2520,37 @@ class ControllinoProtocol:
                 ),
             }
         )
+        values.update({
+            "stepper_can_motor_capable": can_motor,
+            "stepper_can_motor_ready": (can_motor and payload["cb"] == 1
+                                       and 0 <= payload["ca"] <= payload["cstale"]
+                                       and payload["cf"] == 0 and not values["stepper_estop_latched"]),
+            "stepper_can_motor_active": bool(payload["ce"]) if can_motor else False,
+            "stepper_can_motor_target_rpm": payload.get("cr") if can_motor else None,
+            "stepper_can_motor_rpm": (payload["cv"] / CUBEMARS_ERPM_PER_OUTPUT_RPM
+                                      if can_motor and payload["ca"] >= 0 else None),
+            "stepper_can_motor_current_a": payload["ci"] / 100 if can_motor and payload["ca"] >= 0 else None,
+            "stepper_can_motor_temperature_c": payload.get("ct") if can_motor and payload["ca"] >= 0 else None,
+            "stepper_can_motor_fault": payload.get("cf") if can_motor else None,
+            "stepper_can_motor_feedback_age_ms": payload.get("ca") if can_motor else None,
+            "stepper_can_motor_error": payload.get("cx") if can_motor else None,
+            "stepper_can_motor_remaining_ms": payload.get("cd") if can_motor else None,
+            "stepper_can_motor_id": payload.get("cid") if can_motor else None,
+            "stepper_can_motor_bitrate": payload.get("cbr") if can_motor else None,
+            "stepper_can_motor_max_rpm": payload.get("cmax") if can_motor else None,
+            "stepper_can_motor_max_duration_ms": payload.get("cdmax") if can_motor else None,
+            "stepper_can_motor_stale_ms": payload.get("cstale") if can_motor else None,
+            "stepper_can_motor_command_sequence": payload.get("cq") if can_motor else None,
+            "stepper_can_motor_manual_capable": manual_can,
+            "stepper_can_motor_manual_token": payload.get("cm") if manual_can else None,
+            "stepper_can_motor_lease_ms": payload.get("cleasems") if manual_can else None,
+            "stepper_can_motor_ramp_rpm_s": payload.get("cramp") if manual_can else None,
+            "stepper_can_motor_applied_rpm": payload["cap"] / CUBEMARS_ERPM_PER_OUTPUT_RPM if manual_can else None,
+            "stepper_can_motor_max_ramp_rpm_s": payload.get("crmax") if manual_can else None,
+            "stepper_can_motor_default_ramp_rpm_s": payload.get("crdefault") if manual_can else None,
+        })
+        values.update(decode_cubemars_diagnostics(payload.get("cdiag", {}) if can_motor else {}))
+        self._cubemars_status_at = time.monotonic() if can_motor else None
         for pin, side in absent_limits:
             values[f"stepper_{pin}_raw"] = None
             values[f"stepper_{side}_limit_active"] = None
@@ -2338,6 +2565,40 @@ class ControllinoProtocol:
         # Signed commands supply direction authority; preserve any limits
         # reported by newer firmware, even though this installation lacks them.
         self._validate_directional_limits(values, delta_steps)
+
+    def status(self) -> Mapping[str, float | int | bool | str | None]:
+        values = dict(super().status())
+        if values.get("stepper_can_motor_capable"):
+            age = ((time.monotonic() - self._cubemars_status_at) * 1000
+                   if self._cubemars_status_at is not None else None)
+            values["stepper_can_motor_ready"] = (values.get("stepper_can_motor_ready") is True
+                                                 and cubemars_feedback_fresh(values, age)
+                                                 and not values.get("stepper_transport_error"))
+        return values
+
+    def set_cubemars_speed(self, rpm: object, duration_ms: object = None) -> None:
+        self._require_connected()
+        values = self.status()
+        require_cubemars_run(values, 0)
+        rpm, duration_ms = validate_cubemars_command(
+            rpm, duration_ms,
+            max_rpm=values["stepper_can_motor_max_rpm"],
+            max_duration_ms=values["stepper_can_motor_max_duration_ms"])
+        require_cubemars_run(values, rpm)
+        operand = f"{rpm},{duration_ms}" if rpm else "0"
+        self._write_command(f"V1 C{operand}\n".encode("ascii"), "CAN motor requested state")
+
+    def set_cubemars_manual(self, action: str, token: object, rpm: object = None,
+                            ramp_rpm_s: object = None) -> None:
+        self._require_connected()
+        values = self.status()
+        rpm, ramp = validate_cubemars_manual(
+            action, token, rpm, ramp_rpm_s,
+            max_rpm=values.get("stepper_can_motor_max_rpm") or CUBEMARS_PROTOCOL_MAX_RPM,
+            max_ramp_rpm_s=values.get("stepper_can_motor_max_ramp_rpm_s") or CUBEMARS_PROTOCOL_MAX_RPM)
+        require_cubemars_manual(values, action, token)
+        command = f"K{token}" if action == "renew" else f"{'M' if action == 'start' else 'U'}{rpm},{ramp},{token}"
+        self._write_command(f"V1 {command}\n".encode("ascii"), f"CAN motor manual {action}")
 
     def set_servo_pulse(self, pulse_us: object, release_ms: int = 0) -> None:
         values = self._require_connected()

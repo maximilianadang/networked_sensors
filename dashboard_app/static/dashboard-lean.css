@@ -717,10 +717,7 @@ canvas { display: block; width: 100%; height: 240px; background: var(--chart-bg)
    Source details expands below the primary view. Never clip controls to fake a fit. */
 @media (min-width: 1121px) and (min-height: 700px) {
   body { height: 100dvh; }
-  main { flex: 1; min-height: 0; grid-template-rows: auto auto minmax(160px, 1fr) minmax(380px, 1.5fr) auto auto; }
-  main:has(.stepper-interlocks:not([hidden])) {
-    grid-template-rows: auto auto minmax(140px, 1fr) minmax(470px, 1.5fr) auto auto;
-  }
+  main { flex: 1; min-height: 0; grid-template-rows: auto auto minmax(160px, 1fr) minmax(min-content, 1.5fr) auto auto; }
   canvas { height: 100%; min-height: 0; }
   .piston-visual { min-height: 0; padding: 6px; grid-template-rows: auto minmax(0, 1fr); gap: 6px; }
   .piston-stage { min-height: 0; }
@@ -776,3 +773,11 @@ canvas { display: block; width: 100%; height: 240px; background: var(--chart-bg)
 .servo-toggle[aria-checked="true"] .servo-toggle-track::before { transform: translateX(18px); }
 .servo-control .servo-toggle:focus-visible { outline: 3px solid #2563eb; outline-offset: 3px; }
 .servo-control .servo-toggle:disabled { opacity: .5; cursor: not-allowed; }
+
+/* CAN variant reuses the motor panel layout; telemetry never implies a command. */
+.can-motor-control[hidden] { display: none; }
+.can-motor-inputs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.can-motor-inputs input { width: 100%; min-width: 0; }
+.can-motor-readings { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; margin: 0; font-size: .8rem; }
+.can-motor-readings dt, .can-motor-readings dd { margin: 0; overflow-wrap: anywhere; }
+.can-motor-readings dd { text-align: right; font-variant-numeric: tabular-nums; }

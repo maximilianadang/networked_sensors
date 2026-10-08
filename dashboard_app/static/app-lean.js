@@ -3,6 +3,7 @@
 //           6 Test Metadata | 7 Source details | 8 Shared helpers/API | 9 Startup
 // Panel state lives inside factory functions; exports also support the original
 // dashboard and isolated tests. Importing this module alone never starts the app.
+import {createCanMotorComponent} from "./can-motor.js";
 
 // ============================================================================
 // 1. STATUS PILLS — Dashboard connection (device status: section 7)
@@ -337,6 +338,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   const stepperDroVelocity = document.getElementById("stepperDroVelocity");
 
   const servo = createServoComponent({getLatest, applySample, postJson});
+  const canMotor = createCanMotorComponent({getLatest, applySample, postJson, createActions});
 
   let controlModeDirty = false;
   let messageSticky = false;
@@ -624,6 +626,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
 
   function render(latest) {
     servo.render(latest);
+    canMotor.render(latest);
     const moving = latest.stepper_moving === true;
     const estopCapable = latest.stepper_estop_capable === true;
     const estopLatched = latest.stepper_estop_latched === true;
@@ -1140,8 +1143,9 @@ export function createServoComponent({getLatest, applySample, postJson}) {
 
   function render(sample) {
     const servo = sample.stepper_aux_kind === "servo";
-    brushless.hidden = servo;
-    brushless.style.display = servo ? "none" : "";
+    const showEsc = !sample.stepper_aux_kind || sample.stepper_aux_kind === "esc";
+    brushless.hidden = !showEsc;
+    brushless.style.display = showEsc ? "" : "none";
     panel.style.display = servo ? "" : "none";
     if (!servo) return;
     const settings = sample.servo_settings;

@@ -97,6 +97,12 @@ class SourceMerger:
             transport_error_field = f"{source.name}_transport_error"
             if transport_error_field in source.expected_fields:
                 sample[transport_error_field] = getattr(source, "last_error", None)
+        if sample.get("stepper_can_motor_capable"):
+            sample["stepper_can_motor_ready"] = (
+                sample.get("stepper_can_motor_ready") is True
+                and sample.get("stepper_connected") is True
+                and not sample.get("stepper_transport_error")
+                and core.cubemars_feedback_fresh(sample, sample.get("stepper_age_ms")))
         sample.update(core.solenoid_status(sample))
 
         sample["esp32_open_flow_gmin"] = self._sum_open_flows(
@@ -287,6 +293,7 @@ class DashboardRuntime:
         self._thread: threading.Thread | None = None
         self._solenoid_command_lock = threading.Lock()
         self._servo_command_lock = threading.Lock()
+        self._cubemars_command_lock = threading.Lock()
         self._experiment_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="experiment-io")
         self._experiment_futures: set[Future] = set()
         self._experiment_cancel = threading.Event()
@@ -624,6 +631,11 @@ class DashboardRuntime:
             raise RuntimeError("Experiment command cancelled before dispatch")
         if isinstance(action, ActuatorAction):
             current = self.devices.status(sample)
+            if action.device == "can_motor":
+                before = current.get("stepper_can_motor_command_sequence")
+                self.devices.cubemars(current, {"rpm": action.rpm, "duration_ms": action.duration_ms})
+                return {"requested_rpm": action.rpm, "duration_ms": action.duration_ms,
+                        "before_sequence": before}
             if action.device == "brushless_motor":
                 if action.set_point == "pulse":
                     self.devices.brushless_pulse(current, {"pulse_us": action.pulse_us})
@@ -926,6 +938,26 @@ class DashboardRuntime:
         result = self._stepper_command(self.devices.brushless_pulse, values)
         result["pulse_us"] = result["stepper"].get("stepper_brushless_motor_pulse_us")
         result["setpoint_us"] = result["stepper"].get("stepper_brushless_motor_setpoint_us")
+        return result
+
+    def set_cubemars_motor(self, values: dict[str, object]) -> dict[str, object]:
+        if "action" not in values and type(values.get("rpm")) is int and values["rpm"] == 0:
+            # Like E-STOP, release is sent before a slow sensor poll can hold the runtime lock.
+            receipt = self.devices.cubemars(self.devices.status(), values)
+            with self._condition:
+                result = self._finish_command_locked(receipt, poll=False)
+        else:
+            # Manual leases are renewed only by explicit requests. Background status
+            # sampling confirms them without forcing a full poll on each renewal.
+            with self._cubemars_command_lock:
+                result = self._stepper_command(self.devices.cubemars, values, poll="action" not in values)
+        # The latest sensor sample can predate confirmation. Return the confirmed
+        # controller fields without replacing a possibly newer concurrent sample.
+        result["sample"] = {**(result["sample"] or {}), **result["stepper"]}
+        # Confirmation is acceptance of the requested state, never speed attainment.
+        result["motor_feedback"] = {key: result["stepper"].get("stepper_can_motor_" + key)
+                                    for key in ("rpm", "current_a", "temperature_c", "fault", "feedback_age_ms",
+                                                "applied_rpm")}
         return result
 
     def set_stepper_servo(self, values: dict[str, object]) -> dict[str, object]:
