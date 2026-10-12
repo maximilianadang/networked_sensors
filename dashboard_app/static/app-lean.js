@@ -35,8 +35,6 @@ export function createToolbarComponent({
   const buttonLabels = new Map();
   const container = document.getElementById("solenoidControls");
   if (container) container.style.setProperty("--solenoid-count", String(descriptors.length));
-  const sickFlowLabel = document.getElementById("sickFlowLabel");
-  const sickFlowRelay = descriptors.find(descriptor => descriptor.relay === "R5");
   if (container && solenoids) {
     container.replaceChildren();
     for (const {index} of descriptors) {
@@ -96,8 +94,6 @@ export function createToolbarComponent({
   }
 
   function renderSample(sample) {
-    if (sickFlowLabel) setText(sickFlowLabel, `SICK Flow · Solenoid ${sample.stepper_mode === "controllino"
-      && sickFlowRelay ? sickFlowRelay.index + 1 : 4}`);
     const timestamp = sample.timestamp_iso || "";
     const date = new Date(timestamp);
     const compactTimestamp = Number.isNaN(date.getTime())
@@ -140,14 +136,14 @@ export function createToolbarComponent({
 
 // ============================================================================
 // 3. MEASUREMENTS — ESP32 Pressure, SICK Pressure, Open-Line Air Flow,
-//    Air:Powder Ratio, SICK Flow · Solenoid 4, Heartbeat
+//    Air:Powder Ratio, SICK Flow, Heartbeat
 // ============================================================================
 // PANEL: Air:Powder Ratio — mass-flow calculation.
 export function calculateAirPowderRatio(sample, powderFlowRateGPerS) {
-  const airFlowGPerMin = Number(sample?.esp32_open_flow_gmin);
+  const airFlowGPerMin = finiteSampleNumber(sample, "open_line_air_flow_g_min");
   const powderFlowGPerS = Number(powderFlowRateGPerS);
   if (
-    !Number.isFinite(airFlowGPerMin) ||
+    airFlowGPerMin === null ||
     !Number.isFinite(powderFlowGPerS) ||
     powderFlowGPerS <= 0
   ) {
@@ -172,7 +168,7 @@ export function renderMetrics(sample, powderFlowRateGPerS = null) {
     "dxmr90_port2_pressure_bar"
   ], digits.sickPressure));
   // PANEL: Open-Line Air Flow
-  setText(els.mOpenFlow, numberValue(sample, "esp32_open_flow_gmin", digits.massFlow));
+  setText(els.mOpenFlow, numberValue(sample, "open_line_air_flow_g_min", digits.massFlow));
   // PANEL: Air:Powder Ratio — display.
   const airPowderRatio = calculateAirPowderRatio(
     sample,
@@ -184,7 +180,7 @@ export function renderMetrics(sample, powderFlowRateGPerS = null) {
       ? "--"
       : airPowderRatio.toFixed(digits.airPowderRatio),
   );
-  // PANEL: SICK Flow · Solenoid 4
+  // PANEL: SICK Flow
   setText(els.mSickFlow, numberValue(sample, "dxmr90_open_total_mass_flow_g_min", digits.massFlow));
   // PANEL: Heartbeat
   setText(els.mHeartbeat, numberValue(sample, "dxmr90_heartbeat", digits.heartbeat));
@@ -371,7 +367,7 @@ export const UI_CONFIG = Object.freeze({
   massFlowComparison: Object.freeze([
     {key: "dxmr90_total_mass_flow_g_min", source: "dxmr90", color: "--chart-violet",
       label: "SICK 1 + 2", title: "Measured sum of DXMR90 ports 1 and 2"},
-    {key: "dxmr90_port3_mass_flow_g_min", source: "dxmr90", validKey: "dxmr90_port3_flow_valid",
+    {key: "open_line_air_flow_g_min",
       color: "--chart-cyan", label: "SICK 3", title: "Independent sensor on DXMR90 port 3"}
   ]),
   charts: Object.freeze({

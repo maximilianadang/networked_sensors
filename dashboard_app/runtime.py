@@ -116,6 +116,17 @@ class SourceMerger:
             (("solenoid3_on" if sample.get("stepper_mode") == "controllino" else "solenoid4_on",
               "dxmr90_total_mass_flow_g_min"),),
         )
+        controllino = sample.get("stepper_mode") == "controllino"
+        source = "dxmr90" if controllino else "esp32"
+        value = sample.get("dxmr90_port3_mass_flow_g_min" if controllino else "esp32_open_flow_gmin")
+        healthy = (sample.get(f"{source}_connected") is True
+                   and not sample.get(f"{source}_transport_error"))
+        if controllino:
+            healthy = (healthy and sample.get("dxmr90_port3_flow_valid") is True
+                       and not sample.get("dxmr90_port3_error"))
+        sample["open_line_air_flow_source"] = "dxmr90_port3" if controllino else "esp32_open_channels"
+        sample["open_line_air_flow_g_min"] = (
+            value if healthy and type(value) in (int, float) and math.isfinite(value) else None)
         return sample
 
     @staticmethod

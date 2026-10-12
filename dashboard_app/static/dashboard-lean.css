@@ -222,7 +222,7 @@ button.emergency-reset { min-height: 26px; padding: 2px 6px; }
 .clock-pill { min-width: 0; }
 
 /* SHARED PANELS: ESP32 Pressure, SICK Pressure (max), Open-Line Air Flow,
-   Air:Powder Ratio, SICK Flow · Solenoid 4, Heartbeat. Behavior: app-lean.js (Measurements / Source details). */
+   Air:Powder Ratio, SICK Flow, Heartbeat. Behavior: app-lean.js (Measurements / Source details). */
 .metric-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 .metric, .plot-panel, .source-panel, .metadata-panel, .control-panel { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); box-shadow: 0 3px 12px var(--shadow); }
 .metric { padding: 6px 10px; display: grid; align-content: space-between; }

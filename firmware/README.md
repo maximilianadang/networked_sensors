@@ -89,6 +89,21 @@ invalid or stale readings stay blank. A port 3 read error does not discard
 successful readings from ports 1 and 2. Republished mode has no assigned
 port 3 register and leaves this channel unavailable.
 
+In Controllino mode, that third sensor also supplies Open-Line Air Flow and the
+air-to-powder mass ratio, without gating on a valve or controller connection.
+The shared `open_line_air_flow_g_min` field is blank unless DXMR90 is fresh,
+transport has no error and port 3 process data is valid. A measured zero stays
+zero. Its `open_line_air_flow_source` is `dxmr90_port3`; legacy mode instead uses
+`esp32_open_channels` and retains the existing valve-gated ESP32 flow, provided
+the ESP32 source is healthy. The ratio divides this air flow in g/min by the
+specified powder flow in g/s multiplied by 60; missing air flow stays blank.
+
+Recordings include both canonical fields from startup. The summary/export metric
+`open_line_air_flow_g_per_min_active` uses the same measurement and the existing
+first-active-interval rule (starts above 10 g/min, ends below 10 g/min). In
+Controllino mode the old ESP32 per-channel and combined flow summaries stay
+blank; legacy mode retains them. Raw sensor fields remain diagnostic evidence.
+
 `merged_samples.csv` and `dxmr90_raw.csv` include the separate
 `dxmr90_port3_mass_flow_g_min`, `dxmr90_port3_flow_valid`,
 `dxmr90_port3_status` and `dxmr90_port3_error` fields from recording startup.

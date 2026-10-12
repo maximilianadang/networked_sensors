@@ -140,6 +140,9 @@ class FlowRunRecorder:
         self._controllino_pressure_counts = [0] * len(self._pressure_descriptors)
         self._flow_trackers = [ActiveFlowTracker() for _ in range(3)]
         self._flow_combined_tracker = ActiveFlowTracker()
+        self._open_line_flow_tracker = ActiveFlowTracker()
+        self._open_line_flow_source: str | None = None
+        self._controllino_flow_seen = self.run_config.get("stepper_source") in ("controllino", "controllino-usb")
         self._open_source_writers()
         self.write_metadata()
         if first_sample is not None:
@@ -231,12 +234,14 @@ class FlowRunRecorder:
         # Once new IO is observed, an outage must not switch the summary back
         # to the unrelated ESP32 pressure sensors retained in raw merged data.
         self._controllino_pressure_seen |= capable
-        flows = [
-            as_float(row.get("esp32_f1_gmin")),
-            as_float(row.get("esp32_f2_gmin")),
-            as_float(row.get("esp32_f3_gmin")),
-        ]
-        combined_flow = as_float(row.get("esp32_f_combined_gmin"))
+        flow_source = row.get("open_line_air_flow_source")
+        self._controllino_flow_seen |= (row.get("stepper_mode") == "controllino"
+                                      or flow_source == "dxmr90_port3")
+        if flow_source in ("dxmr90_port3", "esp32_open_channels"):
+            self._open_line_flow_source = flow_source
+            flow = row.get("open_line_air_flow_g_min")
+            self._open_line_flow_tracker.observe(
+                flow if type(flow) in (int, float) and math.isfinite(flow) else None)
 
         if run_elapsed <= 1.0:
             if self._controllino_pressure_seen:
@@ -260,9 +265,10 @@ class FlowRunRecorder:
                     self._pressure_combined_sum += combined_pressure
                     self._pressure_combined_count += 1
 
-        for index, flow in enumerate(flows):
-            self._flow_trackers[index].observe(flow)
-        self._flow_combined_tracker.observe(combined_flow)
+        if not self._controllino_flow_seen:
+            for index, tracker in enumerate(self._flow_trackers, 1):
+                tracker.observe(as_float(row.get(f"esp32_f{index}_gmin")))
+            self._flow_combined_tracker.observe(as_float(row.get("esp32_f_combined_gmin")))
 
     def update_metadata(self, metadata: Mapping[str, str]) -> None:
         self.metadata = dict(metadata)
@@ -306,10 +312,12 @@ class FlowRunRecorder:
                 self._pressure_combined_sum,
                 self._pressure_combined_count,
             ),
-            "air_flow_g_per_min_active": [
+            "air_flow_g_per_min_active": [None, None, None] if self._controllino_flow_seen else [
                 tracker.mean() for tracker in self._flow_trackers
             ],
-            "air_flow_combined_g_per_min_active": self._flow_combined_tracker.mean(),
+            "air_flow_combined_g_per_min_active": None if self._controllino_flow_seen else self._flow_combined_tracker.mean(),
+            "open_line_air_flow_source": self._open_line_flow_source,
+            "open_line_air_flow_g_per_min_active": self._open_line_flow_tracker.mean(),
         }
         if self._controllino_pressure_seen:
             metrics["controllino_pressure_first1s"] = [
@@ -387,6 +395,9 @@ class FlowRunRecorder:
                 "air_flow_combined_g_per_min",
                 format_float(metrics.get("air_flow_combined_g_per_min_active"), 2),
             ),
+            comment_line("open_line_air_flow_source", metrics.get("open_line_air_flow_source")),
+            comment_line("open_line_air_flow_g_per_min_active",
+                         format_float(metrics.get("open_line_air_flow_g_per_min_active"), 2)),
             comment_line(
                 "powder_flow_rate_g_per_min",
                 powder_flow_g_per_min,
