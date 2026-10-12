@@ -2,7 +2,15 @@
 
 // One auxiliary backend per build. Keep the previous 0/1 build flag compatible.
 // The dashboard discovers the selected capability through telemetry.
-constexpr char FIRMWARE_VERSION[] = "1.4.1";
+constexpr char FIRMWARE_VERSION[] = "1.5.0";
+#define DRO_BACKEND_ABSOLUTE 0
+#define DRO_BACKEND_LINACE 1
+#ifndef CONTROLLINO_DRO_KIND
+#define CONTROLLINO_DRO_KIND DRO_BACKEND_LINACE
+#endif
+static_assert(CONTROLLINO_DRO_KIND == DRO_BACKEND_ABSOLUTE ||
+              CONTROLLINO_DRO_KIND == DRO_BACKEND_LINACE, "Invalid DRO backend");
+constexpr bool DRO_IS_LINACE = CONTROLLINO_DRO_KIND == DRO_BACKEND_LINACE;
 #define AUX_BACKEND_ESC 0
 #define AUX_BACKEND_MS62 1
 #define AUX_BACKEND_CUBEMARS 2

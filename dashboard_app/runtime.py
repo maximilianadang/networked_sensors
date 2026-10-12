@@ -20,9 +20,11 @@ from typing import Any, Callable, Iterator, Mapping
 try:
     from ..recorder import FlowRunRecorder, list_recordings, resolve_artifact
     from .. import supervisor_core as core
+    from ..controllino_io import pressure_descriptors, transform_pressure_sample
 except ImportError:  # pragma: no cover - direct dashboard-lean.py execution
     from recorder import FlowRunRecorder, list_recordings, resolve_artifact
     import supervisor_core as core
+    from controllino_io import pressure_descriptors, transform_pressure_sample
 
 from .system_config import SystemConfig
 from .experiment import ActuatorAction, ExperimentRunner, MoveStepperAction, RequestedStateAction, StepperModeAction, source_adapter_name
@@ -50,9 +52,9 @@ class SourceMerger:
     """Latest-value merge with per-source health and age fields."""
 
     OPEN_FLOW_PAIRS = (
-        ("esp32_sol1", "esp32_f1_gmin"),
-        ("esp32_sol2", "esp32_f2_gmin"),
-        ("esp32_sol3", "esp32_f3_gmin"),
+        ("solenoid1_on", "esp32_f1_gmin"),
+        ("solenoid2_on", "esp32_f2_gmin"),
+        ("solenoid3_on", "esp32_f3_gmin"),
     )
 
     def __init__(
@@ -111,7 +113,8 @@ class SourceMerger:
         )
         sample["dxmr90_open_total_mass_flow_g_min"] = self._sum_open_flows(
             sample,
-            (("solenoid4_on", "dxmr90_total_mass_flow_g_min"),),
+            (("solenoid3_on" if sample.get("stepper_mode") == "controllino" else "solenoid4_on",
+              "dxmr90_total_mass_flow_g_min"),),
         )
         return sample
 
@@ -274,7 +277,7 @@ class DashboardRuntime:
         self.recording = False
         # Remember last known states through disconnects; Stop must stay stopped
         # until a new activation, not restart on every poll of an open valve.
-        self._recording_solenoid_states = [False] * core.ESP32_SOLENOID_COUNT
+        self._recording_solenoid_states = [False] * core.solenoid_count(self.devices.sources["stepper"].mode)
         self.run_started_iso: str | None = None
         self.run_stopped_iso: str | None = None
         self.recorder: FlowRunRecorder | None = None
@@ -288,12 +291,17 @@ class DashboardRuntime:
         self.sequence = 0
         self._dro_velocity_samples: deque[tuple[float, float, int]] = deque()
         self._dro_velocity_last_frame_count: int | None = None
+        self._dro_velocity_kind: str | None = None
         self._stop_event = threading.Event()
         self._condition = threading.Condition(threading.RLock())
         self._thread: threading.Thread | None = None
         self._solenoid_command_lock = threading.Lock()
         self._servo_command_lock = threading.Lock()
         self._cubemars_command_lock = threading.Lock()
+        self._cubemars_state_lock = threading.Lock()
+        self._cubemars_token = 0
+        self._cubemars_generation = 0
+        self._cubemars_thread: threading.Thread | None = None
         self._experiment_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="experiment-io")
         self._experiment_futures: set[Future] = set()
         self._experiment_cancel = threading.Event()
@@ -309,15 +317,22 @@ class DashboardRuntime:
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, name="dashboard-runtime", daemon=True)
         self._thread.start()
+        self._cubemars_thread = threading.Thread(
+            target=self._run_cubemars_lease, name="can-motor-lease", daemon=True)
+        self._cubemars_thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
+        if self._disarm_cubemars():
+            self._release_cubemars()
         self._experiment_cancel.set()
         with self._condition:
             self.experiment.fail("runtime_stopped", time.monotonic() - self.monotonic0)
             self._condition.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+        if self._cubemars_thread is not None:
+            self._cubemars_thread.join(timeout=2.0)
         # Finish any already-started dispatch, then its ordered stop, before
         # closing transports. Command adapters have bounded I/O timeouts.
         self._experiment_executor.shutdown(wait=True)
@@ -342,6 +357,7 @@ class DashboardRuntime:
     def _poll_locked(self, elapsed_s: float) -> None:
         timestamp = self.start_time + timedelta(seconds=elapsed_s)
         self.latest = self.merger.poll(elapsed_s, timestamp)
+        transform_pressure_sample(self.latest, self.system_config.pressure_inputs)
         self._apply_stepper_dro_zero_locked(self.latest)
         self._apply_stepper_dro_velocity_locked(self.latest, elapsed_s)
         stepper = self.devices.sources.get("stepper")
@@ -354,7 +370,7 @@ class DashboardRuntime:
         fresh_readings = self.merger.fresh_readings()
         self.history.append(self.latest)
         activated = False
-        for index in range(core.ESP32_SOLENOID_COUNT):
+        for index in range(core.solenoid_count(self.devices.sources["stepper"].mode)):
             prefix = f"solenoid{index + 1}"
             state = self.latest.get(f"{prefix}_on")
             if self.latest.get(f"{prefix}_connected") is True and type(state) is bool:
@@ -375,6 +391,9 @@ class DashboardRuntime:
         """Add the persistent display reference without changing raw DRO data."""
 
         zero_raw_mm = self.system_config.stepper_dro_zero_raw_mm
+        kind = sample.get("stepper_dro_kind") or "absolute_dro"
+        if self.system_config.stepper_dro_kind != kind:
+            zero_raw_mm = None
         sample["servo_settings"] = self.system_config.snapshot()["servo"]
         raw_value = sample.get("stepper_dro_position_mm")
         try:
@@ -425,6 +444,11 @@ class DashboardRuntime:
         if not valid_sample:
             self._reset_stepper_dro_velocity_locked()
             return
+
+        kind = sample.get("stepper_dro_kind") or "absolute_dro"
+        if kind != self._dro_velocity_kind:
+            self._reset_stepper_dro_velocity_locked()
+            self._dro_velocity_kind = kind
 
         if (
             self._dro_velocity_last_frame_count is not None
@@ -500,6 +524,7 @@ class DashboardRuntime:
             "dxmr90_source": self.dxmr90_source,
             **self.ed593_settings,
             "stepper_source": self.stepper_source,
+            "solenoids": core.solenoid_descriptors(self.devices.sources["stepper"].mode),
             "stepper_port": self.stepper_port,
             "stepper_baud": self.stepper_baud,
             "dxmr90_host": self.dxmr90_host,
@@ -518,6 +543,7 @@ class DashboardRuntime:
             "stepper_dro_zero_raw_mm": (
                 self.system_config.stepper_dro_zero_raw_mm
             ),
+            "system_config": self.system_config.snapshot(),
             "powder_mass_per_stepper_travel_g_per_mm": (
                 self.system_config.powder_mass_per_stepper_travel_g_per_mm
             ),
@@ -565,7 +591,9 @@ class DashboardRuntime:
 
         return {
             "history_limit": self.history_limit,
-            "solenoid_count": core.ESP32_SOLENOID_COUNT,
+            "solenoid_count": core.solenoid_count(self.devices.sources["stepper"].mode),
+            "solenoids": core.solenoid_descriptors(self.devices.sources["stepper"].mode),
+            "controllino_pressures": pressure_descriptors(self.system_config.pressure_inputs),
             "stepper": {
                 "max_distance_mm": min(
                     self.system_config.stepper_max_travel_mm,
@@ -642,7 +670,7 @@ class DashboardRuntime:
                 else:
                     self.devices.brushless_state(current, action.set_point == "on")
             else:
-                targets = [(device, int(device[-1]) - 1) for device in action.devices]
+                targets = [(device, int(device.removeprefix("solenoid")) - 1) for device in action.devices]
                 # Validate every owner before dispatching any part of the row.
                 for device, index in targets:
                     owner = core.solenoid_source_name(index, str(current.get("stepper_mode", "off")))
@@ -805,7 +833,7 @@ class DashboardRuntime:
                 return {
                     **receipt.result,
                     "solenoids": [self.latest.get(f"solenoid{i + 1}_on")
-                                  for i in range(core.ESP32_SOLENOID_COUNT)],
+                                  for i in range(core.solenoid_count(self.devices.sources["stepper"].mode))],
                     "sample": self.latest,
                 }
 
@@ -836,7 +864,7 @@ class DashboardRuntime:
                 raise RuntimeError("a finite DRO position is required")
 
             persisted_zero = self.system_config.set_stepper_dro_zero_raw_mm(
-                raw_position_mm
+                raw_position_mm, kind=latest.get("stepper_dro_kind") or "absolute_dro"
             )
             self._apply_stepper_dro_zero_locked(latest)
             self.sequence += 1
@@ -905,10 +933,12 @@ class DashboardRuntime:
         return {**values, "distance_mm": travel_mm, "speed_mm_s": speed}
 
     def stop_stepper(self) -> dict[str, object]:
+        self._disarm_cubemars()
         return self._stepper_command(self.devices.stop)
 
     def emergency_stop_stepper(self) -> dict[str, object]:
         """Send BEFORE taking the runtime lock, so a slow poll cannot delay E-STOP."""
+        self._disarm_cubemars()
         receipt = self.devices.emergency_stop(self.devices.status())
         with self._condition:
             # Real adapters confirm from their independent status readers; simulation polls.
@@ -943,14 +973,33 @@ class DashboardRuntime:
     def set_cubemars_motor(self, values: dict[str, object]) -> dict[str, object]:
         if "action" not in values and type(values.get("rpm")) is int and values["rpm"] == 0:
             # Like E-STOP, release is sent before a slow sensor poll can hold the runtime lock.
+            self._disarm_cubemars()
             receipt = self.devices.cubemars(self.devices.status(), values)
             with self._condition:
                 result = self._finish_command_locked(receipt, poll=False)
         else:
-            # Manual leases are renewed only by explicit requests. Background status
-            # sampling confirms them without forcing a full poll on each renewal.
+            with self._cubemars_state_lock:
+                generation = self._cubemars_generation
             with self._cubemars_command_lock:
-                result = self._stepper_command(self.devices.cubemars, values, poll="action" not in values)
+                try:
+                    result = self._stepper_command(
+                        self._dispatch_cubemars, values, generation, poll="action" not in values)
+                except RuntimeError:
+                    with self._cubemars_state_lock:
+                        owned = self._cubemars_token == values.get("token")
+                    if values.get("action") in ("update", "renew") and owned:
+                        self._disarm_cubemars(generation)
+                    raise
+                if values.get("action") == "start":
+                    with self._cubemars_state_lock:
+                        canceled = generation != self._cubemars_generation or self._stop_event.is_set()
+                        if not canceled:
+                            self._cubemars_token = values["token"]
+                    if canceled:
+                        # A Stop may win while Start is awaiting its receipt. It
+                        # must never arm renewal, even if that late receipt passes.
+                        self._release_cubemars()
+                        raise RuntimeError("CAN motor start was canceled by Stop")
         # The latest sensor sample can predate confirmation. Return the confirmed
         # controller fields without replacing a possibly newer concurrent sample.
         result["sample"] = {**(result["sample"] or {}), **result["stepper"]}
@@ -959,6 +1008,70 @@ class DashboardRuntime:
                                     for key in ("rpm", "current_a", "temperature_c", "fault", "feedback_age_ms",
                                                 "applied_rpm")}
         return result
+
+    def _dispatch_cubemars(self, current: dict[str, object], values: dict[str, object],
+                            generation: int) -> core.CommandReceipt:
+        # Order the wire write against Stop's disarm. Hold this narrow lock only
+        # through dispatch, never while awaiting a controller receipt.
+        with self._cubemars_state_lock:
+            if generation != self._cubemars_generation:
+                raise RuntimeError("CAN motor request was canceled by Stop")
+            if self._stop_event.is_set():
+                raise RuntimeError("Dashboard control service is stopped")
+            return self.devices.cubemars(current, values)
+
+    def _disarm_cubemars(self, generation: int | None = None) -> int:
+        """Retire ownership, including any Start awaiting confirmation."""
+        with self._cubemars_state_lock:
+            if generation is not None and generation != self._cubemars_generation:
+                return 0
+            token, self._cubemars_token = self._cubemars_token, 0
+            self._cubemars_generation += 1
+            return token
+
+    def _release_cubemars(self) -> None:
+        # Best effort on shutdown/canceled Start; the unchanged firmware lease
+        # remains the fallback if the transport cannot deliver this line.
+        try:
+            self.devices.cubemars(self.devices.status(), {"rpm": 0})
+        except (RuntimeError, ValueError, OSError):
+            pass
+
+    def _run_cubemars_lease(self) -> None:
+        while not self._stop_event.wait(0.25):
+            self._renew_cubemars_lease()
+
+    def _renew_cubemars_lease(self) -> None:
+        """Renew an explicitly accepted run; never start or adopt one.
+
+        Cached controller status and its freshness guard are independent of
+        browser activity and the cross-source merge lock. Serialize the complete
+        receipt window with Apply so another command cannot hide a rejection.
+        """
+        with self._cubemars_command_lock:
+            with self._cubemars_state_lock:
+                token, generation = self._cubemars_token, self._cubemars_generation
+            if not token or self._stop_event.is_set():
+                return
+            source = self.devices.sources["stepper"]
+            try:
+                current = dict(source.status())
+                receipt = self._dispatch_cubemars(current, {"action": "renew", "token": token}, generation)
+                deadline = time.monotonic() + 1.5
+                while True:
+                    with self._cubemars_state_lock:
+                        if generation != self._cubemars_generation:
+                            return
+                    status = dict(source.status())
+                    core.require_cubemars_manual(status, "renew", token)
+                    if receipt.confirmed(status):
+                        return
+                    if time.monotonic() >= deadline or self._stop_event.wait(0.025):
+                        raise RuntimeError("CAN motor renewal was not confirmed")
+            except (RuntimeError, ValueError, OSError):
+                self._disarm_cubemars(generation)
+                # No retries and no new M command. The controller's own lease,
+                # feedback watchdog and fault handling remain authoritative.
 
     def set_stepper_servo(self, values: dict[str, object]) -> dict[str, object]:
         with self._servo_command_lock:

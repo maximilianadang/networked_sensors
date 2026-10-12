@@ -2,6 +2,78 @@
   "geometry": {
     "powder_mass_per_stepper_travel_g_per_mm": 2.4
   },
+  "pressure_inputs": {
+    "1": {
+      "calibration": {
+        "pressure_max": 100,
+        "pressure_min": 0,
+        "reference": "unspecified",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      }
+    },
+    "2": {
+      "calibration": {
+        "pressure_max": 100,
+        "pressure_min": 0,
+        "reference": "unspecified",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      }
+    },
+    "3": {
+      "calibration": {
+        "pressure_max": 100,
+        "pressure_min": 0,
+        "reference": "unspecified",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      }
+    },
+    "4": {
+      "calibration": {
+        "pressure_max": 100,
+        "pressure_min": 0,
+        "reference": "unspecified",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      }
+    },
+    "5": {
+      "calibration": {
+        "pressure_max": 75,
+        "pressure_min": 0,
+        "reference": "absolute",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      }
+    },
+    "6": {
+      "calibration": {
+        "pressure_max": 75,
+        "pressure_min": 0,
+        "reference": "absolute",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      }
+    },
+    "7": {
+      "calibration": {
+        "pressure_max": 75,
+        "pressure_min": 0,
+        "reference": "absolute",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      }
+    }
+  },
   "servo": {
     "displacement_deg": 180,
     "off_pulse_us": 2500

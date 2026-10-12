@@ -26,6 +26,14 @@ DEFAULT_PORT = 502
 DEFAULT_UNIT_ID = 1
 SICK_PROCESS_BASE_REGISTERS = (1002, 2002)
 SICK_PROCESS_WORD_COUNT = 16
+# Banner IO-Link Master Data Reference 229732, Rev B, pp.4–6:
+# https://info.bannerengineering.com/cs/groups/public/documents/literature/229732.pdf
+# 43001 = port 3 connected/data-valid status; 43002–43017 = process input.
+# Like the existing 41002/42002 windows, our client omits the leading 4.
+SICK_PORT3_STATUS_REGISTER = 3001
+SICK_PORT3_FIELDS = ("port3_mass_flow_g_min", "port3_flow_valid", "port3_status", "port3_error")
+SICK_PROCESS_NAMES = ("mass_flow_kg_h", "flow_velocity_m_s", "volume_m3",
+                      "volumetric_flow_m3_h", "mass_kg", "energy_kwh", "temperature_c", "pressure_bar")
 PSI_PER_BAR = 14.503773773
 
 
@@ -207,35 +215,29 @@ def decode_float32(words: Sequence[int], word_order: str) -> float:
     return struct.unpack(">f", struct.pack(">HH", first, second))[0]
 
 
+def decode_sick_process(words: Sequence[int], word_order: str) -> dict[str, float]:
+    """Decode the shared 32-byte process profile of the installed SICK sensors."""
+    # SICK FTMg IO-Link Supplement 8024506/0619, p.1 (8 Float32 values).
+    if len(words) != SICK_PROCESS_WORD_COUNT:
+        raise ValueError("SICK process data requires 16 registers")
+    return {name: decode_float32(words[offset:offset + 2], word_order)
+            for name, offset in zip(SICK_PROCESS_NAMES, range(0, SICK_PROCESS_WORD_COUNT, 2))}
+
+
 def read_direct_sick_values(
     client: ModbusTcpClient,
     word_order: str,
-) -> dict[str, float | int]:
-    """Read both live SICK IO-Link process windows and return dashboard units."""
+) -> dict[str, float | int | bool | str | None]:
+    """Keep the original pair sum separate from the optional third flow sensor."""
 
     heartbeat = client.read_holding_registers(HEARTBEAT.register, 1)[0]
     ports: list[dict[str, float]] = []
-    process_names = (
-        "mass_flow_kg_h",
-        "flow_velocity_m_s",
-        "volume_m3",
-        "volumetric_flow_m3_h",
-        "mass_kg",
-        "energy_kwh",
-        "temperature_c",
-        "pressure_bar",
-    )
     for base_register in SICK_PROCESS_BASE_REGISTERS:
         words = client.read_holding_registers(
             base_register,
             SICK_PROCESS_WORD_COUNT,
         )
-        ports.append(
-            {
-                name: decode_float32(words[offset : offset + 2], word_order)
-                for name, offset in zip(process_names, range(0, 16, 2))
-            }
-        )
+        ports.append(decode_sick_process(words, word_order))
 
     port1, port2 = ports
     p1_bar = port1["pressure_bar"]
@@ -245,7 +247,7 @@ def read_direct_sick_values(
     p1_volume_l_min = port1["volumetric_flow_m3_h"] * 1000.0 / 60.0
     p2_volume_l_min = port2["volumetric_flow_m3_h"] * 1000.0 / 60.0
 
-    return {
+    values: dict[str, float | int | bool | str | None] = {
         "heartbeat": heartbeat,
         "port1_mass_flow_g_min": p1_mass_g_min,
         "port2_mass_flow_g_min": p2_mass_g_min,
@@ -259,7 +261,28 @@ def read_direct_sick_values(
         "port1_temperature_c": port1["temperature_c"],
         "port2_temperature_c": port2["temperature_c"],
         "total_volumetric_flow_l_min": p1_volume_l_min + p2_volume_l_min,
+        "port3_mass_flow_g_min": None,
+        "port3_flow_valid": False,
+        "port3_status": None,
+        "port3_error": None,
     }
+    # Read last: failure of this optional sensor must not discard the pair.
+    # Status and data come from one block; a disconnected port can contain zeros.
+    try:
+        block = client.read_holding_registers(SICK_PORT3_STATUS_REGISTER, 1 + SICK_PROCESS_WORD_COUNT)
+        if len(block) != 1 + SICK_PROCESS_WORD_COUNT:
+            raise ValueError("Port 3 requires status plus 16 process registers")
+        values["port3_status"] = status = block[0]
+        if (status & 3) != 3:
+            raise ValueError("Port 3 disconnected or process data invalid")
+        flow = decode_sick_process(block[1:], word_order)["mass_flow_kg_h"] * 1000.0 / 60.0
+        if not math.isfinite(flow):
+            raise ValueError("Port 3 mass flow is not finite")
+        values["port3_mass_flow_g_min"] = flow
+        values["port3_flow_valid"] = True
+    except (OSError, ModbusError, ValueError) as exc:
+        values["port3_error"] = str(exc)
+    return values
 
 
 def select_metrics(group: str, names: Sequence[str]) -> list[Metric]:

@@ -210,6 +210,7 @@ class DroMonitorIntegrationTests(unittest.TestCase):
         self.assertEqual(transitions, [(False, False, False), (False, False, True),
                          (True, False, True), (True, True, True), (True, False, True),
                          (False, False, True), (False, False, False)])
-        self.assertEqual(self.stepper.commands[:3], [b'V1 P1200\n', b'V1 B1\n', b'V1 M1\n'])
-        self.assertTrue(self.stepper.commands[3].startswith(b'V1 G'))
-        self.assertEqual(self.stepper.commands[4], b'V1 B0\n')
+        self.assertEqual(self.stepper.commands[:5], [b'V1 P1200\n', b'V1 B1\n',
+                          b'V1 L5,1\n', b'V1 L6,1\n', b'V1 M1\n'])
+        self.assertTrue(self.stepper.commands[5].startswith(b'V1 G'))
+        self.assertEqual(self.stepper.commands[6:], [b'V1 L6,0\n', b'V1 L5,0\n', b'V1 B0\n'])

@@ -282,7 +282,7 @@ class CubemarsTests(unittest.TestCase):
                 self.controls.cubemars(self.current(), values)
         self.assertEqual(self.stepper.commands, [b'V1 M10,3,123\n', b'V1 C0\n'])
 
-    def test_manual_runtime_returns_confirmed_sample_without_polling_or_renewing(self):
+    def test_manual_runtime_returns_confirmed_sample_without_forcing_sensor_poll(self):
         self.stepper.enable_manual()
         runtime = self.runtime()
         runtime.latest['unrelated_measurement'] = 1.25
@@ -303,6 +303,199 @@ class CubemarsTests(unittest.TestCase):
             with runtime._condition:
                 runtime._poll_locked(elapsed)
         self.assertEqual(self.stepper.commands, [b'V1 M10,3,123\n', b'V1 K123\n'])
+
+    def start_owned_manual(self):
+        self.stepper.enable_manual()
+        runtime = self.runtime()
+        runtime.set_cubemars_motor({'action': 'start', 'token': 123, 'rpm': 10, 'ramp_rpm_s': 3})
+        return runtime
+
+    def test_backend_renews_without_browser_requests_or_sensor_merge_lock(self):
+        runtime = self.start_owned_manual()
+        for _ in range(4):
+            self.stepper.refresh()
+            runtime._renew_cubemars_lease()
+        self.assertEqual(self.stepper.commands, [b'V1 M10,3,123\n'] + [b'V1 K123\n'] * 4)
+        finished = threading.Event()
+        with runtime._condition:
+            worker = threading.Thread(target=lambda: (runtime._renew_cubemars_lease(), finished.set()))
+            worker.start()
+            self.assertTrue(finished.wait(1), 'renewal waited for an unrelated sensor poll')
+        worker.join(1)
+        self.assertEqual(self.stepper.commands[-1], b'V1 K123\n')
+
+    def test_backend_does_not_adopt_existing_run_or_renew_timed_run(self):
+        self.stepper.enable_manual()
+        self.controls.cubemars(self.current(), {'action': 'start', 'token': 123, 'rpm': 10, 'ramp_rpm_s': 3})
+        runtime = self.runtime()
+        runtime._renew_cubemars_lease()
+        self.assertEqual(self.stepper.commands, [b'V1 M10,3,123\n'])
+        runtime.set_cubemars_motor({'rpm': 0})
+        runtime.set_cubemars_motor({'rpm': 10, 'duration_ms': 1000})
+        runtime._renew_cubemars_lease()
+        self.assertEqual(self.stepper.commands[-1], b'V1 C10,1000\n')
+
+    def test_renewal_retires_on_fault_expiry_reboot_disconnect_or_stale_status(self):
+        for change in ({'ca': 501}, {'cf': 7}, {'e': 1, 'ce': 0, 'cm': 0, 'cramp': 0},
+                       {'ce': 0, 'cm': 0, 'cramp': 0, 'cx': 'control_timeout'},
+                       {'ce': 0, 'cm': 0, 'cramp': 0, 'cx': 'boot'}, {'cm': 124},
+                       {'transport_error': True}, {'old_status': True}):
+            with self.subTest(change=change):
+                self.stepper = CanController()
+                self.sources[-1] = self.stepper
+                runtime = self.start_owned_manual()
+                original = dict(self.stepper.payload)
+                self.stepper.payload.update({k: v for k, v in change.items()
+                                            if k not in ('transport_error', 'old_status')})
+                self.stepper.refresh()
+                if 'transport_error' in change:
+                    self.stepper.last_error = 'USB disconnected'
+                if 'old_status' in change:
+                    self.stepper._cubemars_status_at = time.monotonic() - 1
+                runtime._renew_cubemars_lease()
+                self.assertEqual(runtime._cubemars_token, 0)
+                self.stepper.payload = original
+                self.stepper.last_error = None
+                self.stepper.refresh()
+                runtime._renew_cubemars_lease()
+                self.assertEqual(self.stepper.commands, [b'V1 M10,3,123\n'])
+
+    def test_failed_renewal_is_not_retried_and_new_explicit_start_can_arm(self):
+        runtime = self.start_owned_manual()
+        with patch.object(self.stepper, '_write_command', side_effect=RuntimeError('USB write failed')) as write:
+            runtime._renew_cubemars_lease()
+            runtime._renew_cubemars_lease()
+            self.assertEqual(write.call_count, 1)
+        self.assertEqual(runtime._cubemars_token, 0)
+        runtime.set_cubemars_motor({'rpm': 0})
+        runtime.set_cubemars_motor({'action': 'start', 'token': 124, 'rpm': 5, 'ramp_rpm_s': 3})
+        runtime._renew_cubemars_lease()
+        self.assertEqual(self.stepper.commands[-1], b'V1 K124\n')
+
+    def test_stop_estop_and_shutdown_disarm_before_any_future_renewal(self):
+        for command, wire in (('release', b'V1 C0\n'), ('estop', b'V1 E1\n'), ('shutdown', b'V1 C0\n')):
+            with self.subTest(command=command):
+                self.stepper = CanController()
+                self.sources[-1] = self.stepper
+                runtime = self.start_owned_manual()
+                if command == 'release':
+                    runtime.set_cubemars_motor({'rpm': 0})
+                elif command == 'estop':
+                    runtime.emergency_stop_stepper()
+                else:
+                    runtime.stop()
+                self.assertEqual(runtime._cubemars_token, 0)
+                self.assertEqual(self.stepper.commands[-1], wire)
+                count = len(self.stepper.commands)
+                runtime._renew_cubemars_lease()
+                self.assertEqual(len(self.stepper.commands), count)
+
+    def test_stop_during_start_confirmation_cannot_rearm_backend(self):
+        self.stepper.enable_manual()
+        runtime = self.runtime()
+        confirming, finish = threading.Event(), threading.Event()
+        errors = []
+        original = runtime._finish_command_locked
+        def delayed(receipt, **kwargs):
+            result = original(receipt, **kwargs)
+            if receipt.result.get('action') == 'start':
+                confirming.set()
+                # _stepper_command holds the condition; release it exactly as a
+                # normal receipt wait would, allowing the competing Stop.
+                while not finish.is_set():
+                    runtime._condition.wait(0.01)
+            return result
+        def start():
+            try:
+                runtime.set_cubemars_motor({'action': 'start', 'token': 123, 'rpm': 10, 'ramp_rpm_s': 3})
+            except RuntimeError as exc:
+                errors.append(str(exc))
+        with patch.object(runtime, '_finish_command_locked', side_effect=delayed):
+            worker = threading.Thread(target=start)
+            worker.start()
+            self.assertTrue(confirming.wait(1))
+            runtime.set_cubemars_motor({'rpm': 0})
+            finish.set()
+            worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, ['CAN motor start was canceled by Stop'])
+        self.assertEqual(runtime._cubemars_token, 0)
+        runtime._renew_cubemars_lease()
+        self.assertFalse(any(command.startswith(b'V1 K') for command in self.stepper.commands))
+        self.assertEqual(self.stepper.payload['ce'], 0)
+
+    def test_stop_cancels_start_waiting_behind_another_can_command(self):
+        self.stepper.enable_manual()
+        runtime = self.runtime()
+        queued, resume = threading.Event(), threading.Event()
+        errors = []
+        class BusyCommand:
+            def __enter__(self):
+                queued.set()
+                resume.wait(1)
+            def __exit__(self, *args):
+                pass
+        def start():
+            try:
+                runtime.set_cubemars_motor({'action': 'start', 'token': 123, 'rpm': 10, 'ramp_rpm_s': 3})
+            except RuntimeError as exc:
+                errors.append(str(exc))
+        with patch.object(runtime, '_cubemars_command_lock', BusyCommand()):
+            worker = threading.Thread(target=start)
+            worker.start()
+            self.assertTrue(queued.wait(1))
+            runtime.set_cubemars_motor({'rpm': 0})
+            resume.set()
+            worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, ['CAN motor request was canceled by Stop'])
+        self.assertEqual(self.stepper.commands, [b'V1 C0\n'])
+        self.assertEqual(runtime._cubemars_token, 0)
+
+    def test_stop_cancels_start_after_snapshot_but_before_wire_dispatch(self):
+        self.stepper.enable_manual()
+        runtime = self.runtime()
+        snapshot, resume = threading.Event(), threading.Event()
+        errors = []
+        original = runtime._dispatch_cubemars
+        def delayed(*args):
+            snapshot.set()
+            resume.wait(1)
+            return original(*args)
+        def start():
+            try:
+                runtime.set_cubemars_motor({'action': 'start', 'token': 123, 'rpm': 10, 'ramp_rpm_s': 3})
+            except RuntimeError as exc:
+                errors.append(str(exc))
+        with patch.object(runtime, '_dispatch_cubemars', side_effect=delayed):
+            worker = threading.Thread(target=start)
+            worker.start()
+            self.assertTrue(snapshot.wait(1))
+            runtime.set_cubemars_motor({'rpm': 0})
+            resume.set()
+            worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, ['CAN motor request was canceled by Stop'])
+        self.assertEqual(self.stepper.commands, [b'V1 C0\n'])
+
+    def test_stop_cancels_renewal_before_wire_dispatch(self):
+        runtime = self.start_owned_manual()
+        snapshot, resume = threading.Event(), threading.Event()
+        original = runtime._dispatch_cubemars
+        def delayed(*args):
+            snapshot.set()
+            resume.wait(1)
+            return original(*args)
+        with patch.object(runtime, '_dispatch_cubemars', side_effect=delayed):
+            worker = threading.Thread(target=runtime._renew_cubemars_lease)
+            worker.start()
+            self.assertTrue(snapshot.wait(1))
+            runtime.set_cubemars_motor({'rpm': 0})
+            resume.set()
+            worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.stepper.commands, [b'V1 M10,3,123\n', b'V1 C0\n'])
+        self.assertEqual(runtime._cubemars_token, 0)
 
     def test_global_release_bypasses_pending_manual_confirmation_lock(self):
         self.stepper.enable_manual()

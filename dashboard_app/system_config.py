@@ -13,8 +13,10 @@ from typing import Any
 
 try:
     from ..supervisor_core import validate_servo_settings
+    from ..controllino_io import validate_pressure_config
 except ImportError:  # pragma: no cover - direct dashboard-lean.py execution
     from supervisor_core import validate_servo_settings
+    from controllino_io import validate_pressure_config
 
 
 DEFAULT_SYSTEM_CONFIG_PATH = Path(__file__).resolve().parents[1] / "system_config.json"
@@ -31,9 +33,11 @@ DEFAULT_SYSTEM_CONFIG: dict[str, object] = {
     },
     "stepper": {
         "dro_home": None,
+        "dro_kind": None,
         "max_travel_mm": 137.18,
     },
     "servo": {"off_pulse_us": 2500, "displacement_deg": 120.0},
+    "pressure_inputs": validate_pressure_config(),
 }
 
 
@@ -86,6 +90,9 @@ class SystemConfig:
         normalized_stepper = deepcopy(stepper)
         normalized_stepper.pop("dro_zero_raw_mm", None)  # migrate legacy files
         normalized_stepper["dro_home"] = dro_zero_raw_mm
+        normalized_stepper["dro_kind"] = self._validate_dro_kind(
+            stepper.get("dro_kind", "absolute_dro" if dro_zero_raw_mm is not None else None)
+        )
         normalized_stepper["max_travel_mm"] = self._validate_positive_finite(
             stepper.get("max_travel_mm", DEFAULT_SYSTEM_CONFIG["stepper"]["max_travel_mm"]),
             "stepper.max_travel_mm",
@@ -97,6 +104,7 @@ class SystemConfig:
         normalized["stepper"] = normalized_stepper
         normalized["geometry"] = normalized_geometry
         normalized["servo"] = validate_servo_settings(payload.get("servo", DEFAULT_SYSTEM_CONFIG["servo"]))
+        normalized["pressure_inputs"] = validate_pressure_config(payload.get("pressure_inputs"))
         return normalized
 
     def set_servo(self, values: dict[str, Any]) -> None:
@@ -119,6 +127,14 @@ class SystemConfig:
         return parsed
 
     @staticmethod
+    def _validate_dro_kind(value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip() or len(value) > 40:
+            raise ValueError("stepper.dro_kind must be a short nonempty string or null")
+        return value.strip()
+
+    @staticmethod
     def _validate_positive_finite(value: object, key: str) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{key} must be a positive finite number")
@@ -136,6 +152,16 @@ class SystemConfig:
             return self._validate_dro_zero(stepper.get("dro_home"))
 
     @property
+    def stepper_dro_kind(self) -> str | None:
+        with self._lock:
+            return self._values["stepper"]["dro_kind"]
+
+    @property
+    def pressure_inputs(self) -> dict[str, dict]:
+        with self._lock:
+            return deepcopy(self._values["pressure_inputs"])
+
+    @property
     def stepper_max_travel_mm(self) -> float:
         with self._lock:
             return float(self._values["stepper"]["max_travel_mm"])
@@ -150,8 +176,9 @@ class SystemConfig:
                 "geometry.powder_mass_per_stepper_travel_g_per_mm",
             )
 
-    def set_stepper_dro_zero_raw_mm(self, value: float) -> float:
+    def set_stepper_dro_zero_raw_mm(self, value: float, kind: str | None = None) -> float:
         parsed = self._validate_dro_zero(value)
+        parsed_kind = self._validate_dro_kind(kind)
         assert parsed is not None
         rounded = round(parsed, 2)
         with self._lock:
@@ -159,6 +186,7 @@ class SystemConfig:
             stepper = updated["stepper"]
             assert isinstance(stepper, dict)
             stepper["dro_home"] = rounded
+            stepper["dro_kind"] = parsed_kind or stepper.get("dro_kind") or "absolute_dro"
             if self.path is not None:
                 self._write_atomic(updated)
             self._values = updated

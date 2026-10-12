@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import re
 import shutil
 from dataclasses import dataclass
@@ -15,8 +16,10 @@ from typing import Mapping, Sequence, TextIO
 
 try:
     from .supervisor_core import SourceReading
+    from .controllino_io import pressure_descriptors, validate_pressure_config
 except ImportError:  # pragma: no cover - direct script execution fallback
     from supervisor_core import SourceReading
+    from controllino_io import pressure_descriptors, validate_pressure_config
 
 
 ROOT = Path(__file__).resolve().parent
@@ -99,6 +102,10 @@ class FlowRunRecorder:
         self.stopped_iso: str | None = None
         self.metadata = dict(metadata)
         self.run_config = dict(run_config)
+        settings = self.run_config.get("system_config")
+        self._pressure_descriptors = pressure_descriptors(validate_pressure_config(
+            settings.get("pressure_inputs") if isinstance(settings, Mapping) else None
+        ))
         self.source_fields = {name: tuple(fields) for name, fields in source_fields.items()}
         self.run_id = self._allocate_run_id(self.metadata)
         self.directory = self.record_dir / self.run_id
@@ -128,6 +135,9 @@ class FlowRunRecorder:
         self._pressure_counts = [0, 0, 0]
         self._pressure_combined_sum = 0.0
         self._pressure_combined_count = 0
+        self._controllino_pressure_seen = False
+        self._controllino_pressure_sums = [0.0] * len(self._pressure_descriptors)
+        self._controllino_pressure_counts = [0] * len(self._pressure_descriptors)
         self._flow_trackers = [ActiveFlowTracker() for _ in range(3)]
         self._flow_combined_tracker = ActiveFlowTracker()
         self._open_source_writers()
@@ -217,12 +227,10 @@ class FlowRunRecorder:
 
     def _update_summary(self, row: Mapping[str, object]) -> None:
         run_elapsed = float(row.get("run_elapsed_s") or 0.0)
-        pressures = [
-            as_float(row.get("esp32_p1_bar")),
-            as_float(row.get("esp32_p2_bar")),
-            as_float(row.get("esp32_p3_bar")),
-        ]
-        combined_pressure = as_float(row.get("esp32_p_combined_bar"))
+        capable = row.get("stepper_pressure_capable") is True
+        # Once new IO is observed, an outage must not switch the summary back
+        # to the unrelated ESP32 pressure sensors retained in raw merged data.
+        self._controllino_pressure_seen |= capable
         flows = [
             as_float(row.get("esp32_f1_gmin")),
             as_float(row.get("esp32_f2_gmin")),
@@ -231,14 +239,26 @@ class FlowRunRecorder:
         combined_flow = as_float(row.get("esp32_f_combined_gmin"))
 
         if run_elapsed <= 1.0:
-            for index, pressure in enumerate(pressures):
-                if pressure is None:
-                    continue
-                self._pressure_sums[index] += pressure
-                self._pressure_counts[index] += 1
-            if combined_pressure is not None:
-                self._pressure_combined_sum += combined_pressure
-                self._pressure_combined_count += 1
+            if self._controllino_pressure_seen:
+                for index, channel in enumerate(self._pressure_descriptors):
+                    # Runtime already applies acquisition/transport freshness,
+                    # calibration range and connectivity to each valid flag.
+                    value = row.get(channel["value_key"])
+                    if (capable and channel["calibrated"]
+                            and row.get(channel["valid_key"]) is True
+                            and type(value) in (int, float) and math.isfinite(value)):
+                        self._controllino_pressure_sums[index] += value
+                        self._controllino_pressure_counts[index] += 1
+            else:
+                for index in range(3):
+                    pressure = as_float(row.get(f"esp32_p{index + 1}_bar"))
+                    if pressure is not None:
+                        self._pressure_sums[index] += pressure
+                        self._pressure_counts[index] += 1
+                combined_pressure = as_float(row.get("esp32_p_combined_bar"))
+                if combined_pressure is not None:
+                    self._pressure_combined_sum += combined_pressure
+                    self._pressure_combined_count += 1
 
         for index, flow in enumerate(flows):
             self._flow_trackers[index].observe(flow)
@@ -278,11 +298,11 @@ class FlowRunRecorder:
         if self._row_count > 0:
             duration_s = self._last_run_elapsed_s
         metrics = {
-            "pressure_bar_first1s": [
+            "pressure_bar_first1s": [None, None, None] if self._controllino_pressure_seen else [
                 mean_or_none(total, count)
                 for total, count in zip(self._pressure_sums, self._pressure_counts)
             ],
-            "pressure_combined_bar_first1s": mean_or_none(
+            "pressure_combined_bar_first1s": None if self._controllino_pressure_seen else mean_or_none(
                 self._pressure_combined_sum,
                 self._pressure_combined_count,
             ),
@@ -291,6 +311,15 @@ class FlowRunRecorder:
             ],
             "air_flow_combined_g_per_min_active": self._flow_combined_tracker.mean(),
         }
+        if self._controllino_pressure_seen:
+            metrics["controllino_pressure_first1s"] = [
+                {**{key: channel[key] for key in
+                    ("id", "label", "terminal", "group", "group_index", "group_label",
+                     "unit", "reference", "calibrated")},
+                 "mean": mean_or_none(total, count), "samples": count}
+                for channel, total, count in zip(self._pressure_descriptors,
+                    self._controllino_pressure_sums, self._controllino_pressure_counts)
+            ]
         return {
             "schema_version": "1.0",
             "run_id": self.run_id,
@@ -371,6 +400,15 @@ class FlowRunRecorder:
             comment_line("notes", self.metadata.get("notes", "")),
             "# ===",
         ]
+        pressure_lines = []
+        for channel in metrics.get("controllino_pressure_first1s", []):
+            prefix = f"controllino_pressure_{channel['id']}"
+            for key in ("label", "terminal", "group", "group_index", "group_label",
+                        "unit", "reference", "calibrated"):
+                pressure_lines.append(comment_line(f"{prefix}_{key}", channel[key]))
+            pressure_lines.append(comment_line(f"{prefix}_mean_first1s", format_float(channel["mean"], 6)))
+            pressure_lines.append(comment_line(f"{prefix}_samples_first1s", channel["samples"]))
+        header_lines[-1:-1] = pressure_lines
         with self.paths.export_csv.open("w", encoding="utf-8", newline="") as export:
             export.write("\n".join(header_lines) + "\n")
             if self.paths.merged_csv.exists():

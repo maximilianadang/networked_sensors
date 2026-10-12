@@ -69,7 +69,8 @@ class Controller(core.ControllinoStepperSource):
         code, argument = command[3:4], command[4:].strip()
         p = self.payload
         if code == b"L":
-            p["sol4"] = int(argument.split(b",")[1])
+            number, state = map(int, argument.split(b","))
+            p[f"sol{number}"] = state
         elif code == b"A":
             args = [int(value) for value in argument.split(b",")]
             p.update(sv=int(args[0] != 0), sr=args[1] // 20 if len(args) == 2 else 0)
@@ -93,6 +94,7 @@ class Controller(core.ControllinoStepperSource):
             p["csps"] = int(argument)
         elif code == b"E":
             p.update(e=int(argument), mv=0, sol4=0, sv=0, sr=0)
+            p.update({key: 0 for key in p if key.startswith("sol") and key[3:].isdigit()})
         else:
             raise AssertionError(f"Unexpected firmware command: {command!r}")
         self.refresh()
@@ -109,6 +111,8 @@ class BackendTests(unittest.TestCase):
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.stepper = Controller()
+        self.stepper.payload.update(fw="1.5.0", sol5=0, sol6=0)
+        self.stepper.refresh()
         self.esp32 = core.SimulatedEsp32Source(auto_sequence=False)
         self.sources = [self.esp32, core.SimulatedDxmr90Source(), self.stepper]
         self.controls = core.DeviceControls(self.sources)
@@ -175,7 +179,7 @@ class BackendTests(unittest.TestCase):
         ):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 method(values)
-        for index in (-1, 4, True, "0"):
+        for index in (-1, 6, True, "0"):
             with self.assertRaises(ValueError):
                 runtime.toggle_solenoid(index)
         with self.assertRaisesRegex(RuntimeError, "brushless motor control"):
@@ -282,33 +286,34 @@ class BackendTests(unittest.TestCase):
 
     def test_each_valve_starts_recording_and_manual_stop_stays_stopped(self):
         runtime = self.runtime()
-        for index in range(4):
+        for index in range(3):
             with self.subTest(valve=index + 1):
                 runtime.toggle_solenoid(index)
                 self.assertTrue(runtime.recording)
-                self.assertEqual(runtime.recorder._row_count, 2 if index == 3 else 1)
+                self.assertEqual(runtime.recorder._row_count, 2)
                 runtime.set_recording(False)
                 with runtime._condition:
                     runtime._poll_locked(0.2)
                 self.assertFalse(runtime.recording)
                 runtime.toggle_solenoid(index)
                 self.assertFalse(runtime.recording)
-        self.assertEqual(self.stepper.commands, [b"V1 L4,1\n", b"V1 L4,0\n"])
+        self.assertEqual(self.stepper.commands, [f"V1 L{wire},{state}\n".encode()
+                                                for wire in (5, 6, 4) for state in (1, 0)])
         self.assertEqual(self.esp32.solenoid_states(), (False,) * 4)
         self.assertTrue(runtime.latest_export_path().exists())
 
     def test_relay_remains_independent_of_esp32_and_disconnect_is_not_activation(self):
         self.sources[0] = core.DisabledSource("esp32", 0.1, self.esp32.expected_fields)
         runtime = self.runtime()
-        runtime.toggle_solenoid(3)
-        self.assertTrue(runtime.latest["solenoid4_on"])
+        runtime.toggle_solenoid(2)
+        self.assertTrue(runtime.latest["solenoid3_on"])
         runtime.set_recording(False)
-        with self.assertRaisesRegex(RuntimeError, "not live"):
-            runtime.toggle_solenoid(0)
         self.stepper.emit = False
         with runtime._condition:
             runtime._poll_locked(2)
-        self.assertIsNone(runtime.latest["solenoid4_on"])
+        self.assertIsNone(runtime.latest["solenoid3_on"])
+        with self.assertRaisesRegex(RuntimeError, "not live"):
+            runtime.toggle_solenoid(0)
         self.stepper.emit = True
         with runtime._condition:
             runtime._poll_locked(2.1)
@@ -379,7 +384,7 @@ class BackendTests(unittest.TestCase):
         merger = app.SourceMerger(self.sources)
         sample = merger.poll(0, datetime.now(timezone.utc))
         self.assertEqual(sample["dxmr90_open_total_mass_flow_g_min"], 0)
-        self.stepper.set_solenoid(3, True)
+        self.stepper.set_solenoid(2, True)
         sample = merger.poll(0.1, datetime.now(timezone.utc))
         self.assertEqual(sample["dxmr90_open_total_mass_flow_g_min"], sample["dxmr90_total_mass_flow_g_min"])
 
@@ -390,7 +395,7 @@ class BackendTests(unittest.TestCase):
                 source._last_values = source.decode_status_line(json.dumps(self.stepper.payload))
                 source._require_connected = Mock(return_value=source._last_values)
                 source._write_command = Mock()
-                source.set_solenoid(3, True)
+                source.set_solenoid(2, True)
                 self.assertEqual(source._write_command.call_args.args[0], b"V1 L4,1\n")
                 source.set_servo_pulse(1500)
                 self.assertEqual(source._write_command.call_args.args[0], b"V1 A1500\n")
@@ -491,7 +496,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(json.loads(data)["experiment"]["state"], "completed")
         self.assertFalse(runtime.recording)
         self.assertEqual(self.stepper.commands, [])
-        self.assertFalse(any(runtime.latest[f"solenoid{index}_on"] for index in range(1, 5)))
+        self.assertFalse(any(runtime.latest[f"solenoid{index}_on"] for index in range(1, 4)))
 
         lines = recording_example.decode().splitlines()
         csv_text = "\n".join((lines[0], lines[1], lines[-1])) + "\n"
@@ -650,7 +655,7 @@ class BackendTests(unittest.TestCase):
                 f"requested_state,{source},1000,ok,10,{target},{device},{pulse}\n")
 
     def test_spreadsheet_solenoid_group_dispatches_all_before_confirmation(self):
-        runtime = self.runtime()
+        runtime = self.runtime([self.esp32, self.sources[1], core.SimulatedStepperSource()])
         program = self.actuator_program("esp32", "solenoid1;solenoid2;solenoid3", "open")
         # Exercise both open and closed with existing state-setting controls.
         for batch, target in enumerate(("open", "closed")):
@@ -683,10 +688,10 @@ class BackendTests(unittest.TestCase):
             send.assert_not_called()
         self.assertEqual(runtime.experiment_state()["state"], "failed")
         self.assertFalse(any(self.esp32.solenoid_states()))
-        self.assertIn("solenoid4 is controlled by controllino", runtime.experiment_state()["results"][-1]["error"])
+        self.assertIn("solenoid1 is controlled by controllino", runtime.experiment_state()["results"][-1]["error"])
 
     def test_solenoid_group_reports_each_dispatch_and_does_not_retry_partial_failure(self):
-        runtime = self.runtime()
+        runtime = self.runtime([self.esp32, self.sources[1], core.SimulatedStepperSource()])
         runtime.load_experiment({"csv": self.actuator_program("esp32", "solenoid1;solenoid2;solenoid3", "open")})
         runtime.start_experiment({})
         original = runtime.devices.solenoid_state
@@ -711,8 +716,8 @@ class BackendTests(unittest.TestCase):
 
     def test_spreadsheet_solenoids_use_correct_source_and_explicit_state(self):
         runtime = self.runtime()
-        for index in range(4):
-            owner = "controllino" if index == 3 else "esp32"
+        for index in range(3):
+            owner = "controllino"
             for on in (True, True, False):
                 runtime.load_experiment({"csv": self.actuator_program(owner, f"solenoid{index + 1}", "open" if on else "closed")})
                 runtime.start_experiment({})
@@ -721,7 +726,8 @@ class BackendTests(unittest.TestCase):
                         runtime._poll_locked(elapsed)
                 self.assertEqual(runtime.experiment_state()["state"], "completed")
                 self.assertIs(runtime.latest[f"solenoid{index + 1}_on"], on)
-        self.assertEqual(self.stepper.commands, [b"V1 L4,1\n", b"V1 L4,1\n", b"V1 L4,0\n"])
+        self.assertEqual(self.stepper.commands, [f"V1 L{wire},{state}\n".encode()
+                                                for wire in (5, 6, 4) for state in (1, 1, 0)])
 
     def test_spreadsheet_brushless_configures_pulse_and_on_off_in_simulation(self):
         sources = core.make_sources(esp32_source="sim", dxmr90_source="sim", stepper_source="sim", esp32_auto_sequence=False)
@@ -756,7 +762,7 @@ class BackendTests(unittest.TestCase):
     def test_spreadsheet_solenoid_waits_for_observed_state_not_dispatch(self):
         self.stepper.apply = False
         runtime = self.runtime()
-        runtime.load_experiment({"csv": self.actuator_program("controllino", "solenoid4", "open")})
+        runtime.load_experiment({"csv": self.actuator_program("controllino", "solenoid3", "open")})
         runtime.start_experiment({})
         for elapsed in (0.1, 0.2, 0.3):
             with runtime._condition:
@@ -773,9 +779,9 @@ class BackendTests(unittest.TestCase):
         for index, (source, device, target, pulse) in enumerate((("esp32", "solenoid4", "open", ""),
                                               ("controllino", "brushless_motor", "on", ""),
                                               ("controllino", "brushless_motor", "pulse", "999"),
-                                              ("controllino", "solenoid4", "open", ""))):
+                                              ("controllino", "solenoid3", "open", ""))):
             with self.subTest(device=device, target=target, pulse=pulse):
-                if device == "solenoid4" and source == "controllino":
+                if device == "solenoid3" and source == "controllino":
                     self.stepper.payload.update(e=1)
                     self.stepper.refresh()
                 runtime = self.runtime()
@@ -797,6 +803,7 @@ class BackendTests(unittest.TestCase):
         from unittest.mock import Mock
         source = Mock(spec=["toggle_solenoid"])
         self.controls.sources["esp32"] = source
+        self.controls.sources["stepper"] = core.SimulatedStepperSource()
         for observed, target in ((True, True), (False, False)):
             self.controls.solenoid_state(0, target, {"esp32_sol1": observed}, {})
         source.toggle_solenoid.assert_not_called()

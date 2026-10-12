@@ -206,7 +206,7 @@ class ExperimentIoTests(unittest.TestCase):
         # Replace the already-loaded program before starting its dispatch.
         runtime.experiment.fail('test_reset', .2)
         rows = list(csv.DictReader(io.StringIO(program(1, 3, 5, 6))))
-        rows[2].update(source='esp32', set_point='open', device='solenoid1;solenoid2;solenoid3',
+        rows[2].update(source='controllino', set_point='open', device='solenoid1;solenoid2;solenoid3',
                        speed_mm_s='', duration_s='', direction='')
         buffer = io.StringIO()
         writer = csv.DictWriter(buffer, fieldnames=list(rows[0]), lineterminator='\n')

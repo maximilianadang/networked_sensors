@@ -24,6 +24,7 @@
   --chart-red: #bd3541;
   --chart-cyan: #087f8c;
   --chart-violet: #7040b8;
+  --chart-gray: #586474;
   --shadow: rgba(15, 23, 42, 0.10);
 }
 
@@ -211,7 +212,7 @@ main { display: grid; gap: 6px; padding: 8px 16px; min-width: 0; }
 .toolbar { display: grid; grid-template-columns: 3fr 2fr 4fr; gap: 12px; align-items: stretch; }
 .toolbar-actions { display: grid; gap: 6px; }
 .run-actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.solenoid-actions { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.solenoid-actions { grid-template-columns: repeat(var(--solenoid-count, 4), minmax(0, 1fr)); }
 .toolbar-actions button { min-width: 0; padding: 6px; font-weight: 700; }
 .emergency-actions { min-width: 0; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
 button.emergency-stop { grid-row: 1 / -1; min-height: 54px; padding: 4px; }
@@ -232,6 +233,14 @@ button.emergency-reset { min-height: 26px; padding: 2px 6px; }
 .metric-values > div { display: grid; min-width: 0; }
 .metric-values .value { font-size: 1rem; }
 .metric-values > div > span { white-space: nowrap; }
+
+.pressure-values { gap: 4px; }
+.pressure-values .channel { display: flex; align-items: baseline; gap: 2px; }
+.pressure-values .unit { font-size: inherit; }
+@media (min-width: 1121px) {
+  .pressure-values[data-pressure-group="low"] .channel { font-size: clamp(.65rem, .9vw, .8rem); }
+  .pressure-values[data-pressure-group="low"] .value { font-size: clamp(.65rem, .9vw, 1rem); }
+}
 
 /* SHARED PANELS: Pressure (bar), ESP32 Mass Flow (g/min), SICK Mass Flow (g/min).
    Behavior: app-lean.js (Charts); series labels: app-lean.js (Charts). */
@@ -496,12 +505,13 @@ canvas { display: block; width: 100%; height: 240px; background: var(--chart-bg)
 }
 
 .piston-head {
+  --head-height: 34px;
   position: absolute;
   left: 50%;
-  top: var(--piston-position);
+  top: clamp(calc(var(--head-height) / 2), var(--piston-position), calc(100% - var(--head-height) / 2));
   z-index: 2;
   width: 112px;
-  height: 34px;
+  height: var(--head-height);
   transform: translate(-50%, -50%);
   border: 3px solid #344454;
   border-radius: 8px;
@@ -719,8 +729,7 @@ canvas { display: block; width: 100%; height: 240px; background: var(--chart-bg)
   body { height: 100dvh; }
   main { flex: 1; min-height: 0; grid-template-rows: auto auto minmax(160px, 1fr) minmax(min-content, 1.5fr) auto auto; }
   canvas { height: 100%; min-height: 0; }
-  .piston-visual { min-height: 0; padding: 6px; grid-template-rows: auto minmax(0, 1fr); gap: 6px; }
-  .piston-stage { min-height: 0; }
+  .piston-visual { padding: 6px; gap: 6px; }
   .stepper-console .stepper-interlocks dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (prefers-reduced-motion: reduce) { .piston-head, .piston-rod { transition: none; animation: none !important; } }
@@ -778,6 +787,7 @@ canvas { display: block; width: 100%; height: 240px; background: var(--chart-bg)
 .can-motor-control[hidden] { display: none; }
 .can-motor-inputs { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .can-motor-inputs input { width: 100%; min-width: 0; }
+.can-motor-readout { padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .can-motor-readings { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; margin: 0; font-size: .8rem; }
 .can-motor-readings dt, .can-motor-readings dd { margin: 0; overflow-wrap: anywhere; }
 .can-motor-readings dd { text-align: right; font-variant-numeric: tabular-nums; }

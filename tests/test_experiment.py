@@ -224,11 +224,11 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(runner.snapshot()["current_row"], 3)
         sample = healthy_sample("controllino", stepper_command_capable=True,
                                 stepper_dro_capable=True, stepper_dro_sample_age_ms=100,
-                                stepper_servo_capable=True, stepper_solenoid4_capable=True)
+                                stepper_servo_capable=True, stepper_solenoid3_capable=True)
         for field, value in (("stepper_transport_error", "controller disconnected"),
                              ("stepper_age_ms", 1001), ("stepper_command_capable", False),
                              ("stepper_dro_capable", False), ("stepper_servo_capable", None),
-                             ("stepper_solenoid4_capable", False),
+                             ("stepper_solenoid3_capable", False),
                              ("stepper_dro_sample_age_ms", 1001)):
             with self.subTest(field=field):
                 runner.on_sample(dict(sample, **{field: value}), 0.3)
@@ -239,7 +239,7 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(state["state"], "completed")
         self.assertEqual([result["status"] for result in state["results"]], ["passed"] * 3)
         self.assertEqual(set(state["results"][2]["checks"]),
-                         {"freshness", "health", "stepper", "dro", "servo", "solenoid4"})
+                         {"freshness", "health", "stepper", "dro", "servo", "solenoid3"})
 
     def test_active_program_cannot_be_replaced_or_started_twice(self):
         runner = self.runner()
@@ -401,7 +401,7 @@ class ExperimentTests(unittest.TestCase):
                 ("esp32", "solenoid2", "closed", "", "esp32_sol2", False),
                 ("esp32", "solenoid3", "open", "", "esp32_sol3", True),
                 ("esp32", "solenoid4", "closed", "", "esp32_sol4", False),
-                ("controllino", "solenoid4", "open", "", "stepper_solenoid4_on", True),
+                ("controllino", "solenoid3", "open", "", "stepper_solenoid3_on", True),
                 ("controllino", "brushless_motor", "on", "", "stepper_brushless_motor_on", True),
                 ("controllino", "brushless_motor", "off", "", "stepper_brushless_motor_on", False),
                 ("controllino", "brushless_motor", "pulse", "1400", "stepper_brushless_motor_setpoint_us", 1400)):
@@ -437,7 +437,7 @@ class ExperimentTests(unittest.TestCase):
                     program.replace("1400", ""), program.replace("1400", "1400.5"),
                     program.replace("1400", "nan"), program.replace("pulse,", "on,"),
                     program.replace("controllino,1000,ok,10", "controllino,1000,ok,0"),
-                    self.actuator_program("controllino", "solenoid1", "open"),
+                    self.actuator_program("controllino", "solenoid4", "open"),
                     self.actuator_program("esp32", "solenoid1", "on"),
                     self.actuator_program("esp32", "solenoid1", "off"),
                     self.actuator_program("esp32", "brushless_motor", "on")):

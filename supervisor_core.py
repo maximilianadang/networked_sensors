@@ -21,6 +21,7 @@ from urllib.parse import quote, urlencode, urlparse
 from urllib.request import ProxyHandler, Request, build_opener
 
 from read_ed593_ascii import DEFAULT_HOST as DEFAULT_ED593_HOST, DEFAULT_PORT as DEFAULT_ED593_PORT
+from controllino_io import CONTROLLINO_RELAYS, PRESSURE_INPUTS, SOLENOID_COUNT, pressure_fields
 
 try:
     from .read_dxmr90_modbus import (
@@ -30,6 +31,7 @@ try:
         DEFAULT_UNIT_ID as DEFAULT_DXMR90_UNIT_ID,
         HEARTBEAT,
         MEASUREMENTS,
+        SICK_PORT3_FIELDS,
         Metric,
         ModbusError,
         ModbusTcpClient,
@@ -44,6 +46,7 @@ except ImportError:  # pragma: no cover - direct script execution fallback
         DEFAULT_UNIT_ID as DEFAULT_DXMR90_UNIT_ID,
         HEARTBEAT,
         MEASUREMENTS,
+        SICK_PORT3_FIELDS,
         Metric,
         ModbusError,
         ModbusTcpClient,
@@ -370,8 +373,9 @@ class DeviceControls:
             lambda p: p.get("stepper_estop_latched") is True and p.get("stepper_moving") is False
             and all(p.get(f"stepper_{device}_capable") is not True or p.get(f"stepper_{state}") is False
                     for device, state in (("brushless_motor", "brushless_motor_on"),
-                                          ("solenoid4", "solenoid4_on"), ("servo", "servo_enabled"),
-                                          ("can_motor", "can_motor_active"))),
+                                          ("servo", "servo_enabled"), ("can_motor", "can_motor_active"))
+                              + tuple((f"solenoid{r['index'] + 1}", f"solenoid{r['index'] + 1}_on")
+                                      for r in CONTROLLINO_RELAYS)),
             confirmed=True,
         )
 
@@ -571,8 +575,8 @@ class DeviceControls:
         )
 
     def solenoid_state(self, index: int, on: bool, sample: Mapping[str, object], current: dict[str, object]) -> CommandReceipt:
-        if type(index) is not int or not 0 <= index < ESP32_SOLENOID_COUNT or type(on) is not bool:
-            raise ValueError("solenoid requires index 0..3 and a boolean state")
+        if type(index) is not int or not 0 <= index < solenoid_count(self.sources["stepper"].mode) or type(on) is not bool:
+            raise ValueError("solenoid requires an installed index and a boolean state")
         owner = solenoid_source_name(index, self.sources["stepper"].mode)
         source = self.sources[owner]
         if hasattr(source, "set_solenoid"):
@@ -588,17 +592,20 @@ class DeviceControls:
         return CommandReceipt(source, None, "solenoid state", None, {"index": index, "state": on})
 
     def toggle_solenoid(self, index: int, sample: Mapping[str, object], current: dict[str, object]) -> CommandReceipt:
-        if type(index) is not int or not 0 <= index < ESP32_SOLENOID_COUNT:
-            raise ValueError("solenoid index must be 0, 1, 2, or 3")
+        if type(index) is not int or not 0 <= index < solenoid_count(self.sources["stepper"].mode):
+            raise ValueError("solenoid index must identify an installed output")
         owner = solenoid_source_name(index, self.sources["stepper"].mode)
         source = self.sources[owner]
         if sample.get(f"solenoid{index + 1}_connected") is not True:
             raise RuntimeError(f"{owner} solenoid control stream is not live")
         if owner == "stepper":
-            state = not current.get("stepper_solenoid4_on")
+            field = f"stepper_solenoid{index + 1}_on"
+            if type(current.get(field)) is not bool:
+                raise RuntimeError("Controllino solenoid state is unavailable")
+            state = not current[field]
             source.set_solenoid(index, state)
             return self._receipt(
-                source, current, "solenoid 4 state", lambda p: p.get("stepper_solenoid4_on") is state,
+                source, current, f"solenoid {index + 1} state", lambda p: p.get(field) is state,
                 always=True, index=index, state=state,
             )
         state = source.toggle_solenoid(index)
@@ -775,7 +782,7 @@ class SimulatedDxmr90Source(PeriodicSource):
     period_s = DXMR90_PERIOD_S
     expected_fields = tuple(f"dxmr90_{metric.name}" for metric in DXMR90_CORE_METRICS) + (
         "dxmr90_transport_error",
-    )
+    ) + tuple(f"dxmr90_{name}" for name in SICK_PORT3_FIELDS)
 
     def _read(self, elapsed_s: float) -> Mapping[str, float | int | bool | str | None]:
         heartbeat = int(elapsed_s // self.period_s) + 1
@@ -819,6 +826,8 @@ class SimulatedDxmr90Source(PeriodicSource):
                 values[key] = round(22.4 + 0.2 * math.sin(0.1 * elapsed_s + 0.4), 3)
             elif metric.name == "total_volumetric_flow_l_min":
                 values[key] = round(44.0 + 18.0 * flow_wave, 3)
+        values.update(dxmr90_port3_mass_flow_g_min=round(18.0 + 5.0 * flow_wave, 3),
+                      dxmr90_port3_flow_valid=True, dxmr90_port3_status=3, dxmr90_port3_error=None)
         return values
 
 
@@ -2360,20 +2369,30 @@ class NetworkStepperSource(UsbStepperSource):
             self._thread.join(timeout=max(1.0, self.timeout + self.period_s))
 
 
+def solenoid_count(stepper_mode: str) -> int:
+    return SOLENOID_COUNT if stepper_mode == "controllino" else ESP32_SOLENOID_COUNT
+
+
+def solenoid_descriptors(stepper_mode: str) -> list[dict[str, object]]:
+    if stepper_mode == "controllino":
+        return [{**relay, "source": "stepper"} for relay in CONTROLLINO_RELAYS]
+    return [{"index": i, "label": f"Solenoid {i + 1}", "source": "esp32"}
+            for i in range(ESP32_SOLENOID_COUNT)]
+
+
 def solenoid_source_name(index: int, stepper_mode: str) -> str:
-    """Physical ownership: Controllino R5 owns valve 4 on that installation."""
-    return "stepper" if index == 3 and stepper_mode == "controllino" else "esp32"
+    return "stepper" if stepper_mode == "controllino" else "esp32"
 
 
 def solenoid_status(sample: Mapping[str, object]) -> dict[str, object]:
     """Normalize valve ownership/capability without losing the raw source fields."""
     status = {}
-    for index in range(ESP32_SOLENOID_COUNT):
+    for index in range(solenoid_count(str(sample.get("stepper_mode", "off")))):
         owner = solenoid_source_name(index, str(sample.get("stepper_mode", "off")))
-        field = "stepper_solenoid4_on" if owner == "stepper" else f"esp32_sol{index + 1}"
+        field = f"stepper_solenoid{index + 1}_on" if owner == "stepper" else f"esp32_sol{index + 1}"
         connected = sample.get(f"{owner}_connected") is True
         if owner == "stepper":
-            connected = (connected and sample.get("stepper_solenoid4_capable") is True
+            connected = (connected and sample.get(f"stepper_solenoid{index + 1}_capable") is True
                          and not sample.get("stepper_transport_error"))
         status[f"solenoid{index + 1}_source"] = owner
         status[f"solenoid{index + 1}_connected"] = bool(connected)
@@ -2386,7 +2405,7 @@ class ControllinoProtocol:
 
     mode = "controllino"  # Dashboard behavior depends on the machine, not the cable.
     expected_fields = UsbStepperSource.expected_fields + (
-        "stepper_solenoid4_capable", "stepper_solenoid4_on",
+        "stepper_dro_kind", "stepper_pressure_capable", "stepper_pressure_sample_age_ms", "stepper_pressure_sequence",
         "stepper_firmware_version", "stepper_aux_kind", "stepper_aux_pin",
         "stepper_servo_capable", "stepper_servo_enabled", "stepper_servo_pulse_us",
         "stepper_servo_min_us", "stepper_servo_max_us",
@@ -2401,7 +2420,8 @@ class ControllinoProtocol:
         "stepper_can_motor_lease_ms", "stepper_can_motor_ramp_rpm_s",
         "stepper_can_motor_applied_rpm", "stepper_can_motor_max_ramp_rpm_s",
         "stepper_can_motor_default_ramp_rpm_s",
-    ) + tuple("stepper_can_motor_diag_" + key for key in CUBEMARS_DIAGNOSTIC_KEYS)
+    ) + tuple("stepper_can_motor_diag_" + key for key in CUBEMARS_DIAGNOSTIC_KEYS) + pressure_fields() + tuple(
+        f"stepper_solenoid{r['index'] + 1}_{suffix}" for r in CONTROLLINO_RELAYS for suffix in ("capable", "on"))
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
@@ -2473,9 +2493,22 @@ class ControllinoProtocol:
                     or (not payload["cm"] and payload["cramp"])):
                 raise ValueError("Invalid manual CAN motor state telemetry")
 
-        solenoid4 = payload.get("sol4")
-        if "sol4" in payload and (type(solenoid4) is not int or solenoid4 not in (0, 1)):
-            raise ValueError("Controllino sol4 must be 0 or 1")
+        for relay in CONTROLLINO_RELAYS:
+            key = f"sol{relay['wire_id']}"
+            if key in payload and (type(payload[key]) is not int or payload[key] not in (0, 1)):
+                raise ValueError(f"Controllino {key} must be 0 or 1")
+        dro_kind = payload.get("dkind", "absolute_dro")
+        if not isinstance(dro_kind, str) or not dro_kind or len(dro_kind) > 32:
+            raise ValueError("Controllino DRO identity must be a short string")
+        pressure = any(key in payload for key in ("adc", "adcage", "adcseq"))
+        if pressure:
+            adc, age, sequence = (payload.get(key) for key in ("adc", "adcage", "adcseq"))
+            if (not isinstance(adc, list) or len(adc) != len(PRESSURE_INPUTS)
+                    or any(type(value) is not int or not 0 <= value <= 1023 for value in adc)
+                    or type(age) is not int or not -1 <= age <= 0x7FFFFFFF
+                    or type(sequence) is not int or not 0 <= sequence <= 0xFFFFFFFF
+                    or (sequence == 0) != (age == -1)):
+                raise ValueError("Invalid Controllino pressure ADC snapshot")
 
         # The Controllino truthfully uses -1/0 for absent switches and DRO.
         # Adapt those unavailable inputs to the legacy decoder, then explicitly
@@ -2508,8 +2541,10 @@ class ControllinoProtocol:
                 "stepper_servo_max_us": payload.get("smax") if servo else None,
                 "stepper_servo_release_capable": servo and payload.get("srel") == 1,
                 "stepper_servo_releasing": servo and payload.get("sr", 0) > 0,
-                "stepper_solenoid4_capable": "sol4" in payload,
-                "stepper_solenoid4_on": bool(solenoid4) if "sol4" in payload else None,
+                "stepper_dro_kind": dro_kind,
+                "stepper_pressure_capable": pressure,
+                "stepper_pressure_sample_age_ms": payload["adcage"] if pressure and payload["adcage"] >= 0 else None,
+                "stepper_pressure_sequence": payload.get("adcseq"),
                 "stepper_local_enabled": not bool(values["stepper_estop_latched"]),
                 "stepper_authorized_direction": "both",
                 "stepper_home_capable": False,
@@ -2520,6 +2555,14 @@ class ControllinoProtocol:
                 ),
             }
         )
+        for relay in CONTROLLINO_RELAYS:
+            number = relay["index"] + 1
+            key = f"sol{relay['wire_id']}"
+            values[f"stepper_solenoid{number}_capable"] = key in payload
+            values[f"stepper_solenoid{number}_on"] = bool(payload[key]) if key in payload else None
+        values.update({f"stepper_pressure{n['id']}_adc": payload["adc"][i]
+                       if pressure and payload["adcseq"] else None
+                       for i, n in enumerate(PRESSURE_INPUTS)})
         values.update({
             "stepper_can_motor_capable": can_motor,
             "stepper_can_motor_ready": (can_motor and payload["cb"] == 1
@@ -2617,14 +2660,16 @@ class ControllinoProtocol:
         self._write_command(f"V1 A{pulse_us}{suffix}\n".encode("ascii"), "servo position")
 
     def set_solenoid(self, index: int, on: bool) -> None:
-        if index != 3 or type(on) is not bool:
-            raise ValueError("Controllino supports solenoid index 3 with a boolean state")
+        relay = next((r for r in CONTROLLINO_RELAYS if type(index) is int and r["index"] == index), None)
+        if relay is None or type(on) is not bool:
+            raise ValueError("Controllino requires an installed relay index and a boolean state")
         values = self._require_connected()
-        if values.get("stepper_solenoid4_capable") is not True:
-            raise RuntimeError("Controllino firmware needs solenoid 4 support")
+        number = index + 1
+        if values.get(f"stepper_solenoid{number}_capable") is not True:
+            raise RuntimeError(f"Controllino firmware needs solenoid {number} support")
         if on and values.get("stepper_estop_latched"):
-            raise RuntimeError("reset the software E-STOP before opening solenoid 4")
-        self._write_command(f"V1 L4,{int(on)}\n".encode("ascii"), "solenoid 4")
+            raise RuntimeError("reset the software E-STOP before opening a solenoid")
+        self._write_command(f"V1 L{relay['wire_id']},{int(on)}\n".encode("ascii"), f"solenoid {number}")
 
     def set_local_run(
         self, direction: object
@@ -3124,7 +3169,10 @@ class RealDxmr90Source:
             values = {f"dxmr90_{name}": value for name, value in direct_values.items()}
         else:
             assert rows is not None
-            values = {}
+            # No third-sensor register has been assigned in the legacy DXM script.
+            values = {f"dxmr90_{name}": None for name in SICK_PORT3_FIELDS}
+            values.update(dxmr90_port3_flow_valid=False,
+                          dxmr90_port3_error="Port 3 is unavailable in republished mode")
             for row in rows:
                 values[f"dxmr90_{row['name']}"] = row["value"]  # type: ignore[assignment]
         with self._state_lock:

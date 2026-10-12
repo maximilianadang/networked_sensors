@@ -1,6 +1,6 @@
 // CONTROLLINO MAXI Automation motion controller (100.101.00)
 // Version and auxiliary-output capability: controllino_firmware.h
-// Shares the AbsoluteDRO protocol with the Yún controller.
+// LinACE PWM by default; the legacy AbsoluteDRO reader remains selectable.
 //
 // Wiring and electrical polarity: wiring_controllino.h
 //
@@ -15,7 +15,13 @@
 #include <errno.h>
 #include <util/atomic.h>
 #include "wiring_controllino.h"
+#if CONTROLLINO_DRO_KIND == DRO_BACKEND_LINACE
+#include "linace_avr.h"
+#else
 #include "absolute_dro_avr.h"
+#endif
+#include "pressure_adc.h"
+#include "relay_bank.h"
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
 #include "cubemars_can.h"
 CubeMarsCan cubeMars(PIN_CAN_CS);
@@ -34,9 +40,16 @@ IPAddress ip(10, 77, 0, 10), dns(10, 77, 0, 2), gateway(10, 77, 0, 2);
 IPAddress subnet(255, 255, 255, 0);
 EthernetServer server(80);
 
-// Read-only DRO: X1 SCL clock / Digital 4 data (see wiring_controllino.h).
+// Read-only encoder uses the same position/freshness contract for both readers.
+#if CONTROLLINO_DRO_KIND == DRO_BACKEND_LINACE
+LinaceReader dro;
+ISR(TIMER5_OVF_vect) { dro.onOverflow(); }
+#else
 AbsoluteDroReader dro;
+#endif
 void onDroClock() { dro.onClock(); }
+PressureAdc pressures;
+RelayBank solenoids;
 
 // ---------- 2. Hardware-timed STEP and ESC outputs ----------
 volatile bool pulseOn = false, pulseFinite = false, pulseReached = false;
@@ -64,13 +77,6 @@ void setServoPulse(unsigned int pulseUs, byte releaseFrames = 0) {
     } else digitalWrite(PIN_AUX, LOW);
   }
 }
-bool solenoid4On = false;
-
-void setSolenoid4(bool on) {
-  solenoid4On = on;
-  digitalWrite(PIN_SOLENOID4, on ? SOLENOID_ON : SOLENOID_OFF);
-}
-
 uint16_t compareFor(long sps) {
   unsigned long ticks = (STEP_TIMER_HZ + sps / 2) / sps;
   return uint16_t(constrain(ticks, 2UL, 65536UL) - 1);
@@ -196,16 +202,15 @@ void serviceMotion() {
 
 void serviceRealtime() {
   dro.poll();
+  pressures.poll(millis());
   serviceMotion();
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
   cubeMars.service(millis());
 #endif
 }
 
-// Print's usual multi-byte writes can starve CAN RX/expiry while serial TX fills
-// or HTTP output waits. Service between bytes; CubeMars builds also bound the
-// W5100 retransmit/close waits in setup()/serviceNetwork(). No SPI runs in ISRs.
-#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
+// Service input acquisition and motion while serial TX fills or HTTP output
+// waits, including the 9600-baud ESC/MS62 variants. No SPI runs in ISRs.
 class ServicedPrint : public Print {
  public:
   explicit ServicedPrint(Print &output) : output_(output) {}
@@ -229,7 +234,6 @@ class ServicedPrint : public Print {
   Print &output_;
   uint8_t buffer_[32], length_ = 0;
 };
-#endif
 
 // ---------- 4. V1 command parser and compact status contract ----------
 bool parseLong(char *text, long &value) {
@@ -256,7 +260,7 @@ void processCommand(char *line, byte source) {
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
     cubeMars.release("emergency_stop", false);
 #endif
-    setSolenoid4(false); halt(ESTOPPED, "emergency_stop"); return;
+    solenoids.allOff(); halt(ESTOPPED, "emergency_stop"); return;
   }
   if (!strcmp(line, "V1 X")) {
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
@@ -278,10 +282,16 @@ void processCommand(char *line, byte source) {
     estop = false; state = mode == WEB_POSITION ? WEB_READY : LOCAL_STOPPED;
     return accept(source, "estop_reset");
   }
-  if (!strcmp(line, "V1 L4,0") || !strcmp(line, "V1 L4,1")) {
-    bool on = line[6] == '1';
+  if (!strncmp(line, "V1 L", 4)) {
+    char *separator = strchr(line + 4, ',');
+    if (!separator) return reject("solenoid_command_grammar");
+    *separator = '\0'; long id, value;
+    if (!parseLong(line + 4, id) || !parseLong(separator + 1, value) ||
+        !RelayBank::validId(id) || (value != 0 && value != 1))
+      return reject("solenoid_command_grammar");
+    bool on = value == 1;
     if (on && estop) return reject("emergency_stop");
-    setSolenoid4(on); return accept(source);
+    solenoids.set(id, on); return accept(source);
   }
   if (!strncmp(line, "V1 C", 4)) {
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
@@ -400,11 +410,7 @@ void processCommand(char *line, byte source) {
 }
 
 void writeStatus(Print &destination, bool ack = false) {
-#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
   ServicedPrint out(destination);
-#else
-  Print &out = destination;
-#endif
   if (ack) {
     out.print(F("{\"v\":1,\"t\":\"a\",\"ok\":")); out.print(accepted);
     out.print(F(",\"e\":\"")); out.print(error); out.println(F("\"}")); return;
@@ -417,8 +423,18 @@ void writeStatus(Print &destination, bool ack = false) {
   out.print(F(",\"aps\":")); out.print(moving() ? labs(signedSps()) : 0);
   out.print(F(",\"ds\":1,\"en\":")); out.print(driverEnabled);
   out.print(F(",\"ut\":1"));
-  out.print(F(",\"sol4\":")); out.print(solenoid4On);
+  solenoids.writeStatus(out);
+  out.print(F(",\"dkind\":\"")); out.print(DRO_IS_LINACE ? F("linace") : F("absolute_dro"));
+  out.print('"');
+#if CONTROLLINO_DRO_KIND == DRO_BACKEND_LINACE
   dro.writeStatus(out, millis());
+#else
+  // Keep the shared Yún legacy reader untouched; serviced printing may poll
+  // the live reader, so serialize an independent copy of its reading.
+  const AbsoluteDroReader reading = dro;
+  reading.writeStatus(out, millis());
+#endif
+  pressures.writeStatus(out, millis());
   out.print(F(",\"m\":")); out.print(mode);
   out.print(F(",\"h\":0,\"a\":1,\"e\":")); out.print(estop);
   out.print(F(",\"fw\":\"")); out.print(FIRMWARE_VERSION);
@@ -490,19 +506,16 @@ void serviceNetwork() {
     value += 15; char *space = strchr(value, ' '); if (space) *space = 0;
     decodeUrl(value); processCommand(value, OWNER_NETWORK);
   }
-#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
   ServicedPrint response(client);
   response.println(F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n"));
   response.flush();
   client.setConnectionTimeout(5);
-#else
-  client.println(F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n"));
-#endif
   writeStatus(client, value != nullptr); delay(1); client.stop();
 }
 
 void setup() {
-  digitalWrite(PIN_SOLENOID4, SOLENOID_OFF); pinMode(PIN_SOLENOID4, OUTPUT);
+  solenoids.begin(SOLENOID_PINS, SOLENOID_ON, SOLENOID_OFF);
+  pressures.begin(PRESSURE_PINS);
   digitalWrite(PIN_ENABLE, DRIVER_DISABLED); pinMode(PIN_ENABLE, OUTPUT);
   digitalWrite(PIN_STEP, STEP_IDLE); digitalWrite(PIN_DIR, DIR_REVERSE);
   pinMode(PIN_STEP, OUTPUT); pinMode(PIN_DIR, OUTPUT);
@@ -520,12 +533,12 @@ void setup() {
     TIMSK3 = _BV(TOIE3) | _BV(OCIE3A);
   }
 
-  dro.begin(PIN_DRO_CLOCK, PIN_DRO_DATA, onDroClock);
+  dro.begin(PIN_DRO_CLOCK, PIN_DRO_SECONDARY, onDroClock);
   Serial.begin(AUX_IS_CUBEMARS ? 115200 : 9600);
   Ethernet.begin(mac, ip, dns, gateway, subnet); server.begin();
-#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
   // Bound the library's synchronous TCP send retries (LAN controller traffic).
   Ethernet.setRetransmissionTimeout(5); Ethernet.setRetransmissionCount(1);
+#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
   cubeMars.begin();
 #endif
   Serial.println(F("CONTROLLINO motion control ready: stopped and disabled."));

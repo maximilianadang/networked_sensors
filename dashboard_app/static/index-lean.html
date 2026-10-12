@@ -32,7 +32,7 @@
       <button id="emergencyReset" class="emergency-reset" type="button" title="Reset E-STOP">Reset</button>
       <span id="emergencyState" class="emergency-state" aria-live="assertive">E-STOP status unknown</span>
     </div>
-    <div class="toolbar-actions solenoid-actions">
+    <div id="solenoidControls" class="toolbar-actions solenoid-actions" aria-label="Solenoid outputs">
       <button id="sol0" class="solenoid" type="button" aria-keyshortcuts="1">Solenoid 1 <kbd class="shortcut-key" aria-hidden="true">1</kbd></button>
       <button id="sol1" class="solenoid" type="button" aria-keyshortcuts="2">Solenoid 2 <kbd class="shortcut-key" aria-hidden="true">2</kbd></button>
       <button id="sol2" class="solenoid" type="button" aria-keyshortcuts="3">Solenoid 3 <kbd class="shortcut-key" aria-hidden="true">3</kbd></button>
@@ -41,7 +41,7 @@
   </section>
 
   <section class="metric-grid" aria-label="Live values">
-    <article class="metric">
+    <article id="espPressureMetric" class="metric">
       <label>ESP32 Pressure <span class="unit">(bar)</span></label>
       <div class="metric-values">
         <div><span class="channel">P1</span><span><span id="mEspP1" class="value">--</span></span></div>
@@ -49,18 +49,18 @@
         <div><span class="channel">P3</span><span><span id="mEspP3" class="value">--</span></span></div>
       </div>
     </article>
-    <article class="metric"><label>SICK Pressure (max)</label><div><span id="mSickPressure" class="value">--</span><span class="unit"> bar</span></div></article>
+    <article id="sickPressureMetric" class="metric"><label>SICK Pressure (max)</label><div><span id="mSickPressure" class="value">--</span><span class="unit"> bar</span></div></article>
     <article class="metric"><label>Open-Line Air Flow</label><div><span id="mOpenFlow" class="value">--</span><span class="unit"> g/min</span></div></article>
     <article class="metric"><label>Air:Powder Ratio</label><div><span id="mAirPowderRatio" class="value">--</span><span class="unit"> : 1</span></div></article>
-    <article class="metric"><label>SICK Flow · Solenoid 4</label><div><span id="mSickFlow" class="value">--</span><span class="unit"> g/min</span></div></article>
+    <article class="metric"><label id="sickFlowLabel">SICK Flow · Solenoid 4</label><div><span id="mSickFlow" class="value">--</span><span class="unit"> g/min</span></div></article>
     <article class="metric"><label>Heartbeat</label><div><span id="mHeartbeat" class="value">--</span><span class="unit"> count</span></div></article>
   </section>
 
   <section class="plot-grid" aria-label="Plots">
     <article class="plot-panel">
       <div class="plot-head">
-        <h2>Pressure (bar)</h2>
-        <div class="legend">
+        <h2 id="pressureChartTitle">Pressure (bar)</h2>
+        <div id="controllinoPressureLegend" class="legend">
           <span style="color: var(--chart-blue)"><i class="swatch"></i>ESP32 1</span>
           <span style="color: var(--chart-green)"><i class="swatch"></i>ESP32 2</span>
           <span style="color: var(--chart-amber)"><i class="swatch"></i>ESP32 3</span>
@@ -247,7 +247,7 @@
       <p>For reading_state, blank max_age_ms omits freshness checks, blank health omits transport-health checks. Device readiness is checked on telemetry_health rows. Each can be selected independently. With both blank, only a finite measured value within the row bounds is required. The comparison uses the latest available value even if old; missing or nonnumeric values still fail. Telemetry acquisition is unchanged. Requested-state and telemetry-health rows retain their existing requirements.</p>
       <p>Reading rows use set_point=check (or blank) to check once. Use set_point=on on controllino/dro to check position validity/bounds and any selected health requirement on later telemetry events and timer ticks while subsequent rows run. max_age_ms applies only to the initial reading row; it is not retained by the persistent monitor. Disable with action=reading_state, source=controllino, device=dro, set_point=off, timeout_s; leave all threshold, pulse, and motion columns blank. A persistent check must be disabled explicitly before the experiment ends, and is checked before its disable row. Failure halts execution and requests a stop if a spreadsheet move is in progress; other outputs retain their requested states. timeout_s bounds the enable/disable row, not the lifetime of an enabled check.</p>
       <p>For ED-593 health, use source=ed593 and list channels in device as tc0;tc1;tc2;tc3. Channel readiness means enabled with no reported diagnostic fault. For temperature bounds, use action=reading_state, source=ed593, device=tc0 through tc7, min_c, max_c, and timeout_s. Freshness and transport health are optional via max_age_ms and health=ok. Channel readiness is checked on telemetry_health rows. Use set_point=check (or blank); pulse/motion columns must be blank. A failed temperature check halts spreadsheet execution; each row checks once and does not remain an active monitor.</p>
-      <p>For solenoids, use action=requested_state, device=solenoid1 through solenoid4, and set_point=open or closed. Separate compatible targets on the same source with semicolons, for example device=solenoid1;solenoid2;solenoid3. All requests are sent in the row before telemetry confirmation; the row advances only when every target is confirmed. Individual protocol requests are sequential, so electrical switching times can differ. Installed valves are normally closed: open energizes the output, closed de-energizes it. Confirmation uses reported electrical output, not valve-position feedback. Use source=esp32, except solenoid4 on a Controllino installation uses source=controllino. For the brushless motor, use source=controllino and device=brushless_motor: set_point=pulse with pulse_us (1000–2000) configures its ON output; set_point=on or off changes its output state. Set max_age_ms, health=ok, and timeout_s explicitly; leave motion columns blank. Commands require the installed firmware capability.</p>
+      <p>For solenoids, use action=requested_state and set_point=open or closed. The Controllino controls solenoid1 (R3), solenoid2 (R4), and solenoid3 (R5), using source=controllino. Each requires support in the connected firmware. Legacy ESP32 installations use source=esp32 for solenoid1 through solenoid4. Separate compatible targets with semicolons, for example device=solenoid1;solenoid2;solenoid3. The row advances when every requested electrical output is confirmed; this is not valve-position feedback. Installed valves are normally closed: open energizes the output and closed de-energizes it. Individual protocol requests are sequential. Set max_age_ms, health=ok, and timeout_s explicitly; leave motion columns blank. For the brushless motor, use source=controllino and device=brushless_motor: set_point=pulse with pulse_us (1000–2000) configures its ON output; set_point=on or off changes its output state.</p>
       <p>For the AK80-6, use action=requested_state, source=controllino, device=can_motor, set_point=speed, signed output rpm, and duration_s. Use rpm=0 with blank duration_s to release torque. Set max_age_ms, health=ok, and timeout_s explicitly. The connected firmware sets the allowed speed and duration. The row confirms request acceptance and advances; it does not wait for measured speed or run completion, and never renews the run automatically.</p>
       <p>To change the controller mode, use action=requested_state, source=controllino, device=stepper, set_point=positional or directional. Set max_age_ms, health=ok, and timeout_s explicitly; leave motion columns blank. The row waits for fresh telemetry reporting the requested mode.</p>
       <p>To move the stepper, use action=requested_state, source=controllino, device=stepper, set_point=move, speed_mm_s, duration_s, and direction=forward or reverse. Set max_age_ms, health=ok, and timeout_s explicitly. Place a positional mode row before the move. Speed × duration determines relative travel; duration is nominal motion time, excluding driver startup and pulse rounding. For moves, timeout_s covers dispatch and start confirmation. After start, wait for matching firmware pulse completion and stopped motion without a completion deadline; transient source lag/errors do not abort this wait. Explicit reading monitors and reported controller faults still apply.</p>
@@ -322,6 +322,7 @@
             <dt>Age</dt><dd id="dxAge">--</dd>
             <dt>Port 1</dt><dd id="dxPort1">--</dd>
             <dt>Port 2</dt><dd id="dxPort2">--</dd>
+            <dt>Port 3</dt><dd id="dxPort3">--</dd>
           </dl>
         </section>
       </div>

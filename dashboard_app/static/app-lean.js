@@ -3,7 +3,7 @@
 //           6 Test Metadata | 7 Source details | 8 Shared helpers/API | 9 Startup
 // Panel state lives inside factory functions; exports also support the original
 // dashboard and isolated tests. Importing this module alone never starts the app.
-import {createCanMotorComponent} from "./can-motor.js";
+import {auxMotorKind, canMotorStatus, createCanMotorComponent} from "./can-motor.js";
 
 // ============================================================================
 // 1. STATUS PILLS — Dashboard connection (device status: section 7)
@@ -17,9 +17,9 @@ function setStreamStatus(label, state) {
 }
 
 // ============================================================================
-// 2. TOOLBAR — Start, Stop, Export, Solenoid 1–4; recording/UTC status
+// 2. TOOLBAR — Start, Stop, Export, configured solenoids; recording/UTC status
 // ============================================================================
-// TOOLBAR: Start, Stop, Export, Solenoid 1–4 and recording/UTC indicators.
+// TOOLBAR: Start, Stop, Export, configured solenoids and recording/UTC indicators.
 // E-STOP belongs to Motor Control in app-lean.js; shared appearance: dashboard-lean.css.
 
 export function createToolbarComponent({
@@ -27,12 +27,39 @@ export function createToolbarComponent({
   applySample,
   setRunState,
   setEspTransportMessage,
-  solenoidCount
+  solenoidCount = 4,
+  solenoids = null
 }) {
+  const descriptors = solenoids ?? Array.from({length: solenoidCount}, (_, index) =>
+    ({index, label: `Solenoid ${index + 1}`}));
+  const buttonLabels = new Map();
+  const container = document.getElementById("solenoidControls");
+  if (container) container.style.setProperty("--solenoid-count", String(descriptors.length));
+  const sickFlowLabel = document.getElementById("sickFlowLabel");
+  const sickFlowRelay = descriptors.find(descriptor => descriptor.relay === "R5");
+  if (container && solenoids) {
+    container.replaceChildren();
+    for (const {index} of descriptors) {
+      const button = document.createElement("button");
+      button.id = `sol${index}`;
+      button.type = "button";
+      button.className = "solenoid";
+      button.disabled = true;
+      button.setAttribute("aria-keyshortcuts", String(index + 1));
+      const label = document.createElement("span");
+      const shortcut = document.createElement("kbd");
+      shortcut.className = "shortcut-key";
+      shortcut.setAttribute("aria-hidden", "true");
+      shortcut.textContent = String(index + 1);
+      button.append(label, shortcut);
+      container.appendChild(button);
+      buttonLabels.set(index, label);
+    }
+  }
   const ids = [
     "runDot", "runStatus", "clockText", "startRun", "stopRun", "exportRun"
   ];
-  for (let index = 0; index < solenoidCount; index += 1) ids.push(`sol${index}`);
+  for (const {index} of descriptors) ids.push(`sol${index}`);
   const els = elements(ids);
   const actions = createActions({
     refresh: () => renderRun(getState().run),
@@ -40,16 +67,19 @@ export function createToolbarComponent({
   });
 
   function updateSolenoidControls() {
-    const {latest, run} = getState();
-    for (let index = 0; index < solenoidCount; index += 1) {
+    const {latest} = getState();
+    for (const descriptor of descriptors) {
+      const {index} = descriptor;
       const enabled = latest?.[`solenoid${index + 1}_connected`] === true;
       const owner = latest?.[`solenoid${index + 1}_source`] === "stepper" ? "Controllino" : "ESP32";
       const pending = actions.has(`solenoid-${index}`);
+      const label = owner === "Controllino" ? descriptor.label : `Solenoid ${index + 1}`;
+      if (buttonLabels.has(index)) setText(buttonLabels.get(index), label);
       els[`sol${index}`].disabled = !enabled || pending;
       els[`sol${index}`].title = pending
-        ? `Sending Solenoid ${index + 1} command`
+        ? `Sending ${label} command`
         : enabled
-          ? `Toggle Solenoid ${index + 1} (keyboard ${index + 1})`
+          ? `Toggle ${label} (keyboard ${index + 1})`
           : `${owner} control stream is not live`;
     }
   }
@@ -66,6 +96,8 @@ export function createToolbarComponent({
   }
 
   function renderSample(sample) {
+    if (sickFlowLabel) setText(sickFlowLabel, `SICK Flow · Solenoid ${sample.stepper_mode === "controllino"
+      && sickFlowRelay ? sickFlowRelay.index + 1 : 4}`);
     const timestamp = sample.timestamp_iso || "";
     const date = new Date(timestamp);
     const compactTimestamp = Number.isNaN(date.getTime())
@@ -73,16 +105,17 @@ export function createToolbarComponent({
       : `${date.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, "")} UTC`;
     setText(els.clockText, compactTimestamp);
     els.clockText.title = timestamp;
-    for (let index = 0; index < solenoidCount; index += 1) {
+    for (const {index} of descriptors) {
       const on = sample[`solenoid${index + 1}_on`] === true;
       els[`sol${index}`].classList.toggle("on", on);
+      els[`sol${index}`].setAttribute("aria-pressed", String(on));
     }
     updateSolenoidControls();
   }
 
   async function toggleSolenoid(index) {
     const button = els[`sol${index}`];
-    if (!button || button.disabled || actions.has(`solenoid-${index}`)) return false;
+    if (!button || button.hidden || button.disabled || actions.has(`solenoid-${index}`)) return false;
     setEspTransportMessage(`Sending Solenoid ${index + 1} command`);
     return actions.run(`solenoid-${index}`, () => postJson(API.solenoidToggle(index)), {
       success: payload => { if (payload.sample) applySample(payload.sample); }
@@ -97,10 +130,11 @@ export function createToolbarComponent({
     });
   }
   els.exportRun.addEventListener("click", downloadLatestExport);
-  for (let index = 0; index < solenoidCount; index += 1) {
+  for (const {index} of descriptors) {
     els[`sol${index}`].addEventListener("click", () => void toggleSolenoid(index));
   }
 
+  updateSolenoidControls();
   return {renderRun, renderSample, toggleSolenoid};
 }
 
@@ -156,6 +190,158 @@ export function renderMetrics(sample, powderFlowRateGPerS = null) {
   setText(els.mHeartbeat, numberValue(sample, "dxmr90_heartbeat", digits.heartbeat));
 }
 
+// Values and units come from the shared pressure configuration. Missing values
+// never become zero, and a retained raw sample is not presented as a live value.
+function finiteSampleNumber(sample, key) {
+  const value = sample?.[key];
+  if (value === null || value === undefined || typeof value === "boolean" ||
+      (typeof value === "string" && value.trim() === "")) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function pressureConfigurationStatus(descriptor) {
+  return !descriptor.calibrated ? "Pressure calibration needed"
+    : !(descriptor.volts_per_count > 0) ? "Input scaling needed" : null;
+}
+
+export function controllinoPressureReading(sample, descriptor) {
+  const configurationStatus = pressureConfigurationStatus(descriptor);
+  const value = finiteSampleNumber(sample, descriptor.value_key);
+  const valid = !configurationStatus && sample?.[descriptor.valid_key] === true && value !== null;
+  return {
+    value: valid ? value : null,
+    valid,
+    adc: finiteSampleNumber(sample, descriptor.adc_key),
+    voltage: finiteSampleNumber(sample, descriptor.voltage_key),
+    status: configurationStatus || (sample?.stepper_connected !== true ? "Controller unavailable"
+      : sample?.stepper_pressure_capable !== true ? "Not reported by firmware"
+      : !valid ? "Stale or invalid sample"
+      : `Calibrated${descriptor.reference && descriptor.reference !== "unspecified"
+        ? ` · ${descriptor.reference}` : ""}`)
+  };
+}
+
+export function createControllinoMeasurementsComponent({descriptors = [], getHistory}) {
+  const low = document.getElementById("espPressureMetric");
+  const high = document.getElementById("sickPressureMetric");
+  // An already-open page can briefly have older HTML while assets refresh.
+  if (!low || !high || !descriptors.length) return {render() {}, draw: () => drawAllCharts(getHistory()), series: (id = "pressureChart") => UI_CONFIG.charts[id]};
+  const colors = ["--chart-blue", "--chart-green", "--chart-amber", "--chart-red",
+    "--chart-cyan", "--chart-violet", "--chart-gray"];
+  const cards = Object.entries({low, high}).map(([group, card]) => {
+    const label = card.querySelector("label");
+    const legacyLabel = Array.from(label.childNodes);
+    const legacyValues = card.querySelector("div");
+    const values = document.createElement("div");
+    values.className = "metric-values pressure-values";
+    values.dataset.pressureGroup = group;
+    values.hidden = true;
+    values.style.gridTemplateColumns = `repeat(${descriptors.filter(item => item.group === group).length}, minmax(0, 1fr))`;
+    card.appendChild(values);
+    return {group, label, legacyLabel, legacyValues, values};
+  });
+  const rows = descriptors.map((descriptor, index) => {
+    const row = document.createElement("div");
+    row.dataset.pressureId = String(descriptor.id);
+    const channel = document.createElement("span");
+    channel.className = "channel";
+    channel.textContent = `P${descriptor.id}`;
+    const value = document.createElement("span");
+    value.className = "value";
+    value.textContent = "--";
+    const unit = document.createElement("span");
+    unit.className = "unit";
+    unit.textContent = descriptor.unit.toUpperCase();
+    channel.appendChild(unit);
+    row.append(channel, value);
+    cards.find(card => card.group === descriptor.group).values.appendChild(row);
+    return {descriptor, row, value, ready: !pressureConfigurationStatus(descriptor),
+      color: colors[index % colors.length]};
+  });
+  let controllino = false;
+  const plotGrid = document.querySelector(".plot-grid");
+  const legacyPanels = Array.from(plotGrid.children);
+  const charts = Object.entries({espFlowChart: "low", sickFlowChart: "high", pressureChart: null})
+    .map(([id, group]) => {
+      const panel = document.getElementById(id).closest(".plot-panel");
+      const title = panel.querySelector("h2"), legend = panel.querySelector(".legend");
+      const channels = rows.filter(row => row.descriptor.group === group);
+      const name = group ? channels[0].descriptor.group_label : "Mass flow";
+      const unit = group ? channels[0].descriptor.unit.toUpperCase() : "g/min";
+      return {id, group, name, unit, panel, title, legend, channels,
+        legacyTitle: title.textContent, legacyLegend: Array.from(legend.children)};
+    });
+
+  function series(id = "pressureChart") {
+    if (!controllino) return UI_CONFIG.charts[id];
+    const chart = charts.find(item => item.id === id);
+    if (!chart.group) return UI_CONFIG.massFlowComparison;
+    return chart.channels.filter(row => row.ready)
+      .map(({descriptor, color}) => ({
+        key: descriptor.value_key, validKey: descriptor.valid_key, color,
+        label: descriptor.terminal, title: descriptor.label
+      }));
+  }
+  function draw() {
+    for (const chart of charts) {
+      const emptyText = !controllino || !chart.group || chart.channels.some(row => row.ready) ? "No valid readings"
+        : chart.channels.some(row => row.descriptor.calibrated) ? "Input scaling needed" : "Pressure calibration needed";
+      drawChart(chart.id, series(chart.id), getHistory(), emptyText);
+    }
+  }
+  function updateChart(chart) {
+    if (!controllino) {
+      chart.legend.replaceChildren(...chart.legacyLegend);
+      setText(chart.title, chart.legacyTitle);
+      return;
+    }
+    setText(chart.title, `${chart.name} (${chart.unit})`);
+    const legendItems = chart.group ? chart.channels.map(({descriptor, color, ready}) => ({
+      label: descriptor.terminal, color, ready,
+      title: `${descriptor.label} · ${descriptor.terminal} · ${chart.unit}${descriptor.reference && descriptor.reference !== "unspecified"
+        ? ` · ${descriptor.reference}` : ""}${ready ? "" : ` · ${pressureConfigurationStatus(descriptor)}`}`
+    })) : UI_CONFIG.massFlowComparison;
+    chart.legend.replaceChildren(...legendItems.map(item => {
+      const label = document.createElement("span");
+      label.style.color = `var(${item.color})`;
+      label.style.opacity = item.ready === false ? ".4" : "1";
+      label.title = item.title;
+      const swatch = document.createElement("i");
+      swatch.className = "swatch";
+      label.append(swatch, document.createTextNode(item.label));
+      return label;
+    }));
+  }
+
+  function render(sample) {
+    const changed = controllino !== (sample?.stepper_mode === "controllino");
+    controllino = sample?.stepper_mode === "controllino";
+    if (changed) {
+      for (const {group, label, legacyLabel, legacyValues, values} of cards) {
+        legacyValues.hidden = controllino;
+        values.hidden = !controllino;
+        label.replaceChildren(...(controllino
+          ? [document.createTextNode(descriptors.find(item => item.group === group).group_label)] : legacyLabel));
+      }
+      plotGrid.append(...(controllino ? charts.map(chart => chart.panel) : legacyPanels));
+      for (const chart of charts) updateChart(chart);
+    }
+    if (!controllino) return;
+    for (const {descriptor, row, value} of rows) {
+      const reading = controllinoPressureReading(sample, descriptor);
+      setText(value, reading.value === null ? "--"
+        : reading.value.toFixed(1));
+      const raw = [reading.adc === null ? "" : `${reading.adc.toFixed(0)} counts`,
+        reading.voltage === null ? "" : `${reading.voltage.toFixed(3)} V`].filter(Boolean);
+      row.title = `${descriptor.label} · ${descriptor.terminal} · ${reading.status}${raw.length
+        ? ` · ${reading.valid ? "Raw" : "Last raw"}: ${raw.join(" · ")}` : ""}`;
+      row.setAttribute("aria-label", `${row.title} · ${value.textContent} ${descriptor.unit}`);
+    }
+  }
+  return {render, draw, series};
+}
+
 // ============================================================================
 // 4. CHARTS — Pressure (bar), ESP32 Mass Flow (g/min), SICK Mass Flow (g/min)
 //    Includes display configuration and named chart series.
@@ -182,6 +368,12 @@ export const UI_CONFIG = Object.freeze({
     airPowderRatio: 2,
     heartbeat: 0
   }),
+  massFlowComparison: Object.freeze([
+    {key: "dxmr90_total_mass_flow_g_min", source: "dxmr90", color: "--chart-violet",
+      label: "SICK 1 + 2", title: "Measured sum of DXMR90 ports 1 and 2"},
+    {key: "dxmr90_port3_mass_flow_g_min", source: "dxmr90", validKey: "dxmr90_port3_flow_valid",
+      color: "--chart-cyan", label: "SICK 3", title: "Independent sensor on DXMR90 port 3"}
+  ]),
   charts: Object.freeze({
     // PANEL: Pressure (bar) — plotted series and colors.
     pressureChart: Object.freeze([
@@ -211,15 +403,21 @@ function themeColor(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+export function chartValue(sample, item) {
+  if (item.source && (sample[`${item.source}_connected`] !== true || sample[`${item.source}_transport_error`])) return null;
+  if (item.validKey && sample[item.validKey] !== true) return null;
+  return finiteSampleNumber(sample, item.key);
+}
+
 function chartBounds(history, series) {
   const values = [];
   for (const sample of history) {
     for (const item of series) {
-      const value = Number(sample[item.key]);
-      if (Number.isFinite(value)) values.push(value);
+      const value = chartValue(sample, item);
+      if (value !== null) values.push(value);
     }
   }
-  if (!values.length) return [0, 1];
+  if (!values.length) return null;
   let min = Math.min(...values);
   let max = Math.max(...values);
   if (min === max) {
@@ -230,7 +428,7 @@ function chartBounds(history, series) {
   return [min - pad, max + pad];
 }
 
-function drawChart(canvasId, series, history) {
+function drawChart(canvasId, series, history, emptyText = "No valid readings") {
   const canvas = document.getElementById(canvasId);
   if (!canvas) throw new Error(`Dashboard chart #${canvasId} is missing`);
   const ctx = canvas.getContext("2d");
@@ -259,7 +457,15 @@ function drawChart(canvasId, series, history) {
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";
 
-  const [min, max] = chartBounds(history, series);
+  const bounds = chartBounds(history, series);
+  canvas.setAttribute("aria-label", bounds
+    ? `${canvas.closest(".plot-panel").querySelector("h2").textContent} history` : emptyText);
+  if (!bounds) {
+    ctx.textAlign = "center";
+    ctx.fillText(emptyText, width / 2, height / 2);
+    return;
+  }
+  const [min, max] = bounds;
   for (let i = 0; i <= 4; i += 1) {
     const y = padT + (plotH * i / 4);
     const value = max - ((max - min) * i / 4);
@@ -280,8 +486,8 @@ function drawChart(canvasId, series, history) {
     ctx.beginPath();
     let drawing = false;
     history.forEach((sample, index) => {
-      const value = Number(sample[item.key]);
-      if (!Number.isFinite(value)) {
+      const value = chartValue(sample, item);
+      if (value === null) {
         drawing = false;
         return;
       }
@@ -298,9 +504,9 @@ function drawChart(canvasId, series, history) {
   }
 }
 
-export function drawAllCharts(history) {
+export function drawAllCharts(history, overrides = {}) {
   for (const [canvasId, series] of Object.entries(UI_CONFIG.charts)) {
-    drawChart(canvasId, series, history);
+    drawChart(canvasId, overrides[canvasId] || series, history);
   }
 }
 
@@ -424,16 +630,16 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       Number.isFinite(speed) &&
       speed >= limits.min_speed_mm_s && speed <= limits.max_speed_mm_s;
     const simulated = latest && latest.stepper_mode === "sim";
-    const rawDroPositionMm = Number(latest?.stepper_dro_position_mm);
+    const rawDroPositionMm = finiteSampleNumber(latest, "stepper_dro_position_mm");
     const canSetDroZero = connected &&
       latest?.stepper_dro_capable === true &&
       latest?.stepper_dro_fresh === true &&
-      Number.isFinite(rawDroPositionMm) &&
+      rawDroPositionMm !== null &&
       !moving;
-    const brushlessCapable =
+    const brushlessCapable = auxMotorKind(latest) === "esc" &&
       latest && latest.stepper_brushless_motor_capable === true;
     const brushlessVariableCapable =
-      latest && latest.stepper_brushless_motor_variable_capable === true;
+      brushlessCapable && latest.stepper_brushless_motor_variable_capable === true;
     const brushlessOn =
       latest && latest.stepper_brushless_motor_on === true;
     const brushlessPulseUs = Number(els.brushlessPulseWidth.value);
@@ -714,7 +920,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       Number.isFinite(Number(latest.stepper_dro_valid_frame_count)) &&
       Number(latest.stepper_dro_valid_frame_count) > 0;
     const droZeroSet = latest.stepper_dro_zero_set === true;
-    const droZeroedPosition = Number(latest.stepper_dro_zeroed_position_mm);
+    const droZeroedPosition = finiteSampleNumber(latest, "stepper_dro_zeroed_position_mm");
     const droVelocityValue = latest.stepper_dro_velocity_mm_s;
     const droVelocityMmS = Number(droVelocityValue);
     const droVelocityWindowMs = Number(latest.stepper_dro_velocity_window_ms);
@@ -724,7 +930,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       droVelocityValue !== undefined &&
       Number.isFinite(droVelocityMmS);
     setText(els.stepperDroPosition, droHasSample
-      ? droZeroSet && Number.isFinite(droZeroedPosition)
+      ? droZeroSet && droZeroedPosition !== null
         ? `${droZeroedPosition.toFixed(2)} mm`
         : `${numberValue(latest, "stepper_dro_position_mm", 2)} mm`
       : "--");
@@ -746,14 +952,14 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     setText(els.stepperDroRawPosition, droHasSample
       ? `${numberValue(latest, "stepper_dro_position_mm", 2)} mm`
       : "--");
-    const zeroRawMm = Number(latest.stepper_dro_zero_raw_mm);
-    const hasFiniteZero = droZeroSet && Number.isFinite(zeroRawMm);
+    const zeroRawMm = finiteSampleNumber(latest, "stepper_dro_zero_raw_mm");
+    const hasFiniteZero = droZeroSet && zeroRawMm !== null;
     const zeroText = hasFiniteZero
       ? `Raw ${zeroRawMm.toFixed(2)} mm · saved system reference`
       : "Not set";
     setText(els.stepperDroZeroStatus, hasFiniteZero
       ? `Zero: ${zeroRawMm.toFixed(2)} mm raw · saved`
-      : "System zero not set");
+      : "System zero not set · position is raw");
     setText(els.stepperDroZeroDiagnostic, zeroText);
     renderPiston(latest, droCapable, droHasSample);
     setText(els.stepperDroFrames, droCapable
@@ -1142,8 +1348,8 @@ export function createServoComponent({getLatest, applySample, postJson}) {
   let pending = false, dirty = false;
 
   function render(sample) {
-    const servo = sample.stepper_aux_kind === "servo";
-    const showEsc = !sample.stepper_aux_kind || sample.stepper_aux_kind === "esc";
+    const servo = auxMotorKind(sample) === "servo";
+    const showEsc = auxMotorKind(sample) === "esc";
     brushless.hidden = !showEsc;
     brushless.style.display = showEsc ? "" : "none";
     panel.style.display = servo ? "" : "none";
@@ -1348,7 +1554,7 @@ function sourceElements() { return elements([
   "edDot", "edStatus", "edMode", "edAge", "edTransport", "edChannels",
   "historyStatus", "espRowDot", "espRowStatus", "dxRowDot", "dxRowStatus",
   "espMode", "espAge", "espPressureAdc", "espFlowAdc", "espPressure",
-  "espFlow", "espTransport", "dxMode", "dxAge", "dxPort1", "dxPort2"
+  "espFlow", "espTransport", "dxMode", "dxAge", "dxPort1", "dxPort2", "dxPort3"
 ]); }
 
 function presentation(label, mode, connected) {
@@ -1363,6 +1569,7 @@ export function renderSources(sample, historyLength) {
   const dxConnected = sample.dxmr90_connected;
   const stepperConnected = sample.stepper_connected;
   const espMode = sample.esp32_mode || "--";
+  sourceEls.espStatus.closest(".pill").hidden = espMode === "off";
   const dxMode = sample.dxmr90_mode || "--";
   const stepperMode = sample.stepper_mode || "--";
   const pressureAdcReady = sample.esp32_pressure_adc_ready === true;
@@ -1397,6 +1604,16 @@ export function renderSources(sample, historyLength) {
   const dx = presentation("DXMR90", dxMode, dxConnected);
   const controllerLabel = stepperMode === "controllino" ? "Controllino MAXI" : "Arduino Yun";
   const stepper = presentation(controllerLabel, stepperMode, stepperConnected);
+  if (stepperMode !== "off") {
+    if (auxMotorKind(sample) === "cubemars") {
+      const motor = canMotorStatus(sample);
+      stepper.state = motor.tone;
+      stepper.row = motor.text;
+    } else if (sample.stepper_transport_error || sample.stepper_estop_latched) {
+      stepper.state = "bad";
+      stepper.row = sample.stepper_estop_latched ? "E-STOP" : "Controller transport error";
+    }
+  }
   if (espConnected && (!pressureAdcReady || !flowAdcReady)) {
     esp.label = "ESP32";
     esp.row = "Live / ADC partial";
@@ -1431,6 +1648,8 @@ export function renderSources(sample, historyLength) {
     : sample.esp32_transport_error || (espConnected ? "Connected" : "Waiting for stream"));
   setText(sourceEls.dxPort1, `${numberValue(sample, "dxmr90_port1_mass_flow_g_min", 2)} g/min`);
   setText(sourceEls.dxPort2, `${numberValue(sample, "dxmr90_port2_mass_flow_g_min", 2)} g/min`);
+  setText(sourceEls.dxPort3, `${numberValue(sample, "dxmr90_port3_mass_flow_g_min", 2)} g/min`);
+  sourceEls.dxPort3.title = sample.dxmr90_port3_error || "";
   setText(sourceEls.historyStatus, `${historyLength} samples`);
 }
 
@@ -1747,6 +1966,10 @@ export async function startDashboard() {
   let toolbar;
   let stepper;
   let metadata;
+  const measurements = createControllinoMeasurementsComponent({
+    descriptors: operationalConfig.controllino_pressures || [],
+    getHistory: () => state.history
+  });
   const experiment = createExperimentComponent();
 
   let chartFrame = null;
@@ -1754,7 +1977,7 @@ export async function startDashboard() {
     if (chartFrame !== null) return;
     chartFrame = requestAnimationFrame(() => {
       chartFrame = null;
-      drawAllCharts(state.history);
+      measurements.draw();
     });
   }
 
@@ -1763,6 +1986,7 @@ export async function startDashboard() {
     if (!state.latest) return;
     toolbar.renderSample(state.latest);
     renderMetrics(state.latest, metadata?.powderFlowRateGPerS());
+    measurements.render(state.latest);
     renderSources(state.latest, state.history.length);
     stepper.render(state.latest);
     scheduleCharts();
@@ -1787,7 +2011,8 @@ export async function startDashboard() {
     applySample,
     setRunState,
     setEspTransportMessage,
-    solenoidCount: operationalConfig.solenoid_count
+    solenoidCount: operationalConfig.solenoid_count,
+    solenoids: operationalConfig.solenoids
   });
   const stepperLimits = {
     ...operationalConfig.stepper,

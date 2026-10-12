@@ -33,7 +33,7 @@ OPTIONS = (
     ("port", 8000, None),
     ("rate-hz", 10.0, None),
     ("scenario", "healthy", core.SIMULATION_SCENARIOS),
-    ("esp32-source", "real", core.SOURCE_MODES),
+    ("esp32-source", "auto", (*core.SOURCE_MODES, "auto")),
     ("esp32-url", core.DEFAULT_ESP32_BASE_URL, None),
     ("esp32-timeout", core.DEFAULT_ESP32_TIMEOUT_S, None),
     ("dxmr90-source", "real", core.SOURCE_MODES),
@@ -94,6 +94,9 @@ def parse_args(argv=None):
         for name, env in ENV_OPTIONS.items() if os.environ.get(env)
     ]
     args = parser.parse_args(env_args + list(sys.argv[1:] if argv is None else argv))
+    if args.esp32_source == "auto":
+        args.esp32_source = ("off" if args.stepper_source.startswith("controllino")
+                            else "sim" if args.stepper_source == "sim" else "real")
     for name, value in vars(args).items():
         if isinstance(value, float) and not math.isfinite(value):
             parser.error(f"--{name.replace('_', '-')} must be finite")

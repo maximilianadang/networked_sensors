@@ -57,7 +57,10 @@ DEVICE_REQUIREMENTS = {
         "servo": ("stepper_servo_capable",),
         "brushless_motor": ("stepper_brushless_motor_capable",),
         "can_motor": ("stepper_can_motor_capable", "stepper_can_motor_ready"),
-        "solenoid4": ("stepper_solenoid4_capable",),
+        **{f"solenoid{r['index'] + 1}": (f"stepper_solenoid{r['index'] + 1}_capable",)
+           for r in core.CONTROLLINO_RELAYS},
+        **{f"pressure{p['id']}": (f"stepper_pressure{p['id']}_valid",)
+           for p in core.PRESSURE_INPUTS},
     },
 }
 
@@ -330,8 +333,8 @@ class ActuatorAction:
                 field = ("stepper_brushless_motor_setpoint_us" if self.set_point == "pulse"
                          else "stepper_brushless_motor_on")
             else:
-                field = ("stepper_solenoid4_on" if self.source == "controllino"
-                         else f"esp32_sol{device[-1]}")
+                field = (f"stepper_{device}_on" if self.source == "controllino"
+                         else f"esp32_sol{device.removeprefix('solenoid')}")
             observed = sample.get(field)
             requested = self.pulse_us if self.set_point == "pulse" else self.output_on
             check = {
@@ -527,11 +530,13 @@ def parse_program(csv_text: object, *, max_travel_mm: float = core.DEFAULT_STEPP
                 device = ";".join(devices)
                 source = values["source"]
                 set_point = values.get("set_point", "")
-                solenoids = {"solenoid1", "solenoid2", "solenoid3", "solenoid4"}
+                esp32_solenoids = {f"solenoid{i + 1}" for i in range(core.ESP32_SOLENOID_COUNT)}
+                controllino_solenoids = {f"solenoid{r['index'] + 1}" for r in core.CONTROLLINO_RELAYS}
+                solenoids = esp32_solenoids | controllino_solenoids
                 compatible = set(devices) <= solenoids or devices == ("brushless_motor",)
                 valid_source = compatible and all(
-                    (target in solenoids and source == "esp32")
-                    or (target in ("solenoid4", "brushless_motor") and source == "controllino")
+                    (target in esp32_solenoids and source == "esp32")
+                    or (target in controllino_solenoids | {"brushless_motor"} and source == "controllino")
                     for target in devices
                 )
                 if not valid_source:
