@@ -27,7 +27,7 @@ class CubeMarsCan {
     for (uint8_t i = 0; ok && i < 6; ++i)
       ok = controller_.setFilter(MCP2515::RXF(i), true, i == 0 ? 0 : CubeMars::NODE_ID) == MCP2515::ERROR_OK;
     // A frame that loses arbitration or ACK must not be retried indefinitely
-    // after its timed run has expired. We refresh deliberately every 20 ms.
+    // after its timed run has expired. We refresh deliberately at REFRESH_MS.
     // autowp 1.3.1's setNormalOneShotMode compares CANSTAT.OPMOD (bits 7:5)
     // against 0x08, so it always reports failure. Verify normal mode through the
     // supported API, then set/read CANCTRL.OSM separately (it is not an OPMOD bit).
@@ -155,7 +155,10 @@ class CubeMarsCan {
     if (uint32_t(now - lastTransmit_) < CubeMars::REFRESH_MS) return;
     lastTransmit_ = now;
     if (run.active) {
-      if (!send(3, run.appliedErpm)) stop("can_tx_failed");
+      // Acceptance already established this run. A rejected refresh is diagnostic
+      // evidence; retry the current setpoint on the next due slice, never a backlog.
+      // The run's feedback/fault/lease checks above remain authoritative.
+      send(3, run.appliedErpm);
     } else {
       // Continue requesting release while idle, including after a transient bus
       // failure. A recovered bus never resumes the previous velocity command.
@@ -174,6 +177,8 @@ class CubeMarsCan {
     const StopEvent stopped = stopEvent_;
     const uint32_t errorAt = errorAt_, errorCount = errorCount_, stopCount = stopCount_;
     const uint32_t maxGap = maxServiceGapUs_;
+    const uint32_t txFailures = txFailures_;
+    const uint8_t txCode = lastTxFailure_;
     // Read-only register evidence, captured before serviced printing can mutate
     // state. reg: 28..2F, TEC/REC (1C/1D), TXBnCTRL (30/40/50), RXBnCTRL (60/70).
     // slow: 28..2F at 1 MHz. Compare fixed configuration only: counters, interrupt
@@ -202,6 +207,7 @@ class CubeMarsCan {
     out.print(F(",\"ce\":")); out.print(snapshot.active);
     out.print(F(",\"cm\":")); out.print(snapshot.manualToken);
     out.print(F(",\"cleasems\":")); out.print(CubeMars::MANUAL_LEASE_MS);
+    out.print(F(",\"cstop\":1"));
     out.print(F(",\"cramp\":")); out.print(snapshot.rampRate);
     out.print(F(",\"cap\":")); out.print(snapshot.appliedErpm);
     out.print(F(",\"crmax\":")); out.print(CubeMars::MAX_RAMP_RPM_S);
@@ -218,6 +224,8 @@ class CubeMarsCan {
     out.print(F(",\"cdiag\":{\"ef\":")); out.print(flags);
     out.print(F(",\"tec\":")); out.print(txErrors);
     out.print(F(",\"rec\":")); out.print(rxErrors);
+    out.print(F(",\"txfail\":")); out.print(txFailures);
+    out.print(F(",\"txcode\":")); out.print(txCode);
     out.print(F(",\"rxfail\":")); out.print(raw.readErrors);
     out.print(F(",\"le\":")); out.print(lastError.flags);
     out.print(F(",\"ls\":")); out.print(lastError.slowFlags);
@@ -316,6 +324,8 @@ class CubeMarsCan {
   MCP2515 controller_;
   bool healthy_ = true;
   uint32_t lastTransmit_ = 0;
+  uint32_t txFailures_ = 0;
+  uint8_t lastTxFailure_ = 0;
 
   static void writeHex(Print &out, const uint8_t *bytes, uint8_t count) {
     const char hex[] = "0123456789ABCDEF";
@@ -329,7 +339,12 @@ class CubeMarsCan {
     frame.can_id = CAN_EFF_FLAG | CubeMars::commandId(function);
     frame.can_dlc = 4;
     CubeMars::encodeInt32(value, frame.data);
-    return controller_.sendMessage(&frame) == MCP2515::ERROR_OK;
+    const MCP2515::ERROR result = controller_.sendMessage(&frame);
+    if (result != MCP2515::ERROR_OK) {
+      ++txFailures_;
+      lastTxFailure_ = uint8_t(result);
+    }
+    return result == MCP2515::ERROR_OK;
   }
 
   void modifyControl(uint8_t mask, uint8_t value) {

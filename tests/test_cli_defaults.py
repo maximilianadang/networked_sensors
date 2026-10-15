@@ -29,6 +29,12 @@ class CliDefaultsTests(unittest.TestCase):
         self.assertEqual(settings.stepper_source, "controllino")
         self.assertEqual(settings.esp32_source, "off")
 
+    def test_controllino_usb_discovers_by_default_and_preserves_explicit_port(self):
+        self.assertEqual(self.parse(("--stepper-source", "controllino-usb")).stepper_port, "auto")
+        self.assertEqual(self.parse(("--stepper-source", "usb")).stepper_port, core.DEFAULT_STEPPER_USB_PORT)
+        self.assertEqual(self.parse(("--stepper-source", "controllino-usb", "--stepper-port", "/dev/ttyACM3")).stepper_port,
+                         "/dev/ttyACM3")
+
     def test_automatic_source_matches_current_legacy_and_simulation_profiles(self):
         for profile, expected in self.PROFILES:
             with self.subTest(profile=profile):

@@ -3,7 +3,7 @@
 #include <util/atomic.h>
 #include "linace_protocol.h"
 
-// Timer5 is exclusive to LinACE. Timers1/3 remain available to existing motion.
+// Timer5 is exclusive to LinACE; Timer3 owns STEP and Timer1 the auxiliary.
 // No blocking pulseIn, polling loop, SPI or serial output occurs in this ISR.
 class LinaceReader {
  public:
@@ -22,6 +22,7 @@ class LinaceReader {
 
   void onOverflow() { ++overflows; }
   void onClock() {
+    if (edgeCount < 0xffffffffUL) ++edgeCount;
     // Called with interrupts disabled. Account for an overflow whose ISR has
     // not run yet; the counter is sampled before checking the pending flag.
     uint16_t high = overflows, low = TCNT5;
@@ -37,11 +38,12 @@ class LinaceReader {
 
   void poll() {
     Linace::Sample sample;
+    bool statusHigh;
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-      if (!(*statusPort & statusMask)) {
-        // Status LOW removes freshness immediately, including when PWM stops.
-        ready = false; capture.reset(); healthy = false; return;
-      }
+      statusHigh = (*statusPort & statusMask) != 0;
+      // Current health and frame validity are separate: a later Status LOW
+      // must not discard a frame whose rising-edge Status was HIGH.
+      if (!statusHigh) healthy = false;
       if (!ready) return;
       sample.highTicks = pendingHigh; sample.periodTicks = pendingPeriod;
       sample.sampledMs = pendingMs; sample.statusOk = pendingStatus; ready = false;
@@ -52,22 +54,34 @@ class LinaceReader {
       healthy = false; return;
     }
     if (!validFrames) reference = decoded;
-    position = decoded; lastValidMs = sample.sampledMs; healthy = true;
+    position = decoded; lastValidMs = sample.sampledMs; healthy = statusHigh;
     if (validFrames < 0xffffffffUL) ++validFrames;
   }
 
   void writeStatus(Print &out, unsigned long nowMs) const {
     // ServicedPrint can call poll() between bytes. Freeze the entire reading.
-    const uint32_t count = validFrames, age = uint32_t(nowMs - lastValidMs);
+    const uint32_t count = validFrames, acquiredMs = lastValidMs;
+    const uint32_t age = uint32_t(nowMs - acquiredMs);
     const int32_t pos = position, displacement = position - reference;
     const bool fresh = healthy && count && age <= Linace::STALE_MS;
     const uint16_t diagnostics = (uint16_t(rejected) << 8) | dropped;
+    uint32_t edges;
+    bool pwmHigh, statusHigh;
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+      edges = edgeCount;
+      pwmHigh = (*pwmPort & pwmMask) != 0;
+      statusHigh = (*statusPort & statusMask) != 0;
+    }
     out.print(F(",\"dc\":1,\"df\":")); out.print(fresh ? 1 : 0);
     out.print(F(",\"dr\":")); out.print(pos);
     out.print(F(",\"dd\":")); out.print(displacement);
     out.print(F(",\"da\":")); out.print(!count ? -1L : long(min(age, 0x7fffffffUL)));
+    out.print(F(",\"dt\":")); out.print(acquiredMs);
     out.print(F(",\"dq\":")); out.print(count);
     out.print(F(",\"dx\":")); out.print(diagnostics);
+    out.print(F(",\"dpwm\":")); out.print(pwmHigh ? 1 : 0);
+    out.print(F(",\"dstat\":")); out.print(statusHigh ? 1 : 0);
+    out.print(F(",\"dedge\":")); out.print(edges);
   }
 
  private:
@@ -75,6 +89,7 @@ class LinaceReader {
   volatile uint8_t *pwmPort = nullptr, *statusPort = nullptr;
   uint8_t pwmMask = 0, statusMask = 0;
   volatile uint16_t overflows = 0;
+  volatile uint32_t edgeCount = 0;
   volatile uint32_t pendingHigh = 0, pendingPeriod = 0, pendingMs = 0;
   volatile bool pendingStatus = false, ready = false;
   volatile uint8_t dropped = 0;

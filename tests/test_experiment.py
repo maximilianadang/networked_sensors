@@ -262,7 +262,7 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(action.as_dict()["set_point"], "on")
         self.assertEqual(action.as_dict()["source"], "recording")
         for invalid in (
-            RECORDING_AFTER_ESP32.replace(",10,on", ",10,off"),
+            RECORDING_AFTER_ESP32.replace(",10,on", ",10,invalid"),
             RECORDING_AFTER_ESP32.replace(",10,on", ",10,"),
             RECORDING_AFTER_ESP32.replace("requested_state,recording", "requested_state,servo"),
             RECORDING_AFTER_ESP32.replace("recording,,,,", "recording,1000,,,"),
@@ -273,6 +273,13 @@ class ExperimentTests(unittest.TestCase):
         ):
             with self.subTest(csv=invalid), self.assertRaises(ValueError):
                 parse_program(invalid)
+
+    def test_recording_off_requires_confirmed_stopped_state(self):
+        action = parse_program(RECORDING_AFTER_ESP32.replace(",10,on", ",10,off"))[-1]
+        self.assertEqual(action.set_point, 'off')
+        self.assertTrue(action.evaluate({'recording': False})['requested_state']['ok'])
+        self.assertFalse(action.evaluate({'recording': True})['requested_state']['ok'])
+        self.assertFalse(action.evaluate({})['requested_state']['ok'])
 
     def test_recording_request_is_sent_once_and_confirmed_by_a_later_event(self):
         request_state = Mock()

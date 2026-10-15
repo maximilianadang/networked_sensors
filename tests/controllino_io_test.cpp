@@ -7,9 +7,13 @@
 #include "linace_avr.h"
 #include "pressure_adc.h"
 #include "relay_bank.h"
+#include "directional_limits.h"
+#include "stepper_pwm_avr.h"
 
 uint8_t TCCR5A = 0, TCCR5B = 0, TIFR5 = 0, TIMSK5 = 0;
 uint16_t TCNT5 = 0;
+uint8_t TCCR3A = 0, TCCR3B = 0, TCCR3C = 0, TIFR3 = 0, TIMSK3 = 0;
+uint16_t TCNT3 = 0, OCR3A = 0, OCR3C = 0;
 static uint32_t nowMs = 0;
 static volatile uint8_t gpio[80] = {};
 static std::vector<std::pair<int, int>> writes, modes;
@@ -20,6 +24,7 @@ unsigned long micros() { return nowMs * 1000; }
 void delay(unsigned long) {}
 void pinMode(uint8_t pin, uint8_t mode) { modes.push_back({pin, mode}); }
 void digitalWrite(uint8_t pin, uint8_t level) { writes.push_back({pin, level}); }
+int digitalRead(uint8_t pin) { return gpio[pin] ? HIGH : LOW; }
 int analogRead(uint8_t pin) {
   adcReads.push_back(pin);
   // The first conversion is deliberately wrong after each channel change.
@@ -79,9 +84,18 @@ static std::string status(LinaceReader &r, uint32_t at) {
   Print out; r.writeStatus(out, at); return out.text;
 }
 static void testReader() {
-  LinaceReader r; gpio[42] = 1; r.begin(21, 42, edgeCallback);
+  modes.clear(); writes.clear();
+  LinaceReader r; gpio[21] = 0; gpio[42] = 1; r.begin(21, 42, edgeCallback);
+  assert((modes == std::vector<std::pair<int, int>>{{21, INPUT}, {42, INPUT}}));
+  assert(writes.empty()); // Neither encoder input is driven or pulled up.
   assert(TCCR5A == 0 && TCCR5B == _BV(CS50) && TIMSK5 == _BV(TOIE5));
-  assert(status(r, 0) == ",\"dc\":1,\"df\":0,\"dr\":0,\"dd\":0,\"da\":-1,\"dq\":0,\"dx\":0");
+  assert(status(r, 0) == ",\"dc\":1,\"df\":0,\"dr\":0,\"dd\":0,\"da\":-1,\"dt\":0,\"dq\":0,\"dx\":0,\"dpwm\":0,\"dstat\":1,\"dedge\":0");
+  r.poll(); // Status is readable HIGH even without any captured PWM frame.
+  assert(status(r, 0).find("\"dstat\":1,\"dedge\":0") != std::string::npos);
+  gpio[42] = 0; r.poll();
+  assert(status(r, 0).find("\"dstat\":0,\"dedge\":0") != std::string::npos);
+  gpio[42] = 1; r.poll();
+  assert(status(r, 0).find("\"dstat\":1,\"dedge\":0") != std::string::npos);
   uint32_t overflow = 0;
   auto edge = [&](uint32_t ticks, bool high, bool ok, uint32_t ms) {
     while (overflow < ticks / 65536) { r.onOverflow(); ++overflow; }
@@ -91,15 +105,18 @@ static void testReader() {
   edge(100, true, true, 100);
   edge(8102, false, true, 101);
   edge(131172, true, true, 109); r.poll();
-  assert(status(r, 110).find("\"df\":1,\"dr\":4000,\"dd\":0,\"da\":10,\"dq\":1") != std::string::npos);
+  assert(status(r, 110).find("\"df\":1,\"dr\":4000,\"dd\":0,\"da\":10,\"dt\":100,\"dq\":1") != std::string::npos);
+  assert(status(r, 110).find("\"dpwm\":1,\"dstat\":1,\"dedge\":3") != std::string::npos);
   assert(status(r, 351).find("\"df\":0") != std::string::npos);
   gpio[42] = 0; r.poll(); // noPWMedge needed to detect power/statusloss
   assert(status(r, 111).find("\"df\":0") != std::string::npos);
+  assert(status(r, 111).find("\"dstat\":0,\"dedge\":3") != std::string::npos);
   gpio[42] = 1; r.poll();
   assert(status(r, 111).find("\"df\":0") != std::string::npos); // noautomaticfreshness
   edge(262244, true, true, 116);
   edge(272246, false, true, 117);
   edge(393316, true, true, 125); r.poll();
+  assert(status(r, 126).find("\"dt\":116,\"dq\":2") != std::string::npos);
   assert(status(r, 126).find("\"df\":1,\"dr\":5000,\"dd\":1000") != std::string::npos);
 
   // A status write remains coherent even when service invalidates midprint.
@@ -127,7 +144,7 @@ static void testReader() {
   edge(1048216, true, true, 0xfffffff8UL);
   edge(1056218, false, true, 0xfffffff9UL);
   edge(1179288, true, true, 0); r.poll();
-  assert(status(r, 2).find("\"da\":10,\"dq\":4") != std::string::npos);
+  assert(status(r, 2).find("\"da\":10,\"dt\":4294967288,\"dq\":4") != std::string::npos);
 
   // Pending Timer5 overflow must be counted even before its ISR runs.
   LinaceReader pending; gpio[42] = 1; pending.begin(21, 42, edgeCallback);
@@ -136,6 +153,60 @@ static void testReader() {
   pending.onOverflow(); pending.onOverflow();
   TIFR5 = 0; TCNT5 = 65530; gpio[21] = 1; nowMs = 18; pending.onClock(); pending.poll();
   assert(status(pending, 19).find("\"df\":1,\"dr\":4000") != std::string::npos);
+
+  // A later LOW invalidates current health, not the preceding valid frame.
+  LinaceReader statusDrop; gpio[42] = 1; statusDrop.begin(21, 42, edgeCallback);
+  TIFR5 = 0; TCNT5 = 100; gpio[21] = 1; nowMs = 100; statusDrop.onClock();
+  TCNT5 = 8102; gpio[21] = 0; nowMs = 101; statusDrop.onClock();
+  statusDrop.onOverflow(); statusDrop.onOverflow();
+  TCNT5 = 100; gpio[21] = 1; nowMs = 109; statusDrop.onClock();
+  gpio[42] = 0; statusDrop.poll();
+  assert(status(statusDrop, 110).find("\"df\":0,\"dr\":4000,\"dd\":0,\"da\":10,\"dt\":100,\"dq\":1") != std::string::npos);
+  assert(status(statusDrop, 110).find("\"dstat\":0") != std::string::npos);
+  gpio[42] = 1; statusDrop.poll();
+  assert(status(statusDrop, 111).find("\"df\":0") != std::string::npos);
+}
+
+static void testStepperPwm() {
+  StepperPwm s; modes.clear(); writes.clear(); s.begin();
+  assert((modes == std::vector<std::pair<int, int>>{{3, INPUT}, {3, OUTPUT}}));
+  assert(!s.moving() && !s.reached() && s.position() == 0);
+  assert(TCCR3A == 0 && TCCR3B == 0 && TIMSK3 == 0);
+  assert(TCCR3C == _BV(FOC3C)); // Seed HIGH before attaching the hardware output.
+  s.start(1, true, 3, 1000);
+  assert(OCR3A == 249 && OCR3C == 125);
+  assert(TCCR3A == (_BV(COM3C1) | _BV(WGM31) | _BV(WGM30)));
+  assert(TCCR3B == (_BV(WGM33) | _BV(WGM32) | _BV(CS31) | _BV(CS30)));
+  writes.clear();
+  for (int i = 1; i <= 3; ++i) {
+    s.onStep(); assert(s.position() == i && s.moving());
+    assert(writes.empty()); // Counting interrupts never toggle STEP.
+    s.onPeriodEnd();
+  }
+  assert(!s.moving() && s.reached() && s.position() == 3 && s.signedSps() == 0);
+  assert(TCCR3A == 0 && TCCR3B == 0 && TIMSK3 == 0);
+  assert((writes == std::vector<std::pair<int, int>>{{3, HIGH}}));
+  s.onStep(); s.onPeriodEnd(); assert(s.position() == 3);
+
+  s.zero(); s.start(-1, true, -1, 378); writes.clear();
+  assert(OCR3A == 660 && OCR3C == 330);
+  s.onStep(); assert(s.position() == -1 && s.moving() && writes.empty());
+  s.onPeriodEnd(); assert(!s.moving() && s.reached() && s.position() == -1);
+
+  s.zero(); s.start(1, false, 0, 1000); writes.clear();
+  TCNT3 = 100; s.setSpeed(500);
+  assert(OCR3A == 249 && OCR3C == 125 && TCNT3 == 100);
+  s.onStep(); // Stage the next cycle without resetting TCNT3 or GPIO.
+  assert(OCR3A == 499 && OCR3C == 250 && s.signedSps() == 1000 && TCNT3 == 100);
+  s.onPeriodEnd(); s.onStep();
+  assert(s.signedSps() == 500 && s.position() == 2 && writes.empty());
+  s.stop(); assert(!s.moving() && !s.reached());
+  s.onStep(); s.onPeriodEnd(); assert(s.position() == 2);
+  for (long speed : {20L, 1969L}) {
+    s.start(1, false, 0, speed);
+    assert(OCR3A >= 126 && OCR3A <= 12499 && OCR3C > 0 && OCR3C < OCR3A);
+    s.stop();
+  }
 }
 
 static void testAdc() {
@@ -186,7 +257,54 @@ static void testRelays() {
   snapshot.beforePrint = [&] { if (!once) { once = true; relays.allOff(); } };
   relays.writeStatus(snapshot); assert(snapshot.text == ",\"sol4\":0,\"sol5\":1,\"sol6\":0");
 }
+
+static void testLimits() {
+  DirectionalLimits limits;
+  modes.clear(); nowMs = 0; gpio[67] = gpio[66] = HIGH;
+  limits.begin(67, 66); // DI1/top is positive; DI0/bottom is negative.
+  assert((modes == std::vector<std::pair<int,int>>({{67,INPUT},{66,INPUT}})));
+  assert(!limits.poll(0) && !limits.blocks(1) && !limits.blocks(-1));
+  gpio[66] = LOW;
+  assert(limits.poll(1000));
+  assert(!limits.poll(5999) && !limits.blocks(-1));
+  assert(limits.poll(6000) && limits.blocks(-1) && !limits.blocks(1));
+  assert(limits.negative.qualifiedActive);
+  Print active; limits.writeStatus(active);
+  assert(active.text == ",\"d6\":1,\"d8\":0,\"lx\":65536,\"lp\":0,\"ln\":0,\"lppin\":67,\"lnpin\":66");
+  gpio[66] = HIGH; limits.poll(6001);
+  assert(!limits.negative.qualifiedActive && !limits.blocks(-1)); // HIGH releases without reset/retreat.
+
+  gpio[67] = LOW; limits.poll(7000); gpio[67] = HIGH; limits.poll(7999);
+  assert(!limits.blocks(1) && limits.positive.rejectedGlitches == 1);
+  gpio[67] = LOW; limits.poll(8000); limits.poll(13000);
+  assert(limits.blocks(1) && !limits.blocks(-1));
+  limits.poll(13001);
+  assert(limits.blocks(1));
+  gpio[66] = LOW; limits.poll(14000); limits.poll(19000);
+  assert(limits.blocks(1) && limits.blocks(-1) && !limits.blocks(0));
+
+  // LOW at boot (including disconnected NC wiring) qualifies without an edge.
+  nowMs = 0; limits.begin(67, 66); limits.poll(5000);
+  assert(limits.blocks(1) && limits.blocks(-1));
+  Print snapshot;
+  snapshot.beforePrint = [&] { gpio[67] = gpio[66] = HIGH; limits.poll(5001); };
+  limits.writeStatus(snapshot);
+  assert(snapshot.text.find("\"d6\":0,\"d8\":0,\"lx\":196608") != std::string::npos);
+  assert(!limits.blocks(1) && !limits.blocks(-1)); // Both HIGH clear all limit blocks.
+
+  QualifiedLimitInput input = {};
+  input.initialize(true, 0xfffffff0UL);
+  assert(!input.update(true, uint32_t(0xfffffff0UL + 4999)));
+  assert(input.update(true, uint32_t(0xfffffff0UL + 5000)));
+  assert(!input.update(false, 6000));
+  input.initialize(false, 0);
+  for (uint32_t i = 0; i < 300; ++i) {
+    assert(!input.update(true, i * 100));
+    assert(!input.update(false, i * 100 + 1));
+  }
+  assert(input.rejectedGlitches == 255);
+}
 int main() {
-  testProtocol(); testReader(); testAdc(); testRelays();
+  testProtocol(); testReader(); testStepperPwm(); testAdc(); testRelays(); testLimits();
   std::cout << "Controllino IO invariants passed\n";
 }

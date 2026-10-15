@@ -7,21 +7,72 @@ DeviceControls is the operator-command boundary; adapters below it own I/O."""
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 import math
 import os
+import errno
 import socket
 import termios
 import threading
 import time
 from dataclasses import dataclass, field
-from http.client import HTTPException
+from http.client import HTTPConnection, HTTPSConnection, HTTPException
+from pathlib import Path
 from typing import BinaryIO, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 from read_ed593_ascii import DEFAULT_HOST as DEFAULT_ED593_HOST, DEFAULT_PORT as DEFAULT_ED593_PORT
 from controllino_io import CONTROLLINO_RELAYS, PRESSURE_INPUTS, SOLENOID_COUNT, pressure_fields
+
+
+_command_send_observer: ContextVar[Callable[[], None] | None] = ContextVar("command_send_observer", default=None)
+
+
+@contextmanager
+def observe_command_sends(callback: Callable[[], None]):
+    """Observe this worker's transmissions without catching unrelated lease traffic."""
+    token = _command_send_observer.set(callback)
+    try:
+        yield
+    finally:
+        _command_send_observer.reset(token)
+
+
+def _command_sent() -> None:
+    callback = _command_send_observer.get()
+    if callback is not None:
+        callback()
+
+
+class _ObserveHttpSend:
+    def request(self, method, *args, **kwargs):
+        super().request(method, *args, **kwargs)
+        if method == "POST":
+            _command_sent()  # Headers/body sent; getresponse() has not started yet.
+
+
+class _ObservedHTTPConnection(_ObserveHttpSend, HTTPConnection):
+    pass
+
+
+class _ObservedHTTPSConnection(_ObserveHttpSend, HTTPSConnection):
+    pass
+
+
+class _ObservedHTTPHandler(HTTPHandler):
+    def http_open(self, request):
+        return self.do_open(_ObservedHTTPConnection, request)
+
+
+class _ObservedHTTPSHandler(HTTPSHandler):
+    def https_open(self, request):
+        options = {"context": self._context}
+        if hasattr(self, "_check_hostname"):
+            options["check_hostname"] = self._check_hostname
+        return self.do_open(_ObservedHTTPSConnection, request, **options)
 
 try:
     from .read_dxmr90_modbus import (
@@ -84,6 +135,7 @@ DEFAULT_STEPPER_NETWORK_URL = "http://arduino.local:8080"
 DEFAULT_STEPPER_NETWORK_TIMEOUT_S = 0.75
 DEFAULT_STEPPER_MM_PER_PULSE = 0.00396875
 DEFAULT_STEPPER_STEPS_PER_MM = 1.0 / DEFAULT_STEPPER_MM_PER_PULSE
+CONTROLLINO_MM_PER_PULSE = 5.08 / 1000  # E09050; SRX SW5–SW8 ON/ON/ON/OFF.
 DEFAULT_STEPPER_TRAVEL_MM = 137.18
 DEFAULT_STEPPER_HOME_SPEED_MM_S = 1.5
 DEFAULT_STEPPER_LIMIT_QUALIFICATION_MS = 5.0
@@ -92,9 +144,9 @@ DEFAULT_BRUSHLESS_PULSE_US = 1200
 MIN_BRUSHLESS_PULSE_US = 1000
 MAX_BRUSHLESS_PULSE_US = 2000
 
-# Quantity bounds only. They are not an absolute-position safety envelope;
-# D6/D8 stop travel into their respective ends.
-DEFAULT_STEPPER_MAX_DISTANCE_MM = DEFAULT_STEPPER_TRAVEL_MM
+# Signed 32-bit pulse counts are the wire representation, not a travel envelope.
+MAX_STEPPER_MOVE_PULSES = 2**31 - 1
+DEFAULT_STEPPER_MAX_DISTANCE_MM = MAX_STEPPER_MOVE_PULSES / DEFAULT_STEPPER_STEPS_PER_MM
 DEFAULT_STEPPER_MIN_SPEED_MM_S = 0.1
 DEFAULT_STEPPER_MAX_SPEED_MM_S = 10.0
 DEFAULT_STEPPER_ACCELERATION_MM_S2 = 5.0
@@ -123,17 +175,22 @@ def finite_number(value: object, field: str) -> float:
     return number
 
 
-def validate_stepper_move(distance_mm: object, speed_mm_s: object, *,
-                          max_travel_mm: float = DEFAULT_STEPPER_MAX_DISTANCE_MM) -> tuple[float, float]:
+def stepper_steps_per_mm(mode: str) -> float:
+    return 1.0 / CONTROLLINO_MM_PER_PULSE if mode == "controllino" else DEFAULT_STEPPER_STEPS_PER_MM
+
+
+def max_stepper_move_mm(mode: str) -> float:
+    return MAX_STEPPER_MOVE_PULSES / stepper_steps_per_mm(mode)
+
+
+def validate_stepper_move(distance_mm: object, speed_mm_s: object, *, mode: str = "") -> tuple[float, float]:
     """Validate command operands without consulting live controller state."""
     distance = finite_number(distance_mm, "distance_mm")
     if distance <= 0:
         raise ValueError("distance_mm must be a positive finite travel magnitude")
-    if distance > max_travel_mm:
-        raise ValueError("distance_mm exceeds configured max_travel_mm")
-    if distance > DEFAULT_STEPPER_MAX_DISTANCE_MM:
-        raise ValueError(f"abs(distance_mm) must not exceed {DEFAULT_STEPPER_MAX_DISTANCE_MM:g}")
-    if round(distance * DEFAULT_STEPPER_STEPS_PER_MM) == 0:
+    if distance > max_stepper_move_mm(mode):
+        raise ValueError("distance_mm exceeds the signed 32-bit pulse-count representation")
+    if round(distance * stepper_steps_per_mm(mode)) == 0:
         raise ValueError("distance_mm is smaller than one provisional step")
     speed = finite_number(speed_mm_s, "speed_mm_s")
     UsbStepperSource._manual_speed_sps(speed)
@@ -167,6 +224,7 @@ CUBEMARS_PROTOCOL_MAX_RPM = 100000 // CUBEMARS_ERPM_PER_OUTPUT_RPM
 CUBEMARS_PROTOCOL_MAX_DURATION_MS = 0x7FFFFFFF  # Signed millis deadline horizon.
 CUBEMARS_DIAGNOSTIC_RANGES = {
     "ef": (-1, 255), "tec": (-1, 255), "rec": (-1, 255),
+    "txfail": (0, 0xFFFFFFFF), "txcode": (0, 255),
     "rxfail": (0, 0xFFFFFFFF), "rx": (0, 0xFFFFFFFF),
     "id": (-1, 0x1FFFFFFF), "ext": (0, 1), "rtr": (0, 1), "dlc": (0, 255),
     **dict.fromkeys(("le", "ls", "lt", "lr", "lst", "lsr", "se", "ss", "st", "srec", "sst", "ssrec"), (0, 255)),
@@ -219,17 +277,20 @@ def validate_cubemars_manual(action: object, token: object, rpm: object = None,
         if rpm is not None or ramp_rpm_s is not None:
             raise ValueError("renew accepts only action and token")
         return None, None
-    if type(rpm) is not int or not rpm or not -max_rpm <= rpm <= max_rpm:
-        raise ValueError(f"rpm must be a nonzero integer from {-max_rpm} through {max_rpm}")
+    if type(rpm) is not int or (not rpm and action != "update") or not -max_rpm <= rpm <= max_rpm:
+        raise ValueError(f"rpm must be an integer from {-max_rpm} through {max_rpm}; zero requires update")
     if type(ramp_rpm_s) is not int or not 1 <= ramp_rpm_s <= max_ramp_rpm_s:
         raise ValueError(f"ramp_rpm_s must be an integer from 1 through {max_ramp_rpm_s}")
     return rpm, ramp_rpm_s
 
 
-def require_cubemars_manual(values: Mapping[str, object], action: str, token: int) -> None:
+def require_cubemars_manual(values: Mapping[str, object], action: str, token: int,
+                            rpm: int | None = None) -> None:
     if values.get("stepper_can_motor_manual_capable") is not True:
         raise RuntimeError("Connected firmware does not support manual CAN motor control")
     require_cubemars_run(values, 1)
+    if rpm == 0 and values.get("stepper_can_motor_ramped_stop_capable") is not True:
+        raise RuntimeError("Connected firmware does not support ramped stop")
     if action == "start" and values.get("stepper_can_motor_active") is True:
         raise RuntimeError("Release the active CAN motor command before starting a new session")
     if action != "start" and (values.get("stepper_can_motor_active") is not True
@@ -333,11 +394,6 @@ class DeviceControls:
             matches = None
         return CommandReceipt(stepper, current.get("stepper_status_sequence"), description, matches, result)
 
-    @staticmethod
-    def _motion_sign(stepper: SourceAdapter) -> int:
-        # Installed Controllino: operator Forward/down is negative on the wire.
-        return -1 if stepper.mode == "controllino" else 1
-
     def move(self, current: dict[str, object], values: dict[str, object]) -> CommandReceipt:
         stepper = self.require_stepper("move", error="stepper source does not support motion controls")
         travel_mm = values["distance_mm"]  # Positive magnitude checked against application travel settings.
@@ -347,7 +403,8 @@ class DeviceControls:
             direction = "forward"
         if direction not in ("forward", "reverse"):
             raise RuntimeError("move direction is unavailable")
-        signed_distance = (-travel_mm if direction == "reverse" else travel_mm) * self._motion_sign(stepper)
+        # Controllino convention: Forward/up is positive, Reverse/down negative.
+        signed_distance = -travel_mm if direction == "reverse" else travel_mm
         stepper.move(signed_distance, values["speed_mm_s"], values.get("command_id"))
         # Capture before polling: a telemetry poll can clear the pending ID.
         expected_id = getattr(stepper, "pending_command_id", None)
@@ -411,7 +468,7 @@ class DeviceControls:
         direction = values.get("direction")
         if isinstance(direction, bool) or direction not in (-1, 0, 1):
             raise ValueError("direction must be -1, 0, or 1")
-        wire_direction = direction * self._motion_sign(stepper)
+        wire_direction = direction
         stepper.set_local_run(wire_direction)
         expected_direction = "positive" if wire_direction == 1 else "negative"
         return self._receipt(
@@ -421,9 +478,12 @@ class DeviceControls:
             always=True, confirmed=True, direction=direction,
         )
 
-    def home(self, current: dict[str, object]) -> CommandReceipt:
+    def home(self, current: dict[str, object], values: dict[str, object] | None = None) -> CommandReceipt:
         stepper = self.require_stepper("home", error="stepper source does not support Home")
-        stepper.home()
+        if stepper.mode.startswith("controllino"):
+            stepper.home((values or {}).get("speed_mm_s"))
+        else:
+            stepper.home()
         return self._receipt(
             stepper, current, "Home", lambda p: p.get("stepper_state") in ("homing", "ready"), confirmed=True,
         )
@@ -436,7 +496,8 @@ class DeviceControls:
         if isinstance(requested, bool):
             raise ValueError("speed_mm_s must be a finite number")
         try:
-            expected = round(float(requested) * DEFAULT_STEPPER_STEPS_PER_MM) / DEFAULT_STEPPER_STEPS_PER_MM
+            scale = stepper_steps_per_mm(stepper.mode)
+            expected = round(float(requested) * scale) / scale
         except (TypeError, ValueError) as exc:
             raise ValueError("speed_mm_s must be a finite number") from exc
         stepper.set_speed(requested)
@@ -514,14 +575,21 @@ class DeviceControls:
             action, token, values.get("rpm"), values.get("ramp_rpm_s"),
             max_rpm=current.get("stepper_can_motor_max_rpm") or CUBEMARS_PROTOCOL_MAX_RPM,
             max_ramp_rpm_s=current.get("stepper_can_motor_max_ramp_rpm_s") or CUBEMARS_PROTOCOL_MAX_RPM)
-        require_cubemars_manual(current, action, token)
+        require_cubemars_manual(current, action, token, rpm)
         before = current.get("stepper_can_motor_command_sequence")
         stepper.set_cubemars_manual(action, token, rpm, ramp)
 
         def accepted(status: dict[str, object]) -> bool:
             sequence = status.get("stepper_can_motor_command_sequence")
-            return (type(sequence) is int and type(before) is int
-                    and 0 < ((sequence - before) & 0xFFFFFFFF) < 0x80000000
+            advanced = (type(sequence) is int and type(before) is int
+                        and 0 < ((sequence - before) & 0xFFFFFFFF) < 0x80000000)
+            if action == "update" and rpm == 0 and advanced and (
+                    status.get("stepper_can_motor_active") is False
+                    and status.get("stepper_can_motor_manual_token") == 0
+                    and status.get("stepper_can_motor_target_rpm") == 0
+                    and status.get("stepper_can_motor_error") == "operator_stop"):
+                return True  # A short ramp can finish before the first confirmation sample.
+            return (advanced
                     and status.get("stepper_can_motor_active") is True
                     and status.get("stepper_can_motor_manual_token") == token
                     and (action == "renew" or (
@@ -876,15 +944,21 @@ class SimulatedStepperSource:
         "stepper_dro_position_mm",
         "stepper_dro_displacement_mm",
         "stepper_dro_sample_age_ms",
+        "stepper_dro_acquired_ms",
         "stepper_dro_valid_frame_count",
         "stepper_dro_rejected_frame_count",
         "stepper_dro_dropped_frame_count",
+        "stepper_dro_pwm_raw",
+        "stepper_dro_status_raw",
+        "stepper_dro_edge_count",
         "stepper_acceleration_mm_s2",
         "stepper_command_id",
         "stepper_positive_limit_active",
         "stepper_negative_limit_active",
         "stepper_positive_limit_latched",
         "stepper_negative_limit_latched",
+        "stepper_positive_limit_input",
+        "stepper_negative_limit_input",
         "stepper_limit_filter_capable",
         "stepper_limit_qualification_ms",
         "stepper_positive_limit_glitch_count",
@@ -1213,12 +1287,17 @@ class SimulatedStepperSource:
             "stepper_dro_valid_frame_count": None,
             "stepper_dro_rejected_frame_count": None,
             "stepper_dro_dropped_frame_count": None,
+            "stepper_dro_pwm_raw": None,
+            "stepper_dro_status_raw": None,
+            "stepper_dro_edge_count": None,
             "stepper_acceleration_mm_s2": round(self._acceleration_mm_s2, 4),
             "stepper_command_id": self._command_id,
             "stepper_positive_limit_active": self._positive_limit_active,
             "stepper_negative_limit_active": self._negative_limit_active,
             "stepper_positive_limit_latched": self._positive_limit_latched,
             "stepper_negative_limit_latched": self._negative_limit_latched,
+            "stepper_positive_limit_input": "D6",
+            "stepper_negative_limit_input": "D8",
             "stepper_limit_filter_capable": True,
             "stepper_limit_qualification_ms": DEFAULT_STEPPER_LIMIT_QUALIFICATION_MS,
             "stepper_positive_limit_glitch_count": 0,
@@ -1391,14 +1470,15 @@ class UsbStepperSource:
             ):
                 raise ValueError("USB stepper field csps must be numeric")
             configured_speed_sps = float(configured_speed_value)
+            minimum_sps = round(DEFAULT_STEPPER_MIN_SPEED_MM_S * stepper_steps_per_mm(cls.mode))
             if (
                 not math.isfinite(configured_speed_sps)
-                or configured_speed_sps < DEFAULT_STEPPER_MIN_SPEED_SPS
+                or configured_speed_sps < minimum_sps
                 or configured_speed_sps > DEFAULT_STEPPER_MAX_SPEED_SPS
             ):
                 raise ValueError(
                     "USB stepper field csps must be in "
-                    f"{DEFAULT_STEPPER_MIN_SPEED_SPS}.."
+                    f"{minimum_sps}.."
                     f"{DEFAULT_STEPPER_MAX_SPEED_SPS}"
                 )
         else:
@@ -1420,7 +1500,7 @@ class UsbStepperSource:
                 )
             measured_pulse_rate_sps: int | None = measured_pulse_rate_value
             measured_speed_mm_s: float | None = round(
-                measured_pulse_rate_sps / DEFAULT_STEPPER_STEPS_PER_MM,
+                measured_pulse_rate_sps / stepper_steps_per_mm(cls.mode),
                 4,
             )
         else:
@@ -1428,6 +1508,19 @@ class UsbStepperSource:
             measured_speed_mm_s = None
 
         dro_keys = ("dc", "df", "dr", "dd", "da", "dq", "dx")
+        dro_input_keys = ("dpwm", "dstat", "dedge")
+        dro_pwm_raw = dro_status_raw = dro_edge_count = None
+        if any(key in payload for key in dro_input_keys):
+            if not all(key in payload for key in dro_input_keys):
+                raise ValueError("USB DRO input diagnostics must be provided together")
+            dro_pwm_raw = "HIGH" if cls._wire_level(payload, "dpwm") else "LOW"
+            dro_status_raw = "HIGH" if cls._wire_level(payload, "dstat") else "LOW"
+            dro_edge_count = payload["dedge"]
+            if type(dro_edge_count) is not int or not 0 <= dro_edge_count <= 0xFFFFFFFF:
+                raise ValueError("USB DRO edge count must be a non-negative 32-bit integer")
+        dro_acquired_ms = payload.get("dt")
+        if dro_acquired_ms is not None and (type(dro_acquired_ms) is not int or not 0 <= dro_acquired_ms <= 0xFFFFFFFF):
+            raise ValueError("USB DRO acquisition timestamp must be an unsigned 32-bit integer")
         dro_capable = all(key in payload for key in dro_keys)
         if any(key in payload for key in dro_keys) and not dro_capable:
             raise ValueError("USB DRO status fields must be provided together")
@@ -1463,11 +1556,8 @@ class UsbStepperSource:
                 raise ValueError("USB DRO cannot be fresh before its first valid frame")
             if dro_valid_frames > 0 and dro_age_ms < 0:
                 raise ValueError("USB DRO sample age is missing after a valid frame")
-            dro_position_mm: float | None = round(dro_position_raw / 100.0, 2)
-            dro_displacement_mm: float | None = round(
-                dro_displacement_raw / 100.0,
-                2,
-            )
+            dro_position_mm = round(dro_position_raw / 100.0, 2) if dro_valid_frames else None
+            dro_displacement_mm = round(dro_displacement_raw / 100.0, 2) if dro_valid_frames else None
             dro_rejected_frames: int | None = (dro_diagnostics >> 8) & 0xFF
             dro_dropped_frames: int | None = dro_diagnostics & 0xFF
         else:
@@ -1709,11 +1799,11 @@ class UsbStepperSource:
             "stepper_target_mm": target_mm,
             "stepper_remaining_mm": remaining_mm,
             "stepper_speed_mm_s": round(
-                logical_speed_sps / DEFAULT_STEPPER_STEPS_PER_MM,
+                logical_speed_sps / stepper_steps_per_mm(cls.mode),
                 4,
             ),
             "stepper_command_speed_mm_s": round(
-                configured_speed_sps / DEFAULT_STEPPER_STEPS_PER_MM,
+                configured_speed_sps / stepper_steps_per_mm(cls.mode),
                 4,
             ),
             "stepper_pulse_measurement_capable": pulse_measurement_capable,
@@ -1724,9 +1814,13 @@ class UsbStepperSource:
             "stepper_dro_position_mm": dro_position_mm,
             "stepper_dro_displacement_mm": dro_displacement_mm,
             "stepper_dro_sample_age_ms": dro_age_ms,
+            "stepper_dro_acquired_ms": dro_acquired_ms,
             "stepper_dro_valid_frame_count": dro_valid_frames,
             "stepper_dro_rejected_frame_count": dro_rejected_frames,
             "stepper_dro_dropped_frame_count": dro_dropped_frames,
+            "stepper_dro_pwm_raw": dro_pwm_raw,
+            "stepper_dro_status_raw": dro_status_raw,
+            "stepper_dro_edge_count": dro_edge_count,
             "stepper_acceleration_mm_s2": (
                 DEFAULT_STEPPER_ACCELERATION_MM_S2
                 if position_command_capable
@@ -1737,6 +1831,8 @@ class UsbStepperSource:
             "stepper_negative_limit_active": negative_active,
             "stepper_positive_limit_latched": positive_latched,
             "stepper_negative_limit_latched": negative_latched,
+            "stepper_positive_limit_input": "D6",
+            "stepper_negative_limit_input": "D8",
             "stepper_limit_filter_capable": limit_filter_capable,
             "stepper_limit_qualification_ms": (
                 DEFAULT_STEPPER_LIMIT_QUALIFICATION_MS
@@ -1792,7 +1888,7 @@ class UsbStepperSource:
         self._next_open_attempt_s = elapsed_s + 1.0
         fd: int | None = None
         try:
-            fd = os.open(self.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            fd = os.open(self._usb_port_to_open(), os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
             attributes = termios.tcgetattr(fd)
             attributes[0] = 0
             attributes[1] = 0
@@ -1813,6 +1909,9 @@ class UsbStepperSource:
         self._buffer = b""
         self.last_error = None
         return True
+
+    def _usb_port_to_open(self) -> str:
+        return self.port
 
     def close(self) -> None:
         if self._fd is not None:
@@ -1842,15 +1941,15 @@ class UsbStepperSource:
         values["stepper_transport_error"] = self.last_error
         return values
 
-    @staticmethod
-    def _manual_speed_sps(speed_mm_s: object) -> int:
+    @classmethod
+    def _manual_speed_sps(cls, speed_mm_s: object) -> int:
         speed = finite_number(speed_mm_s, "speed_mm_s")
         if speed < DEFAULT_STEPPER_MIN_SPEED_MM_S or speed > DEFAULT_STEPPER_MAX_SPEED_MM_S:
             raise ValueError(
                 f"speed_mm_s must be from {DEFAULT_STEPPER_MIN_SPEED_MM_S:g} through "
                 f"{DEFAULT_STEPPER_MAX_SPEED_MM_S:g}"
             )
-        return int(round(speed * DEFAULT_STEPPER_STEPS_PER_MM))
+        return int(round(speed * stepper_steps_per_mm(cls.mode)))
 
     @staticmethod
     def _brushless_pulse_us(pulse_us: object) -> int:
@@ -1892,6 +1991,7 @@ class UsbStepperSource:
             if written != len(command):
                 self._disconnect(f"{self.port}: incomplete USB command write")
                 raise RuntimeError(f"USB stepper {description} command was incomplete")
+            _command_sent()
 
     def set_speed(self, speed_mm_s: object) -> Mapping[str, float | int | bool | str | None]:
         """Set manual-mode speed without starting or choosing motion."""
@@ -1930,7 +2030,7 @@ class UsbStepperSource:
         )
         return self.status()
 
-    def home(self) -> Mapping[str, float | int | bool | str | None]:
+    def home(self, speed_mm_s: object = None) -> Mapping[str, float | int | bool | str | None]:
         values = self._require_connected()
         if values.get("stepper_estop_latched"):
             raise RuntimeError("reset the software E-STOP before Home")
@@ -1940,6 +2040,12 @@ class UsbStepperSource:
             raise RuntimeError("Yún firmware does not support Home")
         if values.get("stepper_control_mode") != "web_position":
             raise RuntimeError("select Web Position mode before Home")
+        if self.mode.startswith("controllino"):
+            if values.get("stepper_moving") or values.get("stepper_driver_enabled") or values.get("stepper_state") == "homing":
+                raise RuntimeError("stepper is busy")
+            sps = self._manual_speed_sps(speed_mm_s)
+            self._write_command(f"V1 H{sps}\n".encode("ascii"), "Home")
+            return self.status()
         if not values.get("stepper_local_enabled"):
             raise RuntimeError("turn D4 ON to arm Home")
         if values.get("stepper_authorized_direction") != "reverse":
@@ -2019,9 +2125,9 @@ class UsbStepperSource:
         command_id: object | None = None,
     ) -> Mapping[str, float | int | bool | str | None]:
         distance = self._finite_number(distance_mm, "distance_mm")
-        validate_stepper_move(abs(distance), speed_mm_s)
+        validate_stepper_move(abs(distance), speed_mm_s, mode=self.mode)
         speed_sps = self._manual_speed_sps(speed_mm_s)
-        delta_steps = int(round(distance * DEFAULT_STEPPER_STEPS_PER_MM))
+        delta_steps = int(round(distance * stepper_steps_per_mm(self.mode)))
 
         values = self._require_connected()
         if values.get("stepper_estop_latched"):
@@ -2066,17 +2172,17 @@ class UsbStepperSource:
             )
         self._validate_directional_limits(values, delta_steps)
 
-    @staticmethod
-    def _validate_directional_limits(values: Mapping[str, object], delta_steps: int) -> None:
+    def _validate_directional_limits(self, values: Mapping[str, object], delta_steps: int) -> None:
         """Respect reported directional limits for either controller transport."""
+        use_latches = self.mode != "controllino"
         if delta_steps > 0 and (
             values.get("stepper_positive_limit_active")
-            or values.get("stepper_positive_limit_latched")
+            or (use_latches and values.get("stepper_positive_limit_latched"))
         ):
             raise RuntimeError("positive limit blocks positive motion")
         if delta_steps < 0 and (
             values.get("stepper_negative_limit_active")
-            or values.get("stepper_negative_limit_latched")
+            or (use_latches and values.get("stepper_negative_limit_latched"))
         ):
             raise RuntimeError("negative limit blocks negative motion")
 
@@ -2088,6 +2194,22 @@ class UsbStepperSource:
             raise RuntimeError("web Stop is available only in Web Position mode")
         self._write_command(b"V1 X\n", "Stop")
         return self.status()
+
+    def _resolve_command_id(self, values: dict[str, float | int | bool | str | None]) -> None:
+        """Translate this adapter's wire ID back to the caller's command ID."""
+        decoded = values.get("stepper_command_id")
+        prefix = f"{self.mode}-"
+        if not isinstance(decoded, str) or not decoded.startswith(prefix):
+            return
+        try:
+            wire_id = int(decoded[len(prefix):])
+        except ValueError:
+            return
+        resolved = self._command_names.get(wire_id)
+        if resolved is not None:
+            values["stepper_command_id"] = resolved
+            if resolved == self.pending_command_id:
+                self.pending_command_id = None
 
     def poll(self, elapsed_s: float) -> SourceReading | None:
         if not self._open(elapsed_s):
@@ -2129,19 +2251,7 @@ class UsbStepperSource:
             except ValueError as exc:
                 self.last_error = str(exc)
                 continue
-            decoded_command_id = latest.get("stepper_command_id")
-            if isinstance(decoded_command_id, str) and decoded_command_id.startswith(
-                "usb-"
-            ):
-                try:
-                    wire_id = int(decoded_command_id[4:])
-                except ValueError:
-                    wire_id = 0
-                resolved_name = self._command_names.get(wire_id)
-                if resolved_name is not None:
-                    latest["stepper_command_id"] = resolved_name
-                    if resolved_name == self.pending_command_id:
-                        self.pending_command_id = None
+            self._resolve_command_id(latest)
         if latest is None:
             return None
         self.last_error = None
@@ -2184,7 +2294,7 @@ class NetworkStepperSource(UsbStepperSource):
         self.pending_command_id: str | None = None
         self.pending_command_error: str | None = None
         self._command_lock = threading.Lock()
-        self._opener = build_opener(ProxyHandler({}))
+        self._opener = build_opener(ProxyHandler({}), _ObservedHTTPHandler(), _ObservedHTTPSHandler())
         self._state_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -2262,18 +2372,7 @@ class NetworkStepperSource(UsbStepperSource):
             self._set_error(f"{url}: {exc}")
             return
 
-        decoded_command_id = values.get("stepper_command_id")
-        prefix = f"{self.mode}-"
-        if isinstance(decoded_command_id, str) and decoded_command_id.startswith(prefix):
-            try:
-                wire_id = int(decoded_command_id[len(prefix):])
-            except ValueError:
-                wire_id = 0
-            resolved_name = self._command_names.get(wire_id)
-            if resolved_name is not None:
-                values["stepper_command_id"] = resolved_name
-                if resolved_name == self.pending_command_id:
-                    self.pending_command_id = None
+        self._resolve_command_id(values)
         with self._state_lock:
             self._last_values = values
             self.last_error = None
@@ -2417,6 +2516,7 @@ class ControllinoProtocol:
         "stepper_can_motor_bitrate", "stepper_can_motor_max_rpm", "stepper_can_motor_max_duration_ms",
         "stepper_can_motor_stale_ms", "stepper_can_motor_command_sequence",
         "stepper_can_motor_manual_capable", "stepper_can_motor_manual_token",
+        "stepper_can_motor_ramped_stop_capable",
         "stepper_can_motor_lease_ms", "stepper_can_motor_ramp_rpm_s",
         "stepper_can_motor_applied_rpm", "stepper_can_motor_max_ramp_rpm_s",
         "stepper_can_motor_default_ramp_rpm_s",
@@ -2462,6 +2562,7 @@ class ControllinoProtocol:
 
         can_motor = kind == "cubemars"
         manual_can = False
+        ramped_stop = False
         if can_motor:
             if not version or any(key in payload for key in ("bo", "bp", "sv", "sp")):
                 raise ValueError("CAN motor firmware requires a version and no ESC/servo fields")
@@ -2479,6 +2580,9 @@ class ControllinoProtocol:
             manual_can = any(key in payload for key in manual_ranges)
             if manual_can:
                 ranges.update(manual_ranges)
+            if "cstop" in payload:
+                ranges["cstop"] = (0, 1)
+            ramped_stop = payload.get("cstop") == 1
             if any(type(payload.get(key)) is not int or not lo <= payload[key] <= hi
                    for key, (lo, hi) in ranges.items()):
                 raise ValueError("Invalid CAN motor telemetry integer or range")
@@ -2489,7 +2593,7 @@ class ControllinoProtocol:
                 raise ValueError("Invalid CAN motor state telemetry")
             if manual_can and (payload["cramp"] > payload["crmax"]
                     or payload["crdefault"] > payload["crmax"]
-                    or (payload["cm"] and (not payload["ce"] or not payload["cr"] or not payload["cramp"]))
+                    or (payload["cm"] and (not payload["ce"] or (not payload["cr"] and not ramped_stop) or not payload["cramp"]))
                     or (not payload["cm"] and payload["cramp"])):
                 raise ValueError("Invalid manual CAN motor state telemetry")
 
@@ -2525,10 +2629,18 @@ class ControllinoProtocol:
                 payload[pin] = 1
         if absent_limits:
             payload.pop("lx", None)
+        limit_pins = ("lppin", "lnpin")
+        if any(key in payload for key in limit_pins):
+            pins = [payload.get(key) for key in limit_pins]
+            if (any(type(pin) is not int or not 0 <= pin <= 79 for pin in pins)
+                    or pins[0] == pins[1] or absent_limits):
+                raise ValueError("Controllino limit pins must be distinct available Arduino inputs")
         if payload.get("dc") == 0:
             for key in ("dc", "df", "dr", "dd", "da", "dq", "dx"):
                 payload.pop(key, None)
-        values = UsbStepperSource.decode_status_line(json.dumps(payload))
+        if "hc" in payload and (type(payload["hc"]) is not int or payload["hc"] not in (0, 1)):
+            raise ValueError("Invalid homing capability")
+        values = super().decode_status_line(json.dumps(payload))
         values.update(
             {
                 "stepper_firmware_version": version,
@@ -2547,7 +2659,7 @@ class ControllinoProtocol:
                 "stepper_pressure_sequence": payload.get("adcseq"),
                 "stepper_local_enabled": not bool(values["stepper_estop_latched"]),
                 "stepper_authorized_direction": "both",
-                "stepper_home_capable": False,
+                "stepper_home_capable": payload.get("hc") == 1 and not absent_limits,
                 "stepper_control_owner": (
                     str(values["stepper_control_owner"]).replace(
                         "manual_d4_d5+", "software_local_speed+"
@@ -2585,6 +2697,7 @@ class ControllinoProtocol:
             "stepper_can_motor_stale_ms": payload.get("cstale") if can_motor else None,
             "stepper_can_motor_command_sequence": payload.get("cq") if can_motor else None,
             "stepper_can_motor_manual_capable": manual_can,
+            "stepper_can_motor_ramped_stop_capable": manual_can and ramped_stop,
             "stepper_can_motor_manual_token": payload.get("cm") if manual_can else None,
             "stepper_can_motor_lease_ms": payload.get("cleasems") if manual_can else None,
             "stepper_can_motor_ramp_rpm_s": payload.get("cramp") if manual_can else None,
@@ -2598,6 +2711,13 @@ class ControllinoProtocol:
             values[f"stepper_{pin}_raw"] = None
             values[f"stepper_{side}_limit_active"] = None
             values[f"stepper_{side}_limit_latched"] = None
+            values[f"stepper_{side}_limit_input"] = None
+        for key, side in zip(limit_pins, ("positive", "negative")):
+            if key in payload:
+                pin = payload[key]
+                values[f"stepper_{side}_limit_input"] = {
+                    66: "DI0 / A12", 67: "DI1 / A13",
+                }.get(pin, f"Arduino pin {pin}")
         return values
 
     def _validate_move_authority(
@@ -2606,7 +2726,7 @@ class ControllinoProtocol:
         delta_steps: int,
     ) -> None:
         # Signed commands supply direction authority; preserve any limits
-        # reported by newer firmware, even though this installation lacks them.
+        # reported by the controller in the same signed pulse coordinate.
         self._validate_directional_limits(values, delta_steps)
 
     def status(self) -> Mapping[str, float | int | bool | str | None]:
@@ -2639,7 +2759,7 @@ class ControllinoProtocol:
             action, token, rpm, ramp_rpm_s,
             max_rpm=values.get("stepper_can_motor_max_rpm") or CUBEMARS_PROTOCOL_MAX_RPM,
             max_ramp_rpm_s=values.get("stepper_can_motor_max_ramp_rpm_s") or CUBEMARS_PROTOCOL_MAX_RPM)
-        require_cubemars_manual(values, action, token)
+        require_cubemars_manual(values, action, token, rpm)
         command = f"K{token}" if action == "renew" else f"{'M' if action == 'start' else 'U'}{rpm},{ramp},{token}"
         self._write_command(f"V1 {command}\n".encode("ascii"), f"CAN motor manual {action}")
 
@@ -2681,6 +2801,7 @@ class ControllinoProtocol:
             raise RuntimeError("select Local Speed mode before using software run")
         if direction and values.get("stepper_estop_latched"):
             raise RuntimeError("reset the software E-STOP before running")
+        self._validate_directional_limits(values, int(direction))
         self._write_command(
             f"V1 R{int(direction)}\n".encode("ascii"),
             "software run",
@@ -2718,8 +2839,81 @@ class ControllinoStepperSource(ControllinoProtocol, NetworkStepperSource):
 
 
 
+def discover_controllino_usb(*, sys_tty: Path = Path("/sys/class/tty"),
+                            dev: Path = Path("/dev")) -> dict[str, str]:
+    """Find Mega/Controllino USB identities without opening or commanding devices."""
+    found = {}
+    for tty in sorted(sys_tty.glob("tty*")):
+        if not tty.name.startswith(("ttyACM", "ttyUSB")) or not (dev / tty.name).exists():
+            continue
+        try:
+            device = (tty / "device").resolve(strict=True)
+            for usb in (device, *device.parents):
+                if not (usb / "idVendor").exists():
+                    continue
+                vid = (usb / "idVendor").read_text().strip().lower()
+                pid = (usb / "idProduct").read_text().strip().lower()
+                # The four USB IDs declared by the MAXI Automation board profile.
+                if vid not in ("2341", "2a03") or pid not in ("0010", "0042"):
+                    break
+                serial_file = usb / "serial"
+                serial = serial_file.read_text().strip() if serial_file.exists() else ""
+                identity = f"{vid}:{pid}:{serial or usb}"
+                port = dev / tty.name
+                aliases = sorted(path for path in (dev / "serial/by-id").glob("*")
+                                 if path.resolve() == port.resolve())
+                found[identity] = str(aliases[0] if aliases else port)
+                break
+        except OSError:
+            continue  # A device can disappear during discovery; retry on the next open.
+    return found
+
+
 class ControllinoUsbStepperSource(ControllinoProtocol, UsbStepperSource):
-    """The same Controllino protocol over the existing USB serial transport."""
+    """Discover the controller once and retain its identity across USB renumbering."""
+
+    def __init__(self, port: str = "auto", baud: int = DEFAULT_STEPPER_USB_BAUD) -> None:
+        super().__init__(port, baud)
+        self.resolved_port: str | None = None
+        self._usb_identity: str | None = None
+        self._opened_usb_device: str | None = None
+
+    def _usb_port_to_open(self) -> str:
+        devices = discover_controllino_usb()
+        if self._usb_identity is not None:
+            port = devices.get(self._usb_identity)
+            if port is None:
+                raise OSError(errno.ENODEV, "Selected Controllino USB device is disconnected")
+        elif self.port == "auto":
+            if len(devices) != 1:
+                message = ("No compatible Controllino USB device found" if not devices else
+                           "Multiple compatible USB controllers; select one with --stepper-port: "
+                           + ", ".join(devices.values()))
+                raise OSError(errno.ENODEV, message)
+            self._usb_identity, port = next(iter(devices.items()))
+        else:
+            matches = [(identity, port) for identity, port in devices.items()
+                       if os.path.realpath(port) == os.path.realpath(self.port)]
+            # A stale numbered ACM path may recover to the sole compatible controller.
+            if (not matches and not os.path.exists(self.port)
+                    and self.port.startswith("/dev/ttyACM") and len(devices) == 1):
+                matches = list(devices.items())
+            if matches:
+                self._usb_identity, port = matches[0]
+            else:
+                port = self.port  # Explicit stable paths never switch to another device.
+        self.resolved_port = port
+        self._opened_usb_device = os.path.realpath(port)
+        return port
+
+    def _open(self, elapsed_s: float) -> bool:
+        if self._fd is not None and self.resolved_port is not None and (
+                not os.path.exists(self.resolved_port)
+                or os.path.realpath(self.resolved_port) != self._opened_usb_device):
+            self.close()
+            self._last_values = None
+            self.last_error = "Controllino USB device disconnected; waiting for the same controller"
+        return super()._open(elapsed_s)
 
 
 class RealEsp32Source:

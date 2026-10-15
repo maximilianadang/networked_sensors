@@ -141,7 +141,7 @@
             </div>
             <div class="piston-axis">
               <div class="piston-rod"></div>
-              <div class="piston-head"><span>HEAD</span></div>
+              <div class="piston-head"><span>PISTON</span></div>
               <div class="piston-origin"></div>
             </div>
             <div class="piston-ruler"></div>
@@ -158,21 +158,21 @@
               </fieldset>
               <fieldset id="stepperSoftwareDirection" class="mode-options" hidden>
                 <legend>Move direction</legend>
-                <label class="radio-option"><input id="stepperDirectionForward" name="stepper_direction" type="radio" value="forward" checked>Forward</label>
-                <label class="radio-option"><input id="stepperDirectionReverse" name="stepper_direction" type="radio" value="reverse">Reverse</label>
+                <label class="radio-option"><input id="stepperDirectionForward" name="stepper_direction" type="radio" value="forward" checked>Forward (up)</label>
+                <label class="radio-option"><input id="stepperDirectionReverse" name="stepper_direction" type="radio" value="reverse">Reverse (down)</label>
               </fieldset>
               <label id="stepperDistanceField" hidden>Distance (mm)<input id="stepperDistance" name="distance_mm" type="number" required disabled></label>
               <label><span id="stepperSpeedLabel">Speed (mm/s)</span><input id="stepperSpeed" name="speed_mm_s" type="number" required></label>
             </div>
             <div class="form-actions">
               <button id="stepperMove" class="primary" type="submit" aria-keyshortcuts="Space" hidden>Move <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
-              <button id="stepperHome" type="button" hidden>Home to D8 (top)</button>
+              <button id="stepperHome" type="button" hidden>Home</button>
               <button id="stepperStop" class="stop" type="button" aria-keyshortcuts="Space" hidden>Stop <kbd class="shortcut-key" aria-hidden="true">Space</kbd></button>
               <button id="stepperApplySpeed" type="button">Apply Motor Speed</button>
               <span id="stepperSoftwareRun" class="software-run" hidden>
-                <button id="stepperRunReverse" type="button">Reverse</button>
+                <button id="stepperRunReverse" type="button">Reverse (down)</button>
                 <button id="stepperRunStop" class="stop" type="button">Stop</button>
-                <button id="stepperRunForward" type="button">Forward</button>
+                <button id="stepperRunForward" type="button">Forward (up)</button>
               </span>
               <span class="visually-hidden" id="stepperMessage" role="status" aria-live="polite"></span>
               <span id="stepperCommandFeedback" class="stepper-command-feedback"
@@ -202,10 +202,9 @@
             <dl>
               <div class="interlock-item"><dt title="Local enable input">Enable (D4)</dt><dd id="stepperLocal">--</dd></div>
               <div class="interlock-item"><dt id="stepperD5Label" title="Manual or authorized travel direction">Direction (D5)</dt><dd id="stepperManualDirection">--</dd></div>
-              <div class="interlock-item"><dt title="Driver enable output">Driver (D9)</dt><dd id="stepperDriverOutput">--</dd></div>
-              <div class="interlock-item"><dt title="Positive/bottom travel limit">+ Limit (D6 · bottom)</dt><dd id="stepperPositiveLimit">--</dd></div>
-              <div class="interlock-item"><dt title="Negative/top travel limit">− Limit (D8 · top)</dt><dd id="stepperNegativeLimit">--</dd></div>
-              <div class="interlock-item"><dt title="Final motion authorization decision">Decision</dt><dd id="stepperBlocked">--</dd></div>
+              <div class="interlock-item"><dt id="stepperDriverLabel" title="Driver enable output">Driver (D9)</dt><dd id="stepperDriverOutput">--</dd></div>
+              <div class="interlock-item"><dt id="stepperPositiveLimitLabel" title="Positive travel limit">+ Limit (D6 · bottom)</dt><dd id="stepperPositiveLimit">--</dd></div>
+              <div class="interlock-item"><dt id="stepperNegativeLimitLabel" title="Negative travel limit">− Limit (D8 · top)</dt><dd id="stepperNegativeLimit">--</dd></div>
             </dl>
           </section>
 
@@ -237,31 +236,8 @@
   <details class="source-panel source-drawer experiment-panel">
     <summary class="source-drawer-summary"><span>Experiment spreadsheet</span><span id="experimentStatus" role="status" aria-live="polite">No spreadsheet loaded</span></summary>
     <div class="source-body experiment-body">
-      <p>Device command I/O runs on a worker while telemetry monitoring continues. Acknowledgements are followed by actual-state confirmation. Stop transmission may wait for an in-flight command, and its outcome is shown. Start runs the spreadsheet rows in the operator’s chosen order; initial health-check rows are optional. Health checks wait for their requirements. Requested states are applied and confirmed. Rows fail at their timeout; for moves this deadline ends when fresh telemetry confirms the matching motion started.</p>
-      <label>Spreadsheet exported as CSV<input id="experimentFile" type="file" accept=".csv,text/csv"></label>
-      <label>Spreadsheet contents<textarea id="experimentCsv" rows="3" spellcheck="false" aria-describedby="experimentColumns"></textarea></label>
-      <p id="experimentColumns">Column order: action, source, device, max_age_ms, health, timeout_s, set_point, min_mm, max_mm, min_c, max_c, speed_mm_s, duration_s, direction, pulse_us, rpm. Use device for all targets: readiness targets on telemetry_health rows, the sensor on reading_state rows, and actuator targets on requested_state rows. Separate compatible targets with semicolons.</p>
-      <p>max_age_ms sets the freshness threshold. health=ok requires available transport-error telemetry with no error. Each required device must report ready/capable. Dashboard freshness flags are diagnostic.</p>
-      <p>To start recording, use action=requested_state, source=recording, set_point=on, and an explicit timeout_s. Leave health-check columns blank.</p>
-      <p>Controllino DRO health uses source=controllino and device=dro. Readiness requires capability and the DRO's effective sample age (firmware-reported age plus cached source age) within max_age_ms. For reading_state, use device=dro with inclusive min_mm/max_mm bounds on the raw DRO position (without the dashboard zero offset). Reading rows require timeout_s; max_age_ms and health are optional. A failed reading halts spreadsheet execution; it does not command outputs off. Limit switches belong to the controller safety layer and are not selectable spreadsheet devices.</p>
-      <p>For reading_state, blank max_age_ms omits freshness checks, blank health omits transport-health checks. Device readiness is checked on telemetry_health rows. Each can be selected independently. With both blank, only a finite measured value within the row bounds is required. The comparison uses the latest available value even if old; missing or nonnumeric values still fail. Telemetry acquisition is unchanged. Requested-state and telemetry-health rows retain their existing requirements.</p>
-      <p>Reading rows use set_point=check (or blank) to check once. Use set_point=on on controllino/dro to check position validity/bounds and any selected health requirement on later telemetry events and timer ticks while subsequent rows run. max_age_ms applies only to the initial reading row; it is not retained by the persistent monitor. Disable with action=reading_state, source=controllino, device=dro, set_point=off, timeout_s; leave all threshold, pulse, and motion columns blank. A persistent check must be disabled explicitly before the experiment ends, and is checked before its disable row. Failure halts execution and requests a stop if a spreadsheet move is in progress; other outputs retain their requested states. timeout_s bounds the enable/disable row, not the lifetime of an enabled check.</p>
-      <p>For ED-593 health, use source=ed593 and list channels in device as tc0;tc1;tc2;tc3. Channel readiness means enabled with no reported diagnostic fault. For temperature bounds, use action=reading_state, source=ed593, device=tc0 through tc7, min_c, max_c, and timeout_s. Freshness and transport health are optional via max_age_ms and health=ok. Channel readiness is checked on telemetry_health rows. Use set_point=check (or blank); pulse/motion columns must be blank. A failed temperature check halts spreadsheet execution; each row checks once and does not remain an active monitor.</p>
-      <p>For solenoids, use action=requested_state and set_point=open or closed. The Controllino controls solenoid1 (R3), solenoid2 (R4), and solenoid3 (R5), using source=controllino. Each requires support in the connected firmware. Legacy ESP32 installations use source=esp32 for solenoid1 through solenoid4. Separate compatible targets with semicolons, for example device=solenoid1;solenoid2;solenoid3. The row advances when every requested electrical output is confirmed; this is not valve-position feedback. Installed valves are normally closed: open energizes the output and closed de-energizes it. Individual protocol requests are sequential. Set max_age_ms, health=ok, and timeout_s explicitly; leave motion columns blank. For the brushless motor, use source=controllino and device=brushless_motor: set_point=pulse with pulse_us (1000–2000) configures its ON output; set_point=on or off changes its output state.</p>
-      <p>For the AK80-6, use action=requested_state, source=controllino, device=can_motor, set_point=speed, signed output rpm, and duration_s. Use rpm=0 with blank duration_s to release torque. Set max_age_ms, health=ok, and timeout_s explicitly. The connected firmware sets the allowed speed and duration. The row confirms request acceptance and advances; it does not wait for measured speed or run completion, and never renews the run automatically.</p>
-      <p>To change the controller mode, use action=requested_state, source=controllino, device=stepper, set_point=positional or directional. Set max_age_ms, health=ok, and timeout_s explicitly; leave motion columns blank. The row waits for fresh telemetry reporting the requested mode.</p>
-      <p>To move the stepper, use action=requested_state, source=controllino, device=stepper, set_point=move, speed_mm_s, duration_s, and direction=forward or reverse. Set max_age_ms, health=ok, and timeout_s explicitly. Place a positional mode row before the move. Speed × duration determines relative travel; duration is nominal motion time, excluding driver startup and pulse rounding. For moves, timeout_s covers dispatch and start confirmation. After start, wait for matching firmware pulse completion and stopped motion without a completion deadline; transient source lag/errors do not abort this wait. Explicit reading monitors and reported controller faults still apply.</p>
-      <div class="form-actions">
-        <a href="/api/experiment/example.csv" download="esp32_health.csv">Download ESP32 example</a>
-        <a href="/api/experiment/source-health.csv" download="source_health.csv">Download all-source checks</a>
-        <a href="/api/experiment/start-recording.csv" download="start_recording.csv">Download checks + recording</a>
-        <a href="/api/experiment/dro-monitor.csv" download="dro_monitor.csv">Download persistent DRO example</a>
-        <a href="/api/experiment/motion-readings.csv" download="motion_readings.csv">Download DRO example</a>
-        <a href="/api/experiment/temperatures.csv" download="temperatures.csv">Download thermocouple example</a>
-        <a href="/api/experiment/actuators.csv" download="actuators.csv">Download solenoid + motor example</a>
-        <a href="/api/experiment/cubemars.csv" download="cubemars.csv">Download AK80-6 example</a>
-        <a href="/api/experiment/move-stepper.csv" download="move_stepper.csv">Download checks + recording + move</a>
-        <button id="experimentExample" type="button">Use ESP32 example</button>
+      <div class="experiment-controls">
+        <label>CSV file<input id="experimentFile" type="file" accept=".csv,text/csv"></label>
         <button id="experimentLoad" type="button">Load spreadsheet</button>
         <button id="experimentStart" class="primary" type="button" disabled>Start experiment</button>
       </div>
@@ -270,6 +246,17 @@
       </div>
       <p id="experimentFeedback" role="status" aria-live="polite">Load a spreadsheet to begin.</p>
       <ul id="experimentChecks" aria-label="Current telemetry check results"></ul>
+      <details class="experiment-tools">
+        <summary>Edit CSV</summary>
+        <label>CSV contents<textarea id="experimentCsv" rows="3" spellcheck="false"></textarea></label>
+      </details>
+      <details class="experiment-tools">
+        <summary>Example</summary>
+        <div class="form-actions">
+          <a href="/api/experiment/record-motor-solenoids.csv" download="record_motor_solenoids.csv">Download recording + 250 RPM motor + solenoids + stepper</a>
+          <button id="experimentExample" type="button">Use example</button>
+        </div>
+      </details>
     </div>
   </details>
 

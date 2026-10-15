@@ -19,7 +19,7 @@ export function canMotorStatus(sample = {}) {
     : !fresh ? "Waiting for motor feedback"
     : !field("ready") ? "CAN unavailable"
     : !field("manual_capable") ? "Firmware update required"
-    : field("active") ? "Motor running" : "Motor ready";
+    : field("active") ? (field("target_rpm") === 0 ? "Motor stopping" : "Motor running") : "Motor ready";
   const tone = !connected || sample.stepper_estop_latched || (identified && field("fault"))
     ? "bad" : ready && field("manual_capable") ? "ok" : "warn";
   return {connected, identified, age, fresh, ready, text, tone};
@@ -58,7 +58,7 @@ export function createCanMotorComponent({getLatest, applySample, postJson, creat
   const el = Object.fromEntries([...panel.querySelectorAll("[data-can]")]
     .map(node => [node.dataset.can, node]));
   const value = (number, digits = 1) => Number.isFinite(number) ? number.toFixed(digits) : "—";
-  let intent = 0, owned = 0, acceptedSequence = 0, pending = Promise.resolve();
+  let intent = 0, owned = 0, acceptedSequence = 0, rampStopping = false, pending = Promise.resolve();
   const actions = createActions({refresh: () => render(getLatest()), onError: fail});
 
   // Serialize this page's requests, including a Stop clicked during Start/Apply.
@@ -79,6 +79,7 @@ export function createCanMotorComponent({getLatest, applySample, postJson, creat
 
   function forget() {
     intent = owned = 0;
+    rampStopping = false;
   }
   function fail(error) {
     forget();
@@ -102,24 +103,27 @@ export function createCanMotorComponent({getLatest, applySample, postJson, creat
     if (owned && ((Number(field("command_sequence")) - acceptedSequence) >>> 0) > 0x7fffffff) return;
     const {connected, identified, age, fresh, ready} = canMotorStatus(sample);
     if (owned && (!ready || field("manual_token") !== owned || !field("active"))) {
+      const stopped = rampStopping && !field("active") && field("error") === "operator_stop";
       forget();
       el.feedback.hidden = false;
-      el.feedback.textContent = !ready ? "Control unavailable." : "Control changed.";
+      el.feedback.textContent = stopped ? "Stopped." : !ready ? "Control unavailable." : "Control changed.";
     }
     const runPending = actions.has("run"), releasePending = actions.has("release");
+    const stopping = rampStopping || (field("active") && field("manual_token") && field("target_rpm") === 0);
     const rpm = Number(el.rpm.value), ramp = field("default_ramp_rpm_s"), maxRpm = field("max_rpm");
     el.rpm.min = Number.isFinite(maxRpm) ? -maxRpm : "";
     el.rpm.max = Number.isFinite(maxRpm) ? maxRpm : "";
     el.rampHint.textContent = Number.isFinite(ramp)
-      ? `Fixed acceleration · 0 → ${maxRpm} RPM in ${value(maxRpm / ramp, 1)} s`
+      ? `Fixed acceleration · ${value(ramp, 0)} RPM/s`
       : "Fixed acceleration · Waiting for controller settings";
     const valid = el.rpm.value !== "" && Number.isInteger(rpm) && rpm !== 0
       && Math.abs(rpm) <= maxRpm
       && Number.isInteger(ramp) && ramp >= 1 && ramp <= field("max_ramp_rpm_s");
-    el.run.disabled = runPending || releasePending || !ready || !valid
+    el.run.disabled = stopping || runPending || releasePending || !ready || !valid
       || !field("manual_capable") || (!!field("active") && !owned);
     el.run.textContent = owned ? "Apply speed" : "Start";
-    el.release.disabled = releasePending || !connected || !identified;
+    el.release.disabled = stopping || releasePending || !connected || !identified;
+    el.release.textContent = stopping ? "Stopping…" : "Stop";
     el.rpm.disabled = runPending;
     el.target.textContent = connected && identified ? value(field("target_rpm"), 0) : "—";
     el.measured.textContent = connected && identified && fresh ? value(field("rpm")) : "—";
@@ -136,15 +140,19 @@ export function createCanMotorComponent({getLatest, applySample, postJson, creat
   async function send(release) {
     if ((release ? el.release : el.run).disabled) return;
     const token = owned || ((crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff) || 1);
-    const body = release ? {rpm: 0} : {action: owned ? "update" : "start", token,
+    const rampStop = release && owned && getLatest().stepper_can_motor_ramped_stop_capable === true;
+    const body = rampStop ? {action: "update", token, rpm: 0,
+      ramp_rpm_s: getLatest().stepper_can_motor_default_ramp_rpm_s}
+      : release ? {rpm: 0} : {action: owned ? "update" : "start", token,
       rpm: Number(el.rpm.value), ramp_rpm_s: getLatest().stepper_can_motor_default_ramp_rpm_s};
-    if (release) forget(); else intent = token;
+    if (rampStop) rampStopping = true;
+    if (release && !rampStop) forget(); else intent = token;
     el.feedback.hidden = false;
     el.feedback.textContent = release ? "Stopping…" : "Setting speed…";
     return actions.run(release ? "release" : "run", () => request(body), {
       success: result => {
         if (!release && intent !== token) return; // Stop won the race.
-        if (!release) {
+        if (!release || rampStop) {
           owned = token;
           acceptedSequence = result.stepper?.stepper_can_motor_command_sequence
             ?? result.sample?.stepper_can_motor_command_sequence ?? 0;

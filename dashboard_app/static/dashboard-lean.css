@@ -301,9 +301,13 @@ canvas { display: block; width: 100%; height: 240px; background: var(--chart-bg)
 
 /* SUBPANEL: Interlocks. */
 .stepper-console .stepper-interlocks { padding: 6px; }
-.stepper-console .stepper-interlocks dl { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
-.interlock-item { min-width: 0; display: grid; gap: 1px; }
+.stepper-console .stepper-interlocks dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.interlock-item { min-width: 0; display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.8fr); gap: 8px;
+  align-items: start; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.interlock-item:last-child { border-bottom: 0; }
 .stepper-console .stepper-interlocks dd { text-align: left; white-space: normal; }
+.stepper-console .stepper-interlocks dd[data-blocked="true"] { color: #9f1d27; }
 /* Live, read-only piston position instrument. */
 .piston-visual {
   --piston-position: 50%;
@@ -672,6 +676,11 @@ canvas { display: block; width: 100%; height: 240px; background: var(--chart-bg)
 .experiment-body p { margin: 0; line-height: 1.4; }
 .experiment-body textarea { font-family: ui-monospace, monospace; }
 .experiment-body .form-actions { align-items: center; }
+.experiment-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
+.experiment-controls > label { flex: 1 1 260px; min-width: 0; }
+.experiment-tools > summary { cursor: pointer; }
+.experiment-tools > label, .experiment-tools > .form-actions { margin-top: 8px; }
+#experimentChecks:empty { display: none; }
 .experiment-table-wrap { overflow-x: auto; }
 .experiment-table-wrap table { width: 100%; border-collapse: collapse; text-align: left; }
 .experiment-table-wrap caption { text-align: left; padding-bottom: 6px; font-weight: 700; }
@@ -730,7 +739,6 @@ canvas { display: block; width: 100%; height: 240px; background: var(--chart-bg)
   main { flex: 1; min-height: 0; grid-template-rows: auto auto minmax(160px, 1fr) minmax(min-content, 1.5fr) auto auto; }
   canvas { height: 100%; min-height: 0; }
   .piston-visual { padding: 6px; gap: 6px; }
-  .stepper-console .stepper-interlocks dl { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (prefers-reduced-motion: reduce) { .piston-head, .piston-rod { transition: none; animation: none !important; } }
 @media (max-width: 1120px) { .lower-grid { grid-template-columns: 1fr; } .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } .status-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); } }

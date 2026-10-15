@@ -509,6 +509,53 @@ export function drawAllCharts(history, overrides = {}) {
 // ============================================================================
 // 5. MOTOR CONTROL — DRO/piston (left), stepper and servo controls (right)
 // ============================================================================
+export function stepperLimitBlocks(latest, direction) {
+  if (!["forward", "reverse"].includes(direction)) return false;
+  const wireDirection = direction === "forward" ? 1 : -1;
+  const side = wireDirection > 0 ? "positive" : "negative";
+  return latest?.[`stepper_${side}_limit_active`] === true ||
+    (latest?.stepper_mode !== "controllino" && latest?.[`stepper_${side}_limit_latched`] === true);
+}
+
+export function stepperInterlockPresentation(latest) {
+  const connected = latest?.stepper_connected === true;
+  const controllino = latest?.stepper_mode === "controllino";
+  const directions = Object.fromEntries(["forward", "reverse"].map(direction => {
+    const forward = direction === "forward";
+    const side = forward ? "positive" : "negative";
+    const up = controllino ? forward : !forward;
+    const axis = up ? "up" : "down";
+    const name = `${forward ? "Forward" : "Reverse"}/${axis}`;
+    const input = latest?.[`stepper_${side}_limit_input`] || (forward ? "D6" : "D8");
+    const raw = latest?.[forward ? "stepper_d6_raw" : "stepper_d8_raw"] || "unknown";
+    const active = latest?.[`stepper_${side}_limit_active`];
+    const latched = !controllino && latest?.[`stepper_${side}_limit_latched`] === true;
+    const blocked = stepperLimitBlocks(latest, direction);
+    const available = connected && typeof active === "boolean";
+    const text = !connected ? "Unavailable — controller offline"
+      : !available ? "Unavailable"
+      : active ? `Input ${raw} — ${name} blocked`
+      : latched ? `Input ${raw} — previous trip blocks ${axis}`
+      : raw === "LOW" ? "Input LOW — confirming trip"
+      : `Input ${raw} — clear`;
+    return [direction, {
+      name, blocked, available, text,
+      label: `${up ? "Top" : "Bottom"} limit · ${input.split(" / ")[0]}`,
+      detail: `${input}; input ${raw}; qualified trip ${active ?? "unavailable"}${controllino ? "" : `; remembered trip ${latched}`}`,
+    }];
+  }));
+  const {forward, reverse} = directions;
+  const summary = !connected ? "Controller offline"
+    : latest?.stepper_transport_error ? "Controller communication error"
+    : latest?.stepper_estop_latched ? "Both directions blocked — E-stop"
+    : !forward.available || !reverse.available ? "Limit inputs unavailable"
+    : forward.blocked && reverse.blocked ? "Up and down blocked"
+    : forward.blocked ? `${forward.name} blocked; ${reverse.name} clear`
+    : reverse.blocked ? `${reverse.name} blocked; ${forward.name} clear`
+    : "Limits clear in both directions";
+  return {forward, reverse, summary};
+}
+
 export function createStepperComponent({getLatest, applySample, limits}) {
   const els = elements([
     "emergencyStop", "emergencyReset", "emergencyState", "stepperForm",
@@ -530,7 +577,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     "stepperDroRawPosition", "stepperDroZeroDiagnostic", "stepperDroFrames",
     "stepperD5Label", "stepperManualDirection", "stepperDirectionStatus",
     "stepperDriverOutput", "stepperPositiveLimit", "stepperNegativeLimit",
-    "stepperLimitFilter", "stepperBlocked", "stepperInterlocks", "stepperSequence", "stepperTransport",
+    "stepperLimitFilter", "stepperInterlocks", "stepperSequence", "stepperTransport",
     "brushlessMotorState", "brushlessMotorDetail", "brushlessMotorToggle",
     "brushlessMotorAction", "brushlessPulseWidth", "brushlessApplyPulse"
   ]);
@@ -553,7 +600,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     els.stepperCommandFeedback.hidden = message === "";
   }
 
-  // The saved display zero is the physical D8/negative limit at the top.
+  // The saved display zero is the physical top limit.
   // Preserve raw-minus-zero sign: positions below that top zero are negative.
   const droVisualMinMm = -(limits.max_travel_mm ?? limits.max_distance_mm);
   const droVisualMaxMm = 0;
@@ -612,14 +659,8 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     const selectedDirection = controllino
       ? (els.stepperDirectionReverse.checked ? "reverse" : "forward")
       : authorizedDirection === "both" ? "forward" : authorizedDirection;
-    const signedDistance = selectedDirection === "reverse"
-      ? -distance
-      : selectedDirection === "forward" ? distance : Number.NaN;
     const moving = latest && latest.stepper_moving === true;
-    const positiveBlocked = latest && signedDistance > 0 &&
-      (latest.stepper_positive_limit_active || latest.stepper_positive_limit_latched);
-    const negativeBlocked = latest && signedDistance < 0 &&
-      (latest.stepper_negative_limit_active || latest.stepper_negative_limit_latched);
+    const limitBlocked = stepperLimitBlocks(latest, selectedDirection);
     const directionSelected = selectedDirection === "forward" || selectedDirection === "reverse";
     const valid = Number.isFinite(distance) &&
       distance >= limits.min_distance_mm && distance <= limits.max_distance_mm &&
@@ -700,12 +741,15 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     els.stepperHome.hidden = !webPositionMode;
     els.stepperStop.hidden = !webPositionMode;
     els.stepperApplySpeed.hidden = webPositionMode;
-    // D4/D5/D6/D8 do not exist on this Controllino installation; keeping an
-    // empty interlock block visible only wastes the height needed by controls.
-    els.stepperInterlocks.hidden = controllino;
+    const hasLimits = latest && (typeof latest.stepper_positive_limit_active === "boolean"
+      || typeof latest.stepper_negative_limit_active === "boolean");
+    els.stepperInterlocks.hidden = controllino && !hasLimits;
+    els.stepperLocal.closest(".interlock-item").hidden = controllino;
+    els.stepperManualDirection.closest(".interlock-item").hidden = controllino;
     els.stepperSoftwareRun.hidden = webPositionMode || !controllino;
-    els.stepperRunReverse.disabled = !connected || estopLatched || moving || actions.has("local-run");
-    els.stepperRunForward.disabled = els.stepperRunReverse.disabled;
+    const runDisabled = !connected || estopLatched || moving || actions.has("local-run");
+    els.stepperRunReverse.disabled = runDisabled || stepperLimitBlocks(latest, "reverse");
+    els.stepperRunForward.disabled = runDisabled || stepperLimitBlocks(latest, "forward");
     els.stepperRunStop.disabled = !connected || (!moving && !actions.has("local-run"));
     els.stepperDistance.disabled = !webPositionMode;
     els.stepperDistance.title = webPositionMode
@@ -720,13 +764,13 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     setText(els.stepperSpeedLabel, "Speed (mm/s)");
     els.stepperMove.disabled = (actions.has("move") || actions.has("stop")) || !commandCapable ||
       !directionCalibrationSafe || !connected || !webPositionMode || estopLatched ||
-      !enabled || moving || !valid || !directionSelected || positiveBlocked || negativeBlocked;
+      (!controllino && !enabled) || moving || !valid || !directionSelected || limitBlocked;
     // A confirmed moving state exposes Stop even if Move has not returned yet.
     els.stepperStop.disabled = actions.has("stop") || estopLatched ||
       !commandCapable || !webPositionMode || !moving;
     els.stepperHome.disabled = (actions.has("move") || actions.has("stop") || actions.has("home")) || !homeCapable ||
       !directionCalibrationSafe || !connected || !webPositionMode || estopLatched ||
-      !enabled || moving || (authorizedDirection !== "reverse" && authorizedDirection !== "both");
+      (!controllino && !enabled) || moving || (controllino && (!Number.isFinite(speed) || speed < limits.min_speed_mm_s || speed > limits.max_speed_mm_s)) || (authorizedDirection !== "reverse" && authorizedDirection !== "both");
     const modeDisabled = (actions.has("move") || actions.has("stop")) ||
       actions.has("mode") || !directionCalibrationSafe || !modeCommandCapable ||
       estopLatched || !connected || !d4Off || moving;
@@ -835,6 +879,13 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     const localEnabled = latest.stepper_local_enabled === true;
     const commandCapable = latest.stepper_command_capable === true;
     const connected = latest.stepper_connected === true;
+    const controllino = latest.stepper_mode === "controllino";
+    const positiveInput = latest.stepper_positive_limit_input || "D6";
+    const negativeInput = latest.stepper_negative_limit_input || "D8";
+    const forwardInput = positiveInput;
+    const reverseInput = negativeInput;
+    const forwardEnd = controllino ? "top" : "bottom";
+    const reverseEnd = controllino ? "bottom" : "top";
     const directionCalibrationSafe =
       latest.stepper_direction_calibration_safe === true;
     const controlMode = latest.stepper_control_mode || "unknown";
@@ -959,7 +1010,9 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     setText(els.stepperDroZeroDiagnostic, zeroText);
     renderPiston(latest, droCapable, droHasSample);
     setText(els.stepperDroFrames, droCapable
-      ? `valid=${latest.stepper_dro_valid_frame_count ?? "--"}, rejected=${latest.stepper_dro_rejected_frame_count ?? "--"}, dropped=${latest.stepper_dro_dropped_frame_count ?? "--"}`
+      ? `valid=${latest.stepper_dro_valid_frame_count ?? "--"}, rejected=${latest.stepper_dro_rejected_frame_count ?? "--"}, dropped=${latest.stepper_dro_dropped_frame_count ?? "--"}` +
+        (latest.stepper_dro_edge_count == null ? "" :
+          `; PWM ${latest.stepper_dro_pwm_raw}, Status ${latest.stepper_dro_status_raw}, edges=${latest.stepper_dro_edge_count}`)
       : "--");
     const localState = localEnabled
       ? (webPositionMode ? "Armed" : "Running")
@@ -969,8 +1022,9 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     els.stepperLocal.title = `${localState} / ${d4Raw}`;
     setText(els.stepperD5Label, "Direction (D5)");
     const rawDirection = latest.stepper_manual_direction || "--";
-    const manualDirection = latest.stepper_mode === "controllino"
-      ? ({forward: "reverse", reverse: "forward"}[rawDirection] || rawDirection)
+    const manualDirection = controllino
+      ? ({positive: "forward", negative: "reverse"}[latest.stepper_direction] ||
+          (webPositionMode ? els.stepperDirectionReverse.checked ? "reverse" : "forward" : "not_applicable"))
       : rawDirection;
     const compactDirection = {
       forward: "FWD",
@@ -983,18 +1037,16 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     els.stepperManualDirection.title =
       `${manualDirection} / raw ${d5Raw} / qualified ${d5Qualified}`;
     const hasD5Direction = connected &&
-      ["HIGH", "LOW"].includes(d5Raw) &&
+      (controllino || ["HIGH", "LOW"].includes(d5Raw)) &&
       ["forward", "reverse"].includes(manualDirection);
-    const arrowDirection = hasD5Direction && manualDirection === "forward"
-      ? "down"
-      : hasD5Direction && manualDirection === "reverse" ? "up" : "unavailable";
-    const blockedLimit = arrowDirection === "down" &&
-      latest.stepper_positive_limit_active === true
-      ? "D6 BOTTOM LIMIT"
-      : arrowDirection === "up" &&
-          latest.stepper_negative_limit_active === true
-        ? "D8 TOP LIMIT"
-        : null;
+    const arrowDirection = !hasD5Direction ? "unavailable"
+      : manualDirection === "forward" ? controllino ? "up" : "down"
+      : controllino ? "down" : "up";
+    const blockedLimit = hasD5Direction && stepperLimitBlocks(latest, manualDirection)
+      ? manualDirection === "forward"
+        ? `${forwardInput} ${forwardEnd.toUpperCase()} LIMIT`
+        : `${reverseInput} ${reverseEnd.toUpperCase()} LIMIT`
+      : null;
     els.stepperDirectionIndicator.classList.toggle(
       "is-down",
       arrowDirection === "down",
@@ -1017,11 +1069,11 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     );
     setText(
       els.stepperDirectionLabel,
-      arrowDirection === "down"
-        ? "D5 FWD · D6 BOTTOM"
-        : arrowDirection === "up"
-          ? "D5 REV · D8 TOP"
-          : connected ? "D5 DIRECTION UNAVAILABLE" : "YÚN DISCONNECTED",
+      hasD5Direction && manualDirection === "forward"
+        ? `${arrowDirection.toUpperCase()} · FORWARD`
+        : hasD5Direction && manualDirection === "reverse"
+          ? `${arrowDirection.toUpperCase()} · REVERSE`
+          : connected ? "DIRECTION UNAVAILABLE" : "CONTROLLER DISCONNECTED",
     );
     setText(
       els.stepperDirectionBlockLabel,
@@ -1038,63 +1090,42 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       }
     }
     setText(els.stepperDirectionStatus, directionCalibrationSafe
-      ? "Normal (Forward → D6 bottom; Reverse → D8 top)"
+      ? `Normal (Forward → ${forwardInput} ${forwardEnd}; Reverse → ${reverseInput} ${reverseEnd})`
       : latest.stepper_direction_mapping === "inverted"
         ? "UNSAFE LEGACY INVERSION — upload required"
         : "Unavailable — firmware update required");
+    const driverPin = controllino ? "D7" : "D9";
+    const driverLabel = document.getElementById("stepperDriverLabel");
+    if (driverLabel) setText(driverLabel, `Driver (${driverPin})`);
     const driverDetail = latest.stepper_driver_enable_capable === true
-      ? latest.stepper_driver_enabled ? "ENERGIZED / D9 HIGH" : "DISABLED / D9 LOW"
+      ? latest.stepper_driver_enabled ? `ENERGIZED / ${driverPin} HIGH` : `DISABLED / ${driverPin} LOW`
       : "Unavailable — firmware update required";
     setText(els.stepperDriverOutput, latest.stepper_driver_enable_capable === true
-      ? latest.stepper_driver_enabled ? "Energized · HIGH" : "Disabled · LOW"
+      ? latest.stepper_driver_enabled ? "Enabled" : "Disabled"
       : "Unavailable");
     els.stepperDriverOutput.title = driverDetail;
-    const positiveLatch = latest.stepper_positive_limit_latched ? " / LATCHED" : "";
-    const negativeLatch = latest.stepper_negative_limit_latched ? " / LATCHED" : "";
-    const positiveState = latest.stepper_positive_limit_active ? "ACTIVE" : "Clear";
-    const negativeState = latest.stepper_negative_limit_active ? "ACTIVE" : "Clear";
-    const d6Raw = latest.stepper_d6_raw || "--";
-    const d8Raw = latest.stepper_d8_raw || "--";
-    setText(els.stepperPositiveLimit, `${positiveState} · ${d6Raw}${positiveLatch ? " · LATCHED" : ""}`);
-    setText(els.stepperNegativeLimit, `${negativeState} · ${d8Raw}${negativeLatch ? " · LATCHED" : ""}`);
-    els.stepperPositiveLimit.title = `${positiveState} / raw ${latest.stepper_d6_raw || "--"}${positiveLatch}`;
-    els.stepperNegativeLimit.title = `${negativeState} / raw ${latest.stepper_d8_raw || "--"}${negativeLatch}`;
+    const interlocks = stepperInterlockPresentation(latest);
+    const positiveLabel = document.getElementById("stepperPositiveLimitLabel");
+    const negativeLabel = document.getElementById("stepperNegativeLimitLabel");
+    if (positiveLabel) setText(positiveLabel, interlocks.forward.label);
+    if (negativeLabel) setText(negativeLabel, interlocks.reverse.label);
+    for (const [element, limit] of [[els.stepperPositiveLimit, interlocks.forward],
+                                  [els.stepperNegativeLimit, interlocks.reverse]]) {
+      setText(element, limit.text);
+      element.title = limit.detail;
+      element.dataset.blocked = String(limit.blocked);
+    }
     const directionFilterDetail =
-      latest.stepper_direction_filter_capable === true
+      controllino ? "Software direction" : latest.stepper_direction_filter_capable === true
         ? `D5 ${numberValue(latest, "stepper_direction_qualification_ms", 0)} ms, rejected=${latest.stepper_direction_glitch_count ?? "--"}`
         : "D5 unqualified";
     const limitFilterDetail = latest.stepper_limit_filter_capable === true
-      ? `D6/D8 ${numberValue(latest, "stepper_limit_qualification_ms", 0)} ms, rejected=${latest.stepper_positive_limit_glitch_count ?? "--"}/${latest.stepper_negative_limit_glitch_count ?? "--"}`
-      : "D6/D8 unqualified";
+      ? `${positiveInput}; ${negativeInput}: ${numberValue(latest, "stepper_limit_qualification_ms", 0)} ms, rejected=${latest.stepper_positive_limit_glitch_count ?? "--"}/${latest.stepper_negative_limit_glitch_count ?? "--"}`
+      : "Limits unqualified";
     setText(
       els.stepperLimitFilter,
       `${directionFilterDetail}; ${limitFilterDetail}`,
     );
-    const decisionReason = latest.stepper_blocked_reason || "none";
-    const decisionText = estopLatched
-      ? "E-STOP LATCHED: motion inhibited"
-      : latest.stepper_blocked
-        ? `BLOCKED: ${decisionReason}`
-        : decisionReason === "run_off"
-          ? "Stopped: run_off"
-          : decisionReason === "boot_disarmed"
-            ? "Stopped: cycle D4 OFF after reset"
-            : decisionReason === "driver_wakeup"
-              ? "Waiting: 200 ms driver wake-up"
-              : ["d4_abort", "direction_auth", "operator_stop"].includes(decisionReason)
-                ? `ABORTED: ${decisionReason}`
-                : `Allowed: ${decisionReason}`;
-    const compactDecision = estopLatched
-      ? "E-STOP LATCHED"
-      : latest.stepper_blocked
-        ? `BLOCKED · ${decisionReason.replaceAll("_", " ")}`
-        : decisionReason === "none"
-          ? "Allowed"
-          : decisionReason === "driver_wakeup"
-            ? "Waiting · wake-up"
-            : `${decisionText.split(":")[0]} · ${decisionReason.replaceAll("_", " ")}`;
-    setText(els.stepperBlocked, compactDecision);
-    els.stepperBlocked.title = decisionText;
     setText(els.stepperSequence, latest.stepper_status_sequence ?? "--");
     setText(els.stepperTransport, latest.stepper_transport_error ||
       (connected ? "Connected" : "Waiting for status"));
@@ -1108,7 +1139,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
           : commandCapable
             ? webPositionMode
               ? controllino
-                ? "Positional ready; signed commands select direction (no limit switches connected)"
+                ? "Positional ready; signed commands select direction; controller enforces reported travel limits"
                 : "Positional ready; D4 arms, D5 selects direction, and D6/D8 stop travel"
               : controllino
                 ? "Directional uses software run/direction commands"
@@ -1265,11 +1296,14 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   }
 
   els.stepperHome.addEventListener("click", () => {
-    if (els.stepperHome.disabled ||
-        !window.confirm(`Move upward toward D8 until its top limit switch activates? Speed is fixed at ${limits.home_speed_mm_s} mm/s; D4 must be armed and D5 set to Reverse.`)) return;
-    void command("home", API.stepperHome, {}, {
-      success: p => setText(els.stepperMessage, p.stepper?.stepper_negative_limit_active
-        ? "D8 top limit reached" : `D8 top-limit move accepted at ${limits.home_speed_mm_s} mm/s`)
+    if (els.stepperHome.disabled) return;
+    const controllino = getLatest()?.stepper_mode === "controllino";
+    const speed = Number(els.stepperSpeed.value);
+    if (!controllino && !window.confirm(`Move toward D8 at ${limits.home_speed_mm_s} mm/s?`)) return;
+    void command("home", API.stepperHome, controllino ? {speed_mm_s: speed} : {}, {
+      success: p => setText(els.stepperMessage, controllino
+        ? (p.stepper?.stepper_state === "ready" ? "Bottom limit reached" : `Homing down at ${speed} mm/s`)
+        : "Home accepted")
     });
   });
   els.stepperApplySpeed.addEventListener("click", () => {
@@ -1292,6 +1326,16 @@ export function createStepperComponent({getLatest, applySample, limits}) {
         success: () => setText(els.stepperMessage, direction === 0
           ? "Local motion stopped" : `Local ${direction > 0 ? "Forward" : "Reverse"} running`)
       });
+  }
+
+  // Pointer selections leave the page ready for Space start/stop. Keyboard
+  // users retain native control focus, and editable fields keep their guard.
+  for (const input of [...modeInputs, els.stepperDirectionForward,
+                       els.stepperDirectionReverse, els.stepperMove,
+                       els.stepperStop, els.stepperHome]) {
+    input.addEventListener("click", event => {
+      if (event.detail > 0) input.blur();
+    });
   }
 
   // Event bindings and keyboard hooks: no navigation or form POST reloads.
@@ -1725,7 +1769,7 @@ export const API = Object.freeze({
   metadata: "/api/metadata",
   experimentLoad: "/api/experiment/load",
   experimentStart: "/api/experiment/start",
-  experimentExample: "/api/experiment/example.csv",
+  experimentExample: "/api/experiment/record-motor-solenoids.csv",
   solenoidToggle: index => `/api/solenoid/toggle?n=${index}`,
   stepperMove: "/api/stepper/move",
   stepperStop: "/api/stepper/stop",
@@ -1822,8 +1866,10 @@ export function createExperimentComponent() {
             snapshot.columns.map(column => row[column]).join(","))].join("\n") + "\n"
         : "";
     }
+    updateControls();
     const labels = {
-      empty: "No spreadsheet loaded", ready: "Ready", running: `Checking row ${snapshot.current_row}`,
+      empty: "No spreadsheet loaded", ready: "Ready",
+      running: `${snapshot.program[snapshot.current_row - 1]?.action === "wait" ? "Waiting at" : "Checking"} row ${snapshot.current_row}`,
       completed: "Completed", failed: "Failed"
     };
     setText(el.experimentStatus, labels[snapshot.state] || snapshot.state);
@@ -1854,7 +1900,9 @@ export function createExperimentComponent() {
     let message = snapshot.name ? `${snapshot.name}: ${labels[snapshot.state]}.` : "Load a spreadsheet to begin.";
     if (snapshot.state === "running") message += " Waiting for all requirements to pass.";
     if (snapshot.state === "running" && latestResult?.motion_started) message += " Motion started; waiting for firmware pulse completion.";
-    if (snapshot.state === "running" && latestResult?.request_pending) message += " Command response pending; monitoring continues.";
+    if (snapshot.state === "running" && latestResult?.stop_started) message += " Motor ramping to zero.";
+    if (snapshot.state === "running" && latestResult?.request_pending) message += latestResult.command_sent_s == null
+      ? " Preparing or sending command." : " Waiting for controller feedback.";
     if (snapshot.state === "failed") {
       message += ` Row ${latestResult.row}: ${latestResult.reason}.`;
       if (latestResult.monitor_row) message += ` Persistent DRO check from row ${latestResult.monitor_row} failed.`;
@@ -1889,7 +1937,15 @@ export function createExperimentComponent() {
             ? `${check.observed ?? "unknown"} mm (raw DRO position); allowed ${check.min_mm}–${check.max_mm} mm`
           : checkName === "move"
             ? `command ${check.command_id ?? "unknown"}; expected ${check.expected_command_id}; state ${check.state ?? "unknown"}; remaining ${check.remaining_mm ?? "unknown"} mm`
-          : Object.entries(check.observed).map(([field, value]) => `${field}: ${value ?? "unknown"}`).join(", ");
+          : checkName === "command_accepted"
+            ? `firmware command counter ${check.before_sequence ?? "unknown"} → ${check.observed_sequence ?? "unknown"}`
+          : checkName === "manual_state"
+            ? `active ${check.active ?? "unknown"}; run token ${check.observed_token ?? "unknown"}; expected ${check.expected_token}`
+          : checkName === "wait"
+            ? `${check.elapsed_s} s elapsed; requested ${check.duration_s} s`
+          : Object.entries(check.observed && typeof check.observed === "object" ? check.observed : check)
+              .filter(([field]) => field !== "ok")
+              .map(([field, value]) => `${field}: ${value ?? "unknown"}`).join(", ");
       item.textContent = `${displayName}: ${outcome} · ${evidence}`;
       el.experimentChecks.appendChild(item);
     }
@@ -1898,7 +1954,6 @@ export function createExperimentComponent() {
       item.textContent = `${device}: ${request.status === "failed" ? `request failed · ${request.error}` : `requested ${request.set_point}`}`;
       el.experimentChecks.appendChild(item);
     }
-    updateControls();
   }
 
   async function perform(execute) {
@@ -1918,15 +1973,15 @@ export function createExperimentComponent() {
     name = file.name;
     el.experimentCsv.value = await file.text();
     dirty = true;
-    setText(el.experimentFeedback, "Review the CSV, then load the spreadsheet.");
+    setText(el.experimentFeedback, `${name} selected. Load the spreadsheet to preview it.`);
   }));
   el.experimentExample.addEventListener("click", () => void perform(async () => {
     const response = await fetch(API.experimentExample);
-    if (!response.ok) throw new Error("Could not read the ESP32 example");
+    if (!response.ok) throw new Error("Could not read the experiment example");
     el.experimentCsv.value = await response.text();
-    name = "esp32_health.csv";
+    name = "record_motor_solenoids.csv";
     dirty = true;
-    setText(el.experimentFeedback, "Review the example thresholds, then load the spreadsheet.");
+    setText(el.experimentFeedback, "Example selected. Load the spreadsheet to preview it.");
   }));
   el.experimentLoad.addEventListener("click", () => void perform(async () => {
     const payload = await postJson(API.experimentLoad, {csv: el.experimentCsv.value, name});

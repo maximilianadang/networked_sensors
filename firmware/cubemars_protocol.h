@@ -8,22 +8,19 @@
 #ifndef CUBEMARS_NODE_ID
 #define CUBEMARS_NODE_ID 104
 #endif
-#ifndef CUBEMARS_MAX_RPM
-#define CUBEMARS_MAX_RPM 400
-#endif
 
 namespace CubeMars {
 constexpr uint8_t NODE_ID = CUBEMARS_NODE_ID;
 constexpr int32_t ERPM_PER_OUTPUT_RPM = 126;
-constexpr int32_t MAX_RPM = CUBEMARS_MAX_RPM;
+// Manufacturer's velocity command range, not a configurable operating-speed cap.
+constexpr int32_t PROTOCOL_MAX_ERPM = 100000;
+constexpr int32_t MAX_RPM = PROTOCOL_MAX_ERPM / ERPM_PER_OUTPUT_RPM;
 constexpr uint32_t BITRATE = 500000UL;
 constexpr uint32_t MIN_DURATION_MS = 20, MAX_DURATION_MS = 5000;
-constexpr uint32_t FEEDBACK_TIMEOUT_MS = 500, REFRESH_MS = 20;
+constexpr uint32_t FEEDBACK_TIMEOUT_MS = 500, REFRESH_MS = 100;
 constexpr uint32_t MANUAL_LEASE_MS = 1500;
 constexpr int32_t MAX_RAMP_RPM_S = 80, DEFAULT_RAMP_RPM_S = 80;
 static_assert(CUBEMARS_NODE_ID >= 0 && CUBEMARS_NODE_ID <= 255, "Invalid CubeMars node ID");
-static_assert(MAX_RPM > 0 && MAX_RPM <= 100000L / ERPM_PER_OUTPUT_RPM,
-              "CubeMars speed limit exceeds the protocol's ERPM range");
 static_assert(DEFAULT_RAMP_RPM_S > 0 && DEFAULT_RAMP_RPM_S <= MAX_RAMP_RPM_S &&
               MAX_RAMP_RPM_S <= (0xffffffffUL - 999) / (ERPM_PER_OUTPUT_RPM * MANUAL_LEASE_MS),
               "Invalid CubeMars ramp limit or accumulator overflow");
@@ -95,8 +92,8 @@ struct RunState {
     if (feedback.fault) stop("motor_fault");
   }
   void invalidate(const char *why) { seenFeedback = false; stop(why); }
-  const char *checkTarget(int32_t rpm, uint32_t now) const {
-    if (!rpm || rpm < -MAX_RPM || rpm > MAX_RPM) return "can_speed_range";
+  const char *checkTarget(int32_t rpm, uint32_t now, bool allowZero = false) const {
+    if ((!rpm && !allowZero) || rpm < -MAX_RPM || rpm > MAX_RPM) return "can_speed_range";
     if (!fresh(now)) return "can_feedback_stale";
     if (feedback.fault) return "can_motor_fault";
     return nullptr;
@@ -114,10 +111,11 @@ struct RunState {
     active = true; reason = "running";
     return nullptr;
   }
-  const char *checkManual(int32_t rpm, int32_t rate, uint32_t token, uint32_t now) const {
+  const char *checkManual(int32_t rpm, int32_t rate, uint32_t token, uint32_t now,
+                          bool allowZero = false) const {
     if (!token || token > 0x7fffffffUL) return "can_manual_token";
     if (rate < 1 || rate > MAX_RAMP_RPM_S) return "can_ramp_range";
-    return checkTarget(rpm, now);
+    return checkTarget(rpm, now, allowZero);
   }
   const char *startManual(int32_t rpm, int32_t rate, uint32_t token, uint32_t now) {
     if (active) return "can_manual_active";
@@ -141,7 +139,7 @@ struct RunState {
   const char *updateManual(int32_t rpm, int32_t rate, uint32_t token, uint32_t now) {
     const char *error = checkLease(token, now);
     if (error) return error;
-    error = checkManual(rpm, rate, token, now);
+    error = checkManual(rpm, rate, token, now, true);
     if (error) return error;
     // Preserve the applied setpoint; discard a sub-ERPM remainder on reversal.
     const int32_t oldDelta = commandedRpm * ERPM_PER_OUTPUT_RPM - appliedErpm;
@@ -174,6 +172,7 @@ struct RunState {
       if (step >= distance) {
         appliedErpm = commandedRpm * ERPM_PER_OUTPUT_RPM; rampRemainder = 0;
       } else appliedErpm += delta < 0 ? -int32_t(step) : int32_t(step);
+      if (!commandedRpm && !appliedErpm) stop("operator_stop");
     }
   }
 };

@@ -11,7 +11,9 @@
         "unit": "psi",
         "voltage_max": 5,
         "voltage_min": 0
-      }
+      },
+      "label": "Low pressure 1",
+      "volts_per_count": 0.02998046875
     },
     "2": {
       "calibration": {
@@ -21,7 +23,9 @@
         "unit": "psi",
         "voltage_max": 5,
         "voltage_min": 0
-      }
+      },
+      "label": "Low pressure 2",
+      "volts_per_count": 0.02998046875
     },
     "3": {
       "calibration": {
@@ -31,7 +35,9 @@
         "unit": "psi",
         "voltage_max": 5,
         "voltage_min": 0
-      }
+      },
+      "label": "Low pressure 3",
+      "volts_per_count": null
     },
     "4": {
       "calibration": {
@@ -41,7 +47,9 @@
         "unit": "psi",
         "voltage_max": 5,
         "voltage_min": 0
-      }
+      },
+      "label": "Low pressure 4",
+      "volts_per_count": null
     },
     "5": {
       "calibration": {
@@ -51,7 +59,9 @@
         "unit": "psi",
         "voltage_max": 5,
         "voltage_min": 0
-      }
+      },
+      "label": "High pressure 1",
+      "volts_per_count": 0.02998046875
     },
     "6": {
       "calibration": {
@@ -61,7 +71,9 @@
         "unit": "psi",
         "voltage_max": 5,
         "voltage_min": 0
-      }
+      },
+      "label": "High pressure 2",
+      "volts_per_count": 0.02998046875
     },
     "7": {
       "calibration": {
@@ -71,7 +83,9 @@
         "unit": "psi",
         "voltage_max": 5,
         "voltage_min": 0
-      }
+      },
+      "label": "High pressure 3",
+      "volts_per_count": 0.02998046875
     }
   },
   "servo": {
@@ -79,8 +93,9 @@
     "off_pulse_us": 2500
   },
   "stepper": {
-    "dro_home": 135.46,
-    "max_travel_mm": 126.0
+    "dro_home": 289.42,
+    "dro_kind": "linace",
+    "max_travel_mm": 277.0
   },
   "version": 1
 }

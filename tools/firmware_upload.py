@@ -99,7 +99,7 @@ TARGETS: Mapping[str, FirmwareTarget] = {
             "logic-level CS pin 9 wiring and motor ID 104. Uploading resets the "
             "controller. Keep the motor supply off during upload; verify motor-side "
             "communication timeout before any powered run. Stop requests zero "
-            "current (coast), not braking. Limit: 400 output RPM; dashboard ramp: 80 RPM/s with a live control lease. "
+            "current (coast), not braking. Dashboard ramp: 80 RPM/s with a live control lease. "
             "USB telemetry uses 115200 baud; set --stepper-baud 115200 on the host."
         ),
         build_properties=("compiler.cpp.extra_flags=-DCONTROLLINO_AUX_KIND=2",),

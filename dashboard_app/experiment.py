@@ -205,7 +205,7 @@ class RequestedStateAction:
     def evaluate(self, actual_states: Mapping[str, object]) -> dict[str, object]:
         observed = actual_states.get(self.source)
         return {"requested_state": {
-            "ok": observed is True, "requested": self.set_point, "observed": observed,
+            "ok": observed is (self.set_point == "on"), "requested": self.set_point, "observed": observed,
         }}
 
 
@@ -294,7 +294,7 @@ class ActuatorAction:
     timeout_s: float
     pulse_us: int | None = None
     rpm: int | None = None
-    duration_ms: int = 0
+    duration_ms: int | None = 0
 
     @property
     def devices(self) -> tuple[str, ...]:
@@ -312,7 +312,7 @@ class ActuatorAction:
             "health": self.health, "timeout_s": self.timeout_s,
             "pulse_us": self.pulse_us if self.pulse_us is not None else "",
             **dict.fromkeys((*MOVE_COLUMNS, "rpm", *READING_COLUMNS), ""),
-            **({"rpm": self.rpm, "duration_s": self.duration_ms / 1000 if self.rpm else ""}
+            **({"rpm": self.rpm, "duration_s": self.duration_ms / 1000 if self.rpm and self.duration_ms is not None else ""}
                if self.device == "can_motor" else {}),
         }
 
@@ -429,10 +429,19 @@ class DisableDroCheckAction:
                 "set_point": "off", "timeout_s": self.timeout_s}
 
 
-ExperimentAction = TelemetryHealthAction | RequestedStateAction | MoveStepperAction | StepperModeAction | ActuatorAction | TemperatureReadingAction | DroReadingAction | DisableDroCheckAction
+@dataclass(frozen=True)
+class WaitAction:
+    duration_s: float
+    source: str = ""
+
+    def as_dict(self) -> dict[str, object]:
+        return {**dict.fromkeys(CSV_COLUMNS, ""), "action": "wait", "duration_s": self.duration_s}
 
 
-def parse_program(csv_text: object, *, max_travel_mm: float = core.DEFAULT_STEPPER_MAX_DISTANCE_MM) -> tuple[ExperimentAction, ...]:
+ExperimentAction = TelemetryHealthAction | RequestedStateAction | MoveStepperAction | StepperModeAction | ActuatorAction | TemperatureReadingAction | DroReadingAction | DisableDroCheckAction | WaitAction
+
+
+def parse_program(csv_text: object) -> tuple[ExperimentAction, ...]:
     """Reject ambiguous or unsupported worksheets before anything starts."""
     if not isinstance(csv_text, str):
         raise ValueError("csv must be spreadsheet text exported as CSV")
@@ -455,6 +464,11 @@ def parse_program(csv_text: object, *, max_travel_mm: float = core.DEFAULT_STEPP
             if len(cells) != len(header):
                 raise ValueError(f"Row {row}: expected {len(header)} cells")
             values = dict(zip(header, (cell.strip() for cell in cells)))
+            if values["action"] == "wait":
+                if any(values.get(column, "") for column in CSV_COLUMNS if column not in ("action", "duration_s")):
+                    raise ValueError(f"Row {row}: wait uses only action and duration_s")
+                actions.append(WaitAction(_number(values.get("duration_s", ""), "duration_s", row, positive=True)))
+                continue
             timeout_s = _number(values["timeout_s"], "timeout_s", row, positive=True)
             if (values["action"] == "requested_state" and values.get("device") == "can_motor"):
                 if values["source"] != "controllino" or values.get("set_point") != "speed" or values["health"] != "ok":
@@ -468,13 +482,17 @@ def parse_program(csv_text: object, *, max_travel_mm: float = core.DEFAULT_STEPP
                     if rpm_number.copy_abs() > core.CUBEMARS_PROTOCOL_MAX_RPM:
                         raise ValueError(f"rpm must be from {-core.CUBEMARS_PROTOCOL_MAX_RPM} through {core.CUBEMARS_PROTOCOL_MAX_RPM}")
                     rpm = int(rpm_number)
-                    duration = Decimal(values.get("duration_s", "")) if rpm else Decimal(0)
+                    leased = rpm != 0 and not values.get("duration_s", "")
+                    duration = Decimal(values.get("duration_s", "")) if rpm and not leased else Decimal(0)
                     if not duration.is_finite() or not 0 <= duration <= Decimal(core.CUBEMARS_PROTOCOL_MAX_DURATION_MS) / 1000:
                         raise ValueError("duration_s is outside the bounded CAN motor run limits")
                     milliseconds = duration * 1000
                     if not milliseconds.is_finite() or milliseconds != milliseconds.to_integral_value():
                         raise ValueError("duration_s must resolve to a whole number of milliseconds")
-                    rpm, duration_ms = core.validate_cubemars_command(rpm, int(milliseconds))
+                    if leased:
+                        duration_ms = None
+                    else:
+                        rpm, duration_ms = core.validate_cubemars_command(rpm, int(milliseconds))
                 except (ValueError, InvalidOperation) as exc:
                     raise ValueError(f"Row {row}: {exc}") from exc
                 actions.append(ActuatorAction(values["source"], "can_motor", "speed",
@@ -597,21 +615,21 @@ def parse_program(csv_text: object, *, max_travel_mm: float = core.DEFAULT_STEPP
                         raise ValueError(f"Row {row}: speed × duration must give positive finite distance")
                     try:
                         core.validate_stepper_move(move.distance_mm, move.speed_mm_s,
-                                                   max_travel_mm=max_travel_mm)
+                                                   mode="controllino" if move.source == "controllino" else "")
                     except ValueError as exc:
                         raise ValueError(f"Row {row}: {exc}") from exc
                     actions.append(move)
                     continue
-                if values["source"] != "recording" or values.get("set_point") != "on":
-                    raise ValueError(f"Row {row}: requested_state supports recording/on or controllino/move, positional, directional")
+                if values["source"] != "recording" or values.get("set_point") not in ("on", "off"):
+                    raise ValueError(f"Row {row}: requested_state supports recording/on, off or controllino/move, positional, directional")
                 if any(values.get(column, "") for column in ("max_age_ms", "health", "device")):
                     raise ValueError(f"Row {row}: recording requires blank max_age_ms, health, device")
                 if any(values.get(column, "") for column in MOVE_COLUMNS):
                     raise ValueError(f"Row {row}: recording requires blank motion columns")
-                actions.append(RequestedStateAction("recording", "on", timeout_s))
+                actions.append(RequestedStateAction("recording", values["set_point"], timeout_s))
                 continue
             if values["action"] != "telemetry_health":
-                raise ValueError(f"Row {row}: action must be telemetry_health, reading_state, or requested_state; Start is external")
+                raise ValueError(f"Row {row}: action must be telemetry_health, reading_state, requested_state, or wait; Start is external")
             if values.get("set_point", ""):
                 raise ValueError(f"Row {row}: telemetry_health requires a blank set_point")
             if any(values.get(column, "") for column in MOVE_COLUMNS):
@@ -640,7 +658,15 @@ def parse_program(csv_text: object, *, max_travel_mm: float = core.DEFAULT_STEPP
     if not actions:
         raise ValueError("Spreadsheet must contain at least one action row")
     active = False
+    leased_motor = False
     for row, action in enumerate(actions, 1):
+        if isinstance(action, ActuatorAction) and action.device == "can_motor":
+            if action.rpm == 0:
+                leased_motor = False
+            elif action.duration_ms is None:
+                leased_motor = True
+            elif leased_motor:
+                raise ValueError(f"Row {row}: stop the leased CAN motor before a timed run")
         if isinstance(action, DroReadingAction) and action.set_point == "on":
             if active:
                 raise ValueError(f"Row {row}: DRO check already enabled; disable it before replacing it")
@@ -651,6 +677,8 @@ def parse_program(csv_text: object, *, max_travel_mm: float = core.DEFAULT_STEPP
             active = False
     if active:
         raise ValueError("An on DRO check requires an explicit off row before experiment end")
+    if leased_motor:
+        raise ValueError("A CAN motor row with blank duration_s requires an explicit rpm=0 stop row")
     return tuple(actions)
 
 
@@ -683,11 +711,10 @@ class ExperimentRunner:
         self.revision += 1
         self.events.append({"event": event, "elapsed_s": now_s, **details})
 
-    def load(self, csv_text: object, name: str, now_s: float, *,
-             max_travel_mm: float = core.DEFAULT_STEPPER_MAX_DISTANCE_MM) -> None:
+    def load(self, csv_text: object, name: str, now_s: float) -> None:
         if self.state == "running":
             raise RuntimeError("The experiment is running; wait for it to finish before loading")
-        program = parse_program(csv_text, max_travel_mm=max_travel_mm)
+        program = parse_program(csv_text)
         self.program = program
         self.name = name
         self.program_id += 1
@@ -737,6 +764,8 @@ class ExperimentRunner:
 
     def _accept_request(self, action: ExperimentAction, request: object, now_s: float) -> None:
         result = self.results[-1]
+        if isinstance(request, Mapping) and "command_sent_s" in request:
+            self._mark_command_sent(request["command_sent_s"])
         if isinstance(action, MoveStepperAction):
             if not isinstance(request, Mapping) or not isinstance(request.get("command_id"), str):
                 raise RuntimeError("Move dispatch did not supply a command ID")
@@ -748,11 +777,27 @@ class ExperimentRunner:
                         if details.get("status") == "failed"]
             if failures:
                 raise RuntimeError("Actuator dispatch failed: " + "; ".join(failures))
+        if "command_sent_s" not in result:
+            self._mark_command_sent(now_s)
         result.update(requested=True, request_pending=False)
         self._event("command_completed", now_s, row=self.current_index + 1)
 
+    def _mark_command_sent(self, sent_s: float) -> None:
+        result = self.results[-1]
+        if "command_sent_s" not in result:
+            result["command_sent_s"] = sent_s
+            self._event("command_sent", sent_s, row=self.current_index + 1)
+
+    def _consume_send_event(self, future: Future) -> None:
+        state = getattr(future, "dispatch_state", {})
+        sent_s = state.get("sent_s")
+        if sent_s is not None:
+            self._mark_command_sent(sent_s)
+
     def on_io_event(self, now_s: float) -> None:
         """Consume completed I/O without waiting, including stops after failure."""
+        if self.state == "running" and self._pending_request is not None:
+            self._consume_send_event(self._pending_request)
         if self._pending_stop is not None and self._pending_stop.done():
             future, self._pending_stop = self._pending_stop, None
             result = self.results[-1]
@@ -792,6 +837,8 @@ class ExperimentRunner:
             return
         action = self.program[self.current_index]
         result = self.results[-1]
+        if isinstance(action, WaitAction):
+            return  # Timer ticks advance a dwell; telemetry and monitors remain independent.
         if isinstance(action, DisableDroCheckAction):
             self._monitor_action = None
             self.monitors["controllino/dro"].update(active=False, disabled_row=self.current_index + 1,
@@ -828,6 +875,7 @@ class ExperimentRunner:
                     request = self.request_state(action)
                     if isinstance(request, Future):
                         self._pending_request = request
+                        self._consume_send_event(request)
                         result["request_pending"] = True
                         self.revision += 1
                         if not request.done():
@@ -869,7 +917,12 @@ class ExperimentRunner:
                                 command_id=move["expected_command_id"])
                     checks = action.evaluate(sample, move["expected_command_id"], started=True)
             elif isinstance(action, (StepperModeAction, ActuatorAction)):
+                ramped_stop = bool(result.get("request", {}).get("ramped_stop"))
+                stop_started = result.get("stop_started", False)
                 checks = action.evaluate(sample)
+                if stop_started:
+                    checks.pop("freshness", None)
+                    checks.pop("health", None)
                 if isinstance(action, ActuatorAction) and action.device == "can_motor":
                     before = result.get("request", {}).get("before_sequence")
                     sequence = sample.get("stepper_can_motor_command_sequence")
@@ -878,16 +931,35 @@ class ExperimentRunner:
                         "before_sequence": before, "observed_sequence": sequence,
                         "evidence": "firmware_command_counter",
                     }
+                    token = result.get("request", {}).get("token")
+                    if token and action.rpm:
+                        checks["manual_state"] = {
+                            "ok": sample.get("stepper_can_motor_active") is True
+                                  and sample.get("stepper_can_motor_manual_token") == token,
+                            "expected_token": token,
+                            "observed_token": sample.get("stepper_can_motor_manual_token"),
+                            "active": sample.get("stepper_can_motor_active"),
+                        }
                 error = (actual_states or {}).get("stepper_command_error")
-                if error and action.source == "controllino":
+                if error and action.source == "controllino" and not stop_started:
                     result["checks"] = checks
                     result["error"] = str(error)
                     self.fail("actuator_rejected" if isinstance(action, ActuatorAction) else "mode_rejected", now_s)
                     return
-                if not checks["freshness"]["ok"] or not checks["health"]["ok"]:
+                if not stop_started and (not checks["freshness"]["ok"] or not checks["health"]["ok"]):
                     result["checks"] = checks
                     self.fail("actuator_telemetry_unhealthy" if isinstance(action, ActuatorAction) else "mode_telemetry_unhealthy", now_s)
                     return
+                if ramped_stop:
+                    if sample.get("stepper_can_motor_active") is False and sample.get("stepper_can_motor_error") != "operator_stop":
+                        result.update(checks=checks, error=str(sample.get("stepper_can_motor_error")))
+                        self.fail("motor_stop_failed", now_s)
+                        return
+                    if not stop_started and checks["command_accepted"]["ok"] and sample.get("stepper_can_motor_target_rpm") == 0:
+                        result.update(stop_started=True, stop_started_s=now_s)
+                        self._event("stop_started", now_s, row=self.current_index + 1)
+                        checks.pop("freshness", None)
+                        checks.pop("health", None)
             else:
                 checks = action.evaluate(actual_states or {})
         else:
@@ -909,7 +981,12 @@ class ExperimentRunner:
                 "phase": "persistent",
             }
             self._event("monitor_enabled", now_s, row=self.current_index + 1, device="dro")
-        result.update(status="passed", finished_s=now_s)
+        self._pass_row(now_s, checks)
+
+    def _pass_row(self, now_s: float, checks: Mapping[str, object]) -> None:
+        action = self.program[self.current_index]
+        result = self.results[-1]
+        result.update(status="passed", finished_s=now_s, checks=deepcopy(dict(checks)))
         self._event("row_passed", now_s, row=self.current_index + 1,
                     source=action.source, checks=deepcopy(checks))
         self.current_index += 1
@@ -941,9 +1018,21 @@ class ExperimentRunner:
                 return True
         action = self.program[self.current_index]
         assert self.row_started_s is not None
-        if isinstance(action, MoveStepperAction) and self.results[-1].get("motion_started"):
+        if isinstance(action, WaitAction):
+            elapsed = max(0.0, now_s - self.row_started_s)
+            checks = {"wait": {"ok": elapsed >= action.duration_s,
+                               "elapsed_s": elapsed, "duration_s": action.duration_s}}
+            self.results[-1]["checks"] = checks
+            self.revision += 1
+            if elapsed >= action.duration_s:
+                self._pass_row(now_s, checks)
+                return True
             return False
-        if now_s - self.row_started_s < action.timeout_s:
+        if ((isinstance(action, MoveStepperAction) and self.results[-1].get("motion_started"))
+                or self.results[-1].get("stop_started")):
+            return False
+        deadline = self._row_deadline_s()
+        if deadline is None or now_s < deadline:
             return False
         self.fail("timeout", now_s)
         return True
@@ -972,11 +1061,22 @@ class ExperimentRunner:
         self._event("row_failed", now_s, row=self.current_index + 1, reason=reason,
                     checks=deepcopy(self.results[-1]["checks"]))
 
-    def snapshot(self) -> dict[str, object]:
+    def _row_deadline_s(self) -> float | None:
         action = self.program[self.current_index] if self.state == "running" else None
-        started_move = isinstance(action, MoveStepperAction) and self.results[-1].get("motion_started")
-        deadline = (self.row_started_s + action.timeout_s
-                    if action is not None and self.row_started_s is not None and not started_move else None)
+        if action is None or self.row_started_s is None:
+            return None
+        result = self.results[-1]
+        if isinstance(action, WaitAction):
+            return self.row_started_s + action.duration_s
+        if result.get("motion_started") or result.get("stop_started"):
+            return None
+        if isinstance(action, (RequestedStateAction, MoveStepperAction, StepperModeAction, ActuatorAction)):
+            sent_s = result.get("command_sent_s")
+            return sent_s + action.timeout_s if sent_s is not None else None
+        return self.row_started_s + action.timeout_s
+
+    def snapshot(self) -> dict[str, object]:
+        deadline = self._row_deadline_s()
         return deepcopy({
             "state": self.state,
             "revision": self.revision,

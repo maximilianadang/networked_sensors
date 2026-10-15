@@ -267,10 +267,12 @@ static void testManualFaultsAndRollover() {
 }
 
 static void testFullSpeedRampAndReversal() {
-  assert(MAX_RPM == 400 && MAX_RAMP_RPM_S == 80 && DEFAULT_RAMP_RPM_S == 80);
+  assert(MAX_RPM == 100000 / 126 && MAX_RAMP_RPM_S == 80 && DEFAULT_RAMP_RPM_S == 80);
   RunState state; state.receive(Feedback(), 0);
-  assert(strcmp(state.startManual(401, 80, 555, 0), "can_speed_range") == 0);
-  assert(strcmp(state.startManual(-401, 80, 555, 0), "can_speed_range") == 0);
+  assert(state.startManual(500, 80, 556, 0) == nullptr);
+  state.stop("operator_stop");
+  assert(state.startManual(-500, 80, 557, 0) == nullptr);
+  state.stop("operator_stop");
   assert(strcmp(state.startManual(400, 81, 555, 0), "can_ramp_range") == 0);
   assert(state.startManual(400, 80, 555, 0) == nullptr);
   for (uint32_t now = 250; now <= 5000; now += 250) {
@@ -290,7 +292,37 @@ static void testFullSpeedRampAndReversal() {
   assert(state.appliedErpm == -50400 && state.active);
 }
 
+static void testRampedStopBothDirectionsAndWatchdog() {
+  for (int32_t sign : {int32_t(-1), int32_t(1)}) {
+    RunState state;
+    Feedback measured; measured.erpm = sign * 63000;  // 500 output RPM.
+    state.receive(measured, 0);
+    assert(state.startManual(sign * 500, 80, 42, 0) == nullptr);
+    assert(state.updateManual(0, 80, 42, 0) == nullptr);
+    assert(state.active && state.commandedRpm == 0 && state.appliedErpm == sign * 63000);
+    for (uint32_t now = 250; now <= 6250; now += 250) {
+      state.receive(measured, now);
+      if (now < 6250) {
+        assert(state.renewManual(42, now) == nullptr);
+        assert(state.active && state.manualToken == 42);
+        assert(state.appliedErpm == sign * (63000 - int32_t(now) * 10080 / 1000));
+      } else state.service(now);
+    }
+    assertStopped(state, "operator_stop");
+    assert(state.appliedErpm == 0 && state.manualToken == 0);
+    assert(strcmp(state.renewManual(42, 6250), "can_manual_inactive") == 0);
+  }
+  RunState state;
+  Feedback measured; measured.erpm = 63000;
+  state.receive(measured, 0);
+  assert(state.startManual(500, 80, 43, 0) == nullptr);
+  assert(state.updateManual(0, 80, 43, 0) == nullptr);
+  state.service(501);
+  assertStopped(state, "feedback_stale");
+}
+
 int main() {
+  testRampedStopBothDirectionsAndWatchdog();
   testWireFormat();
   testFrameAdmission();
   testRunAdmissionAndDuration();

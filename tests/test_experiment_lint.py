@@ -43,7 +43,7 @@ class CommandLintTests(unittest.TestCase):
     def test_move_limits_and_pulse_resolution(self):
         cases = [(request(speed_mm_s=0.09), 'speed_mm_s'),
                  (request(speed_mm_s=10.01), 'speed_mm_s'),
-                 (request(speed_mm_s=10, duration_s=20), 'max_travel_mm'),
+                 (request(speed_mm_s=10, duration_s=1e20), '32-bit'),
                  (request(duration_s=0.0001), 'one provisional step')]
         for fields, error in cases:
             with self.subTest(fields=fields):
@@ -52,25 +52,22 @@ class CommandLintTests(unittest.TestCase):
         for speed in (0.1, 10):
             parse_program(worksheet(request(speed_mm_s=speed, duration_s=1)))
 
-    def test_configured_travel_limit_does_not_override_controller_limit(self):
-        with self.assertRaisesRegex(ValueError, 'max_travel_mm'):
-            parse_program(worksheet(request()), max_travel_mm=5)
-        with self.assertRaisesRegex(ValueError, 'must not exceed'):
-            parse_program(worksheet(request(speed_mm_s=10, duration_s=20)), max_travel_mm=500)
+    def test_full_travel_moves_are_not_capped_by_old_travel(self):
+        for distance in (200, 277, 500):
+            action, = parse_program(worksheet(request(speed_mm_s=1, duration_s=distance)))
+            self.assertEqual(action.distance_mm, distance)
 
-    def test_runtime_checks_configuration_at_load_and_again_at_start(self):
+    def test_visual_span_does_not_limit_load_start_or_manual_moves(self):
         fixture = backend.BackendTests()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         runtime = fixture.runtime()
         with patch.object(type(runtime.system_config), 'stepper_max_travel_mm',
                           new_callable=PropertyMock, return_value=5):
-            with self.assertRaisesRegex(ValueError, 'Row 1:.*max_travel_mm'):
-                runtime.load_experiment({'csv': worksheet(request())})
-        runtime.load_experiment({'csv': worksheet(request())})
-        with patch.object(type(runtime.system_config), 'stepper_max_travel_mm',
-                          new_callable=PropertyMock, return_value=5):
-            with self.assertRaisesRegex(ValueError, 'Row 1:.*max_travel_mm'):
-                runtime.start_experiment({})
-        self.assertEqual(runtime.experiment_state()['state'], 'ready')
-        self.assertEqual(fixture.stepper.commands, [])
+            runtime.load_experiment({'csv': worksheet(request(duration_s=277))})
+            runtime.start_experiment({})
+            self.assertEqual(runtime.experiment_state()['state'], 'running')
+            self.assertEqual(runtime.dashboard_config()['stepper']['max_travel_mm'], 5)
+            self.assertGreater(runtime.dashboard_config()['stepper']['max_distance_mm'], 277)
+            fixture.stepper.move(277, 1)
+            self.assertTrue(fixture.stepper.commands[-1].startswith(b'V1 G54528,197,'))

@@ -146,7 +146,7 @@ class CubemarsTests(unittest.TestCase):
         old = self.current()
         self.assertIsNone(old['stepper_can_motor_diag_ef'])
         self.assertIsNone(old['stepper_can_motor_diag_sr'])
-        live = {'ef': 11, 'tec': 8, 'rec': 128, 'rxfail': 3, 'rx': 99,
+        live = {'ef': 11, 'tec': 8, 'rec': 128, 'rxfail': 3, 'rx': 99, 'txfail': 3, 'txcode': 2,
                 'reg': '86F00003150B000F08800000000400', 'slow': '86F000031500000F',
                 'id': 0x2968, 'ext': 1, 'rtr': 0, 'dlc': 8, 'data': '0000000000001D00'}
         self.stepper.payload['cdiag'] = live
@@ -174,7 +174,7 @@ class CubemarsTests(unittest.TestCase):
 
     def test_can_diagnostics_validate_present_fields_and_allow_future_evidence(self):
         invalid = [None, [], 'invalid', {'ef': True}, {'tec': -2}, {'rec': 256},
-                   {'rxfail': -1}, {'rx': 0x100000000}, {'reg': '00'}, {'slow': 'G' * 16},
+                   {'rxfail': -1}, {'rx': 0x100000000}, {'txfail': -1}, {'txcode': 256}, {'reg': '00'}, {'slow': 'G' * 16},
                    {'data': '000'}, {'ext': 2}, {'dlc': 256}, {'id': 0x20000000},
                    {'le': -1}, {'ls': 256}, {'lst': 256}, {'ssrec': -1}, {'mg': 1.5},
                    {'let': 0x100000000}, {'sc': True}, {'sr': None}, {'sr': 'x' * 65}]
@@ -229,7 +229,7 @@ class CubemarsTests(unittest.TestCase):
         self.controls.cubemars(self.current(), dict(valid, rpm=-12, ramp_rpm_s=4))
         self.assertEqual(self.stepper.commands, [b'V1 M-12,4,123\n'])
 
-    def test_manual_uses_advertised_400_rpm_limit_and_fixed_80_rpm_s_default(self):
+    def test_legacy_firmware_limits_remain_compatible(self):
         self.stepper.enable_manual()
         self.stepper.payload.update(cmax=400, crmax=80, crdefault=80)
         self.stepper.refresh()
@@ -247,6 +247,59 @@ class CubemarsTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.controls.cubemars(self.current(), dict(
                     {'action': 'update', 'token': 123, 'rpm': -400, 'ramp_rpm_s': 80}, **change))
+
+    def test_current_firmware_accepts_500_rpm_using_protocol_range(self):
+        self.stepper.enable_manual()
+        self.stepper.payload.update(cmax=core.CUBEMARS_PROTOCOL_MAX_RPM, crmax=80, crdefault=80)
+        self.stepper.refresh()
+        for action, rpm, command in (("start", 500, b"V1 M500,80,123\n"),
+                                     ("update", -500, b"V1 U-500,80,123\n")):
+            receipt = self.controls.cubemars(self.current(), {
+                'action': action, 'token': 123, 'rpm': rpm, 'ramp_rpm_s': 80})
+            self.assertEqual(self.stepper.commands[-1], command)
+            self.assertTrue(receipt.confirmed(self.current()))
+
+    def test_ramped_stop_confirmation_accepts_active_ramp_and_already_completed_ramp(self):
+        self.stepper.enable_manual()
+        self.stepper.payload['cstop'] = 1
+        self.stepper.refresh()
+        self.controls.cubemars(self.current(), {'action': 'start', 'token': 123, 'rpm': 10, 'ramp_rpm_s': 30})
+        receipt = self.controls.cubemars(self.current(), {'action': 'update', 'token': 123, 'rpm': 0, 'ramp_rpm_s': 30})
+        self.assertEqual(self.stepper.commands[-1], b'V1 U0,30,123\n')
+        self.assertTrue(receipt.confirmed(self.current()))
+        self.assertTrue(self.current()['stepper_can_motor_active'])
+        self.assertEqual(self.current()['stepper_can_motor_manual_token'], 123)
+        self.stepper.payload.update(ce=0, cm=0, cramp=0, cap=0, cd=0, cx='operator_stop')
+        self.stepper.refresh()
+        self.assertTrue(receipt.confirmed(self.current()))
+        self.stepper.payload['cx'] = 'motor_fault'
+        self.stepper.refresh()
+        self.assertFalse(receipt.confirmed(self.current()))
+
+    def test_ramped_stop_preserves_backend_renewals_until_completion(self):
+        self.stepper.enable_manual()
+        self.stepper.payload['cstop'] = 1
+        self.stepper.refresh()
+        runtime = self.runtime()
+        runtime.set_cubemars_motor({'action': 'start', 'token': 123, 'rpm': 10, 'ramp_rpm_s': 30})
+        runtime.set_cubemars_motor({'action': 'update', 'token': 123, 'rpm': 0, 'ramp_rpm_s': 30})
+        self.assertEqual(runtime._cubemars_token, 123)
+        runtime._renew_cubemars_lease()
+        self.assertEqual(self.stepper.commands[-1], b'V1 K123\n')
+        self.stepper.payload.update(ce=0, cm=0, cramp=0, cap=0, cd=0, cx='operator_stop')
+        self.stepper.refresh()
+        before = list(self.stepper.commands)
+        runtime._renew_cubemars_lease()
+        self.assertEqual(runtime._cubemars_token, 0)
+        self.assertEqual(self.stepper.commands, before)
+
+    def test_ramped_stop_is_rejected_by_legacy_firmware_without_dispatch(self):
+        self.stepper.enable_manual()
+        self.controls.cubemars(self.current(), {'action': 'start', 'token': 123, 'rpm': 10, 'ramp_rpm_s': 30})
+        before = list(self.stepper.commands)
+        with self.assertRaisesRegex(RuntimeError, 'does not support ramped stop'):
+            self.controls.cubemars(self.current(), {'action': 'update', 'token': 123, 'rpm': 0, 'ramp_rpm_s': 30})
+        self.assertEqual(self.stepper.commands, before)
 
     def test_manual_guards_legacy_firmware_health_ownership_and_expired_sessions(self):
         start = {'action': 'start', 'token': 123, 'rpm': 10, 'ramp_rpm_s': 3}
@@ -616,6 +669,136 @@ class CubemarsTests(unittest.TestCase):
                 parse_program(self.worksheet(rpm, duration))
         with self.assertRaises(ValueError):
             parse_program(self.worksheet().replace('can_motor', 'brushless_motor'))
+
+    def test_record_motor_solenoids_example_completes_without_dro_in_order(self):
+        self.stepper.enable_manual()
+        self.stepper.payload.update(fw='1.5.3', cmax=core.CUBEMARS_PROTOCOL_MAX_RPM,
+                                    crmax=80, crdefault=80, cstop=1, dc=0, df=0, sol5=0, sol6=0)
+        self.stepper.refresh()
+        runtime = self.runtime()
+        text = (Path(__file__).resolve().parents[1] / 'examples' / 'record_motor_solenoids.csv').read_text()
+        runtime.load_experiment({'csv': text, 'name': 'record_motor_solenoids.csv'})
+        runtime.start_experiment({})
+
+        def run_until_complete(start_elapsed):
+            transitions = []
+            stop_at = None
+            move_at = None
+            for index in range(1, 220):
+                elapsed = start_elapsed + index / 10
+                if self.stepper.payload.get('mv'):
+                    move_at = move_at if move_at is not None else elapsed
+                    if elapsed - move_at >= 5:
+                        self.stepper.payload.update(mv=0, st=6, sps=0, p=self.stepper.payload['g'])
+                        self.stepper.refresh()
+                if self.stepper.payload['ce'] and self.stepper.payload['cr'] == 0:
+                    stop_at = stop_at if stop_at is not None else elapsed
+                    if elapsed - stop_at >= .3:
+                        self.stepper.payload.update(ce=0, cm=0, cap=0, cramp=0, cd=0, cx='operator_stop')
+                        self.stepper.refresh()
+                with runtime._condition:
+                    runtime._poll_locked(elapsed)
+                if self.stepper.commands and runtime.experiment.current_index < 16:
+                    self.assertTrue(runtime.recording)
+                state = tuple(runtime.latest.get(f'solenoid{i}_on') for i in (1, 2, 3))
+                if not transitions or transitions[-1] != state:
+                    transitions.append(state)
+                if runtime.experiment_state()['state'] != 'running':
+                    break
+                if runtime._cubemars_token:
+                    runtime._renew_cubemars_lease()
+            return elapsed, transitions
+
+        elapsed, transitions = run_until_complete(0)
+        snapshot = runtime.experiment_state()
+        self.assertEqual(snapshot['state'], 'completed', snapshot['results'])
+        self.assertEqual(len(snapshot['results']), 17)
+        self.assertTrue(all(row['status'] == 'passed' for row in snapshot['results']))
+        self.assertFalse(runtime.recording)
+        self.assertEqual(snapshot['monitors'], {})
+        self.assertFalse(runtime.latest['stepper_dro_capable'])
+        self.assertFalse(runtime.latest['stepper_can_motor_active'])
+        self.assertEqual(transitions, [(False, False, False), (True, False, False),
+                                       (True, True, False), (True, True, True),
+                                       (True, True, False), (True, False, False), (False, False, False)])
+        commands = [c for c in self.stepper.commands if not c.startswith(b'V1 K')]
+        self.assertTrue(commands[0].startswith(b'V1 M250,80,'))
+        self.assertEqual(commands[1:5], [b'V1 L5,1\n', b'V1 L6,1\n', b'V1 L4,1\n', b'V1 M1\n'])
+        self.assertTrue(commands[5].startswith(b'V1 G1969,394,'))
+        self.assertEqual(commands[6:9], [b'V1 L4,0\n', b'V1 L6,0\n', b'V1 L5,0\n'])
+        self.assertTrue(commands[9].startswith(b'V1 U0,80,'))
+        self.assertEqual(len(commands), 10)
+        self.assertTrue(any(c.startswith(b'V1 K') for c in self.stepper.commands))
+        move = snapshot['results'][10]
+        self.assertTrue(move['motion_started'])
+        wait = snapshot['results'][11]
+        self.assertGreaterEqual(wait['checks']['wait']['elapsed_s'], 5)
+        self.assertGreaterEqual(snapshot['results'][12]['finished_s'], wait['finished_s'])
+        self.assertTrue(snapshot['results'][-2]['stop_started'])
+
+        # Repeat the same loaded program, with no reload or runtime reset.
+        with patch.object(time, 'monotonic', return_value=runtime.monotonic0 + elapsed):
+            restarted = runtime.start_experiment({'program_id': snapshot['program_id']})
+        self.assertEqual(restarted['current_row'], 1)
+        self.assertEqual(restarted['results'][0]['status'], 'waiting')
+        _, second_transitions = run_until_complete(elapsed)
+        second = runtime.experiment_state()
+        self.assertEqual(second['state'], 'completed', second['results'])
+        self.assertEqual(second['program_id'], snapshot['program_id'])
+        self.assertEqual(len(second['results']), 17)
+        self.assertTrue(all(row['status'] == 'passed' for row in second['results']))
+        self.assertEqual(second_transitions, transitions)
+        self.assertFalse(runtime.latest['stepper_can_motor_active'])
+        self.assertFalse(runtime.recording)
+        commands = [c for c in self.stepper.commands if not c.startswith(b'V1 K')]
+        self.assertEqual(len(commands), 20)
+        self.assertTrue(commands[10].startswith(b'V1 M250,80,'))
+        self.assertEqual(commands[11:15], commands[1:5])
+        self.assertTrue(commands[15].startswith(b'V1 G1969,394,'))
+        self.assertEqual(commands[16:19], commands[6:9])
+        self.assertTrue(commands[19].startswith(b'V1 U0,80,'))
+
+    def test_spreadsheet_motor_feedback_does_not_use_manual_api_confirmation_timeout(self):
+        self.stepper.enable_manual()
+        self.stepper.payload['cstop'] = 1
+        self.stepper.refresh()
+        self.stepper.apply = False
+        runtime = self.runtime()
+        program = self.worksheet(duration='') + 'requested_state,controllino,can_motor,500,ok,2,speed,0,\n'
+        runtime.load_experiment({'csv': program})
+        runtime.start_experiment({})
+        with runtime._condition:
+            runtime._poll_locked(.1)
+            runtime._poll_locked(1.8)
+        self.assertEqual(runtime.experiment_state()['state'], 'running')
+        self.assertAlmostEqual(runtime.experiment_state()['deadline_s'], 2.1)
+        before = list(self.stepper.commands)
+        runtime._renew_cubemars_lease()
+        self.assertEqual(self.stepper.commands, before)  # Wait for acceptance before renewing.
+        token = runtime._experiment_can_token
+        self.stepper.payload.update(ce=1, cm=token, cr=10, cramp=30, cd=1500, cq=1)
+        self.stepper.refresh()
+        with runtime._condition:
+            runtime._poll_locked(1.9)
+        self.assertEqual(runtime.experiment_state()['results'][0]['status'], 'passed')
+
+    def test_failed_leased_experiment_retires_renewal_without_restarting_motor(self):
+        self.stepper.enable_manual()
+        runtime = self.runtime()
+        program = self.worksheet(duration='') + 'requested_state,controllino,can_motor,500,ok,2,speed,0,\n'
+        runtime.load_experiment({'csv': program})
+        runtime.start_experiment({})
+        with runtime._condition:
+            runtime._poll_locked(.1)
+        self.assertNotEqual(runtime._experiment_can_token, 0)
+        runtime.experiment.fail('test_failure', .2)
+        with self.assertRaisesRegex(RuntimeError, 'lease is being retired'):
+            runtime.load_experiment({'csv': program})
+        before = list(self.stepper.commands)
+        runtime._renew_cubemars_lease()
+        self.assertEqual(runtime._cubemars_token, 0)
+        self.assertEqual(runtime._experiment_can_token, 0)
+        self.assertEqual(self.stepper.commands, before)
 
     def test_csv_sends_once_and_uses_command_counter_not_speed_attainment(self):
         runtime = self.runtime()

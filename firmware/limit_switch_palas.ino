@@ -13,6 +13,7 @@
 #include <util/atomic.h>
 #include "wiring_yun.h"
 #include "absolute_dro_protocol.h"
+#include "qualified_limit.h"
 
 // Timer1 is the sole STEP-edge owner in every motion mode.
 
@@ -160,14 +161,7 @@ const int NEG_LIMIT_ACTIVE_LEVEL = LOW;
 // immediate; the persistent directional latch still prevents renewed travel
 // into a confirmed endpoint until motion away from that endpoint is selected.
 // No delay() is used, so D4, D5, E-STOP, transport, and STEP service continue.
-const unsigned long LIMIT_ASSERT_QUALIFY_US = 5000UL;
-
-struct QualifiedLimitInput {
-  bool qualifiedActive;
-  bool assertionPending;
-  unsigned long assertionStartedUs;
-  byte rejectedGlitches;
-};
+const unsigned long LIMIT_ASSERT_QUALIFY_US = QualifiedLimitInput::QUALIFY_US;
 
 QualifiedLimitInput positiveLimitInput = {false, false, 0UL, 0};
 QualifiedLimitInput negativeLimitInput = {false, false, 0UL, 0};
@@ -694,49 +688,18 @@ void initializeQualifiedLimit(
     QualifiedLimitInput *input,
     bool rawActive,
     unsigned long nowUs) {
-  input->qualifiedActive = false;
-  input->assertionPending = rawActive;
-  input->assertionStartedUs = nowUs;
-  input->rejectedGlitches = 0;
+  input->initialize(rawActive, nowUs);
 }
 
 bool updateQualifiedLimit(
     QualifiedLimitInput *input,
     bool rawActive,
     unsigned long nowUs) {
-  if (input->qualifiedActive) {
-    // Release immediately so a carriage can retreat from a confirmed end.
-    // The endpoint latch remains set and continues to block travel into it.
-    if (!rawActive) {
-      input->qualifiedActive = false;
-      input->assertionPending = false;
-      statusDirty = true;
-    }
-    return input->qualifiedActive;
-  }
-
-  if (!rawActive) {
-    if (input->assertionPending) {
-      input->assertionPending = false;
-      if (input->rejectedGlitches < 255) ++input->rejectedGlitches;
-      statusDirty = true;
-    }
-    return false;
-  }
-
-  if (!input->assertionPending) {
-    input->assertionPending = true;
-    input->assertionStartedUs = nowUs;
-    return false;
-  }
-
-  // Unsigned subtraction is intentionally wrap-safe across micros() rollover.
-  if (nowUs - input->assertionStartedUs >= LIMIT_ASSERT_QUALIFY_US) {
-    input->qualifiedActive = true;
-    input->assertionPending = false;
-    statusDirty = true;
-  }
-  return input->qualifiedActive;
+  const bool before = input->qualifiedActive;
+  const byte glitches = input->rejectedGlitches;
+  const bool active = input->update(rawActive, nowUs);
+  if (before != active || glitches != input->rejectedGlitches) statusDirty = true;
+  return active;
 }
 
 void initializeQualifiedDirection(

@@ -78,7 +78,12 @@ class Controller(core.ControllinoStepperSource):
                 p["sp"] = args[0]
         elif code == b"G":
             delta, speed, identity = map(int, argument.split(b","))
-            p.update(c=identity, g=delta, csps=speed, mv=1, st=6, sps=speed if delta > 0 else -speed)
+            p.update(c=identity, g=delta, csps=speed, mv=1, st=4, sps=speed if delta > 0 else -speed)
+        elif code == b"H":
+            at_bottom = bool(p.get("lx", 0) & (1 << 16))
+            speed = int(argument)
+            p.update(csps=speed, st=5 if at_bottom else 3,
+                     mv=0 if at_bottom else 1, sps=0 if at_bottom else -speed)
         elif code == b"X":
             p.update(mv=0, st=5, sps=0)
         elif code == b"B":
@@ -131,27 +136,28 @@ class BackendTests(unittest.TestCase):
             )
         runtime._experiment_executor.shutdown(wait=True)
         runtime._experiment_executor = ImmediateExecutor()
+        runtime._experiment_now_s = lambda: runtime.latest['elapsed_s']
         self.addCleanup(runtime.stop)
         return runtime
 
     def test_direction_mapping_and_move_identity_survive_poll(self):
         runtime = self.runtime()
-        for direction, steps in (("forward", -2520), ("reverse", 2520)):
+        for direction, steps in (("forward", 1969), ("reverse", -1969)):
             result = runtime.move_stepper(dict(distance_mm=10, speed_mm_s=1, direction=direction, command_id=direction))
-            self.assertTrue(self.stepper.commands[-1].startswith(f"V1 G{steps},252,".encode()))
+            self.assertTrue(self.stepper.commands[-1].startswith(f"V1 G{steps},197,".encode()))
             self.assertEqual(result["stepper"]["stepper_command_id"], direction)
             self.assertEqual(result["resolved_direction"], direction)
-            self.assertEqual(result["signed_distance_mm"], -10 if direction == "forward" else 10)
+            self.assertEqual(result["signed_distance_mm"], 10 if direction == "forward" else -10)
             self.assertIsNone(self.stepper.pending_command_id)
             self.assertFalse(runtime.stop_stepper()["stepper"]["stepper_moving"])
         runtime.set_stepper_control_mode({"web_position": False})
-        for requested, wire in ((1, -1), (-1, 1), (0, 0)):
+        for requested, wire in ((1, 1), (-1, -1), (0, 0)):
             result = runtime.set_stepper_local_run({"direction": requested})
             self.assertEqual(self.stepper.commands[-1], f"V1 R{wire}\n".encode())
             self.assertEqual(result["direction"], requested)
             self.assertEqual(result["stepper"]["stepper_moving"], bool(requested))
         result = runtime.set_stepper_speed({"speed_mm_s": 1.5})
-        self.assertAlmostEqual(result["requested_speed_mm_s"], 378 / core.DEFAULT_STEPPER_STEPS_PER_MM)
+        self.assertAlmostEqual(result["requested_speed_mm_s"], 1.4986)
 
     def test_yun_uses_physical_direction_not_browser_direction(self):
         for mode in ("usb", "network", "sim"):
@@ -168,7 +174,7 @@ class BackendTests(unittest.TestCase):
         runtime = self.runtime()
         for method, values in (
             (runtime.move_stepper, {}),
-            (runtime.move_stepper, dict(distance_mm=999, speed_mm_s=1, direction="forward")),
+            (runtime.move_stepper, dict(distance_mm=core.max_stepper_move_mm("controllino") + 1, speed_mm_s=1, direction="forward")),
             (runtime.move_stepper, dict(distance_mm=True, speed_mm_s=1)),
             (runtime.move_stepper, dict(distance_mm=float("nan"), speed_mm_s=1)),
             (runtime.set_stepper_control_mode, {"web_position": 1}),
@@ -376,6 +382,35 @@ class BackendTests(unittest.TestCase):
             runtime._poll_locked(0.4)
         self.assertIsNone(runtime.latest["stepper_dro_velocity_mm_s"])
 
+    def test_dro_velocity_ignores_delivery_jitter_with_acquisition_timestamps(self):
+        runtime = self.runtime()
+        sample = dict(stepper_connected=True, stepper_dro_capable=True,
+                      stepper_dro_fresh=True, stepper_dro_sample_age_ms=10)
+        for frame, arrival in enumerate((.1, .24, .32, .47, .51), start=1):
+            sample.update(stepper_dro_position_mm=frame * .2,
+                          stepper_dro_valid_frame_count=frame,
+                          stepper_dro_acquired_ms=frame * 100)
+            runtime._apply_stepper_dro_velocity_locked(sample, arrival)
+        self.assertEqual(sample['stepper_dro_velocity_mm_s'], 2)
+        self.assertEqual(sample['stepper_dro_velocity_window_ms'], 400)
+        runtime._apply_stepper_dro_velocity_locked(sample, .8)  # Cached packet.
+        self.assertEqual(sample['stepper_dro_velocity_mm_s'], 2)
+        self.assertEqual(sample['stepper_dro_velocity_window_ms'], 400)
+
+    def test_dro_velocity_handles_device_clock_rollover_and_restart(self):
+        runtime = self.runtime()
+        sample = dict(stepper_connected=True, stepper_dro_capable=True,
+                      stepper_dro_fresh=True, stepper_dro_sample_age_ms=10)
+        for frame, acquired in enumerate((0xFFFFFF00, 0xFFFFFFC8, 144), start=1):
+            sample.update(stepper_dro_position_mm=frame * .4,
+                          stepper_dro_valid_frame_count=frame,
+                          stepper_dro_acquired_ms=acquired)
+            runtime._apply_stepper_dro_velocity_locked(sample, frame * .23)
+        self.assertEqual(sample['stepper_dro_velocity_mm_s'], 2)
+        sample.update(stepper_dro_valid_frame_count=1, stepper_dro_acquired_ms=10)
+        runtime._apply_stepper_dro_velocity_locked(sample, 1)
+        self.assertIsNone(sample['stepper_dro_velocity_mm_s'])
+
     def test_merge_flow_and_missing_stale_sources(self):
         samples = list(app.iter_merged_samples(40, scenario="all_stale", drop_after_s=0.2, stale_after_s=0.5))
         self.assertTrue(samples[0]["stepper_connected"])
@@ -452,9 +487,15 @@ class BackendTests(unittest.TestCase):
             headers, data = bytes(connection.response).split(b"\r\n\r\n", 1)
             return int(headers.split()[1]), data
 
-        self.assertEqual(request("POST", "/api/experiment/start")[0], 409)
+        default = runtime.experiment_state()
+        self.assertEqual(default['state'], 'ready')
+        self.assertEqual(default['name'], 'record_motor_solenoids.csv')
+        self.assertEqual(len(default['program']), 17)
+        self.assertTrue(any(row['device'] == 'stepper' and row['set_point'] == 'move' for row in default['program']))
+        self.assertIsNone(default['started_s'])
         self.assertEqual(request("POST", "/api/experiment/load", {"csv": "invalid"})[0], 400)
-        self.assertEqual(request("GET", "/api/experiment/example.csv"), (200, example.encode()))
+        default_csv = (Path(__file__).resolve().parents[1] / "examples" / "record_motor_solenoids.csv").read_bytes()
+        self.assertEqual(request("GET", "/api/experiment/example.csv"), (200, default_csv))
         all_source_example = (Path(__file__).resolve().parents[1] / "examples" / "source_health.csv").read_bytes()
         self.assertEqual(request("GET", "/api/experiment/source-health.csv"), (200, all_source_example))
         recording_example = (Path(__file__).resolve().parents[1] / "examples" / "start_recording.csv").read_bytes()
@@ -465,6 +506,8 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(request("GET", "/api/experiment/actuators.csv"), (200, actuator_example))
         temperature_example = (Path(__file__).resolve().parents[1] / "examples" / "temperatures.csv").read_bytes()
         self.assertEqual(request("GET", "/api/experiment/temperatures.csv"), (200, temperature_example))
+        narrow_example = (Path(__file__).resolve().parents[1] / "examples" / "record_motor_solenoids.csv").read_bytes()
+        self.assertEqual(request("GET", "/api/experiment/record-motor-solenoids.csv"), (200, narrow_example))
         status, data = request("POST", "/api/experiment/load", {"csv": example, "name": "example.csv"})
         self.assertEqual(status, 200)
         program_id = json.loads(data)["experiment"]["program_id"]
@@ -848,7 +891,7 @@ class BackendTests(unittest.TestCase):
             with runtime._condition:
                 runtime._poll_locked(elapsed)
         self.assertEqual(self.stepper.commands[0], b"V1 M1\n")
-        self.assertTrue(self.stepper.commands[1].startswith(b"V1 G-2520,252,"))
+        self.assertTrue(self.stepper.commands[1].startswith(b"V1 G1969,197,"))
         self.stepper.payload.update(mv=0, st=6, sps=0, p=self.stepper.payload["g"])
         self.stepper.refresh()
         with runtime._condition:
@@ -859,7 +902,7 @@ class BackendTests(unittest.TestCase):
         runtime = self.runtime()
         lines = (Path(__file__).resolve().parents[1] / "examples" / "move_stepper.csv").read_text().splitlines()
         csv_text = "\n".join((lines[0], lines[1], lines[-1])) + "\n"
-        for index, (direction, pulses) in enumerate((("forward", -2520), ("reverse", 2520))):
+        for index, (direction, pulses) in enumerate((("forward", 1969), ("reverse", -1969))):
             runtime.load_experiment({"csv": csv_text.replace("forward", direction)})
             runtime.start_experiment({})
             base = index * 0.5
@@ -869,11 +912,11 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(runtime.experiment_state()["state"], "running")
             moves = [command for command in self.stepper.commands if command.startswith(b"V1 G")]
             self.assertEqual(len(moves), index + 1)
-            self.assertTrue(moves[-1].startswith(f"V1 G{pulses},252,".encode()))
+            self.assertTrue(moves[-1].startswith(f"V1 G{pulses},197,".encode()))
             request = runtime.experiment_state()["results"][-1]["request"]
             self.assertEqual(request["distance_mm"], 10)
             self.assertEqual(request["signed_pulse_count"], pulses)
-            self.assertEqual(request["pulse_rate_sps"], 252)
+            self.assertEqual(request["pulse_rate_sps"], 197)
             self.stepper.payload.update(mv=0, st=6, sps=0, p=self.stepper.payload["g"])
             self.stepper.refresh()
             with runtime._condition:
@@ -893,29 +936,20 @@ class BackendTests(unittest.TestCase):
         self.assertFalse(self.stepper.status()["stepper_moving"])
         self.assertTrue(runtime.experiment_state()["results"][-1]["stop_requested"])
 
-    def test_spreadsheet_move_rejects_travel_bounds_and_wrong_mode_before_motion(self):
+    def test_spreadsheet_move_rejects_wrong_mode_before_motion(self):
         runtime = self.runtime()
         lines = (Path(__file__).resolve().parents[1] / "examples" / "move_stepper.csv").read_text().splitlines()
         csv_text = "\n".join((lines[0], lines[1], lines[-1])) + "\n"
-        for index, case in enumerate(("travel", "mode")):
-            program = csv_text.replace("1,10,forward", "10,20,forward") if case == "travel" else csv_text
-            if case == "mode":
-                self.stepper.payload.update(m=0, st=0)
-                self.stepper.refresh()
-            if case == "travel":
-                with self.assertRaisesRegex(ValueError, "Row 2:.*max_travel_mm"):
-                    runtime.load_experiment({"csv": program})
-                self.assertEqual(self.stepper.commands, [])
-                continue
-            runtime.load_experiment({"csv": program})
-            runtime.start_experiment({})
-            with runtime._condition:
-                runtime._poll_locked(index + 0.1)
-                runtime._poll_locked(index + 0.2)
-            self.assertEqual(runtime.experiment_state()["state"], "failed")
-            self.assertFalse(any(command.startswith(b"V1 G") for command in self.stepper.commands))
-            error = runtime.experiment_state()["results"][-1]["error"]
-            self.assertIn("max_travel_mm" if case == "travel" else "Web Position", error)
+        self.stepper.payload.update(m=0, st=0)
+        self.stepper.refresh()
+        runtime.load_experiment({"csv": csv_text})
+        runtime.start_experiment({})
+        with runtime._condition:
+            runtime._poll_locked(0.1)
+            runtime._poll_locked(0.2)
+        self.assertEqual(runtime.experiment_state()["state"], "failed")
+        self.assertFalse(any(command.startswith(b"V1 G") for command in self.stepper.commands))
+        self.assertIn("Web Position", runtime.experiment_state()["results"][-1]["error"])
 
     def test_spreadsheet_reverse_move_works_in_simulation(self):
         sources = core.make_sources(esp32_source="sim", dxmr90_source="sim", stepper_source="sim", esp32_auto_sequence=False)

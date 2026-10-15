@@ -98,7 +98,7 @@ async function browserChecks() {
     check(!/Negative RPM reverses|Leaving this tab|losing communication also releases/.test(fieldset.textContent),
       'no persistent instruction paragraph or obsolete focus-stop claim');
     check(!element('ramp') && !/Run duration/.test(fieldset.textContent), 'no extra ramp or duration input');
-    check(/400 RPM in 5\.0 s/.test(element('rampHint').textContent), 'fixed ramp remains available in diagnostics');
+    check(/80 RPM\/s/.test(element('rampHint').textContent), 'fixed ramp remains available in diagnostics');
     check(canMotorStatus(sample).ready === true, 'shared status reports ready telemetry');
     check(auxMotorKind({}) === 'cubemars', 'missing kind defaults to CubeMars');
     apply({stepper_aux_kind: undefined, stepper_connected: false});
@@ -106,6 +106,16 @@ async function browserChecks() {
     apply({stepper_connected: true});
     check(run.disabled && stop.disabled && /identification/.test(canMotorStatus(sample).text),
       'unidentified connected controller remains inert');
+    apply(base);
+
+    apply({stepper_can_motor_max_rpm: 793});
+    element('rpm').value = '500';
+    element('rpm').dispatchEvent(new Event('input'));
+    check(!run.disabled, '500 RPM is accepted without the old operating cap');
+    element('rpm').value = '-500';
+    element('rpm').dispatchEvent(new Event('input'));
+    check(!run.disabled, 'negative 500 RPM is accepted');
+    element('rpm').value = '400';
     apply(base);
 
     await start();
@@ -206,6 +216,22 @@ async function browserChecks() {
       'shared status reflects recovered current health');
     check(/receive buffer overflow/.test(element('diagnostic').textContent), 'historical stop cause stays inside diagnostics');
     check(/Flags 0x40; slow read 0x40/.test(element('diagnostic').textContent), 'detailed flags remain in diagnostics');
+
+    apply({stepper_can_motor_ramped_stop_capable: true});
+    await start();
+    const decelIndex = requests.length;
+    stop.click();
+    await waitFor(() => requests.length > decelIndex && element('feedback').textContent === 'Stop accepted.',
+      'ramped Stop accepted');
+    check(requests[decelIndex].action === 'update' && requests[decelIndex].rpm === 0,
+      'Stop updates the active target to zero rather than releasing torque immediately');
+    check(owned() && sample.stepper_can_motor_active && run.disabled && stop.disabled,
+      'deceleration retains ownership and disables Start/Apply until completion');
+    check(canMotorStatus(sample).text === 'Motor stopping', 'deceleration has an actual-state label');
+    apply({stepper_can_motor_active: false, stepper_can_motor_manual_token: 0,
+      stepper_can_motor_error: 'operator_stop', stepper_can_motor_applied_rpm: 0});
+    check(!owned() && !run.disabled && element('feedback').textContent === 'Stopped.',
+      'completed ramp returns to Start without restarting');
 
     const main = document.querySelector('main');
     for (const width of [456, 296]) {

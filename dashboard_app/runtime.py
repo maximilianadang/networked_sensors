@@ -30,6 +30,8 @@ from .system_config import SystemConfig
 from .experiment import ActuatorAction, ExperimentRunner, MoveStepperAction, RequestedStateAction, StepperModeAction, source_adapter_name
 
 
+DEFAULT_EXPERIMENT_PATH = Path(__file__).resolve().parents[1] / "examples" / "record_motor_solenoids.csv"
+
 DEFAULT_STALE_AFTER_S = 5.0
 DEFAULT_HISTORY_LIMIT = 600
 DEFAULT_METADATA = {
@@ -303,6 +305,7 @@ class DashboardRuntime:
         self._dro_velocity_samples: deque[tuple[float, float, int]] = deque()
         self._dro_velocity_last_frame_count: int | None = None
         self._dro_velocity_kind: str | None = None
+        self._dro_velocity_last_acquired_ms: int | None = None
         self._stop_event = threading.Event()
         self._condition = threading.Condition(threading.RLock())
         self._thread: threading.Thread | None = None
@@ -311,7 +314,9 @@ class DashboardRuntime:
         self._cubemars_command_lock = threading.Lock()
         self._cubemars_state_lock = threading.Lock()
         self._cubemars_token = 0
+        self._experiment_can_token = 0
         self._cubemars_generation = 0
+        self._cubemars_pending_receipt: core.CommandReceipt | None = None
         self._cubemars_thread: threading.Thread | None = None
         self._experiment_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="experiment-io")
         self._experiment_futures: set[Future] = set()
@@ -319,6 +324,7 @@ class DashboardRuntime:
         self.experiment = ExperimentRunner(
             request_state=self._submit_experiment_command, abort_state=self._submit_experiment_stop,
         )
+        self.experiment.load(DEFAULT_EXPERIMENT_PATH.read_text(), DEFAULT_EXPERIMENT_PATH.name, 0.0)
         with self._condition:
             self._poll_locked(0.0)
 
@@ -467,19 +473,30 @@ class DashboardRuntime:
         ):
             self._reset_stepper_dro_velocity_locked()
 
+        acquired_ms = sample.get("stepper_dro_acquired_ms")
+        device_timed = type(acquired_ms) is int and 0 <= acquired_ms <= 0xFFFFFFFF
+        if self._dro_velocity_samples and device_timed != (self._dro_velocity_last_acquired_ms is not None):
+            self._reset_stepper_dro_velocity_locked()
+
         if frame_count != self._dro_velocity_last_frame_count:
             measurement_time_s = elapsed_s - sample_age_ms / 1000.0
-            if (
-                self._dro_velocity_samples
-                and measurement_time_s <= self._dro_velocity_samples[-1][0]
-            ):
+            if device_timed and self._dro_velocity_last_acquired_ms is not None:
+                # Controller acquisition intervals are independent of USB/network
+                # arrival times. Unsigned subtraction handles millis() rollover.
+                delta_ms = (acquired_ms - self._dro_velocity_last_acquired_ms) & 0xFFFFFFFF
+                if delta_ms == 0 or delta_ms >= 0x80000000:
+                    self._reset_stepper_dro_velocity_locked()
+                else:
+                    measurement_time_s = self._dro_velocity_samples[-1][0] + delta_ms / 1000.0
+            elif self._dro_velocity_samples and measurement_time_s <= self._dro_velocity_samples[-1][0]:
                 measurement_time_s = elapsed_s
-            self._dro_velocity_samples.append(
-                (measurement_time_s, raw_position_mm, frame_count)
-            )
+            self._dro_velocity_samples.append((measurement_time_s, raw_position_mm, frame_count))
             self._dro_velocity_last_frame_count = frame_count
+            self._dro_velocity_last_acquired_ms = acquired_ms if device_timed else None
 
-        cutoff_s = elapsed_s - DRO_VELOCITY_WINDOW_S
+        # On device-timed telemetry, maintain the window in acquisition time;
+        # delayed arrivals and repeated cached frames must not change the fit.
+        cutoff_s = (self._dro_velocity_samples[-1][0] if device_timed else elapsed_s) - DRO_VELOCITY_WINDOW_S
         while (
             len(self._dro_velocity_samples) > 2
             and self._dro_velocity_samples[1][0] < cutoff_s
@@ -521,6 +538,7 @@ class DashboardRuntime:
     def _reset_stepper_dro_velocity_locked(self) -> None:
         self._dro_velocity_samples.clear()
         self._dro_velocity_last_frame_count = None
+        self._dro_velocity_last_acquired_ms = None
 
     def run_config_locked(self) -> dict[str, object]:
         return {
@@ -606,10 +624,7 @@ class DashboardRuntime:
             "solenoids": core.solenoid_descriptors(self.devices.sources["stepper"].mode),
             "controllino_pressures": pressure_descriptors(self.system_config.pressure_inputs),
             "stepper": {
-                "max_distance_mm": min(
-                    self.system_config.stepper_max_travel_mm,
-                    core.DEFAULT_STEPPER_MAX_DISTANCE_MM,
-                ),
+                "max_distance_mm": core.max_stepper_move_mm(self.devices.sources["stepper"].mode),
                 "max_travel_mm": self.system_config.stepper_max_travel_mm,
                 "min_speed_mm_s": core.DEFAULT_STEPPER_MIN_SPEED_MM_S,
                 "max_speed_mm_s": core.DEFAULT_STEPPER_MAX_SPEED_MM_S,
@@ -645,13 +660,34 @@ class DashboardRuntime:
         future.add_done_callback(completed)
         return future
 
+    def _experiment_now_s(self) -> float:
+        return time.monotonic() - self.monotonic0
+
     def _submit_experiment_command(self, action: RequestedStateAction | MoveStepperAction | StepperModeAction | ActuatorAction) -> object:
         if isinstance(action, RequestedStateAction):
             # Recording is local application state, with no device transport.
-            return self._request_experiment_state(action)
+            self._request_experiment_state(action)
+            return {"command_sent_s": self._experiment_now_s()}
         sample = dict(self.latest or {})
-        return self._track_experiment_io(self._experiment_executor.submit(
-            self._request_experiment_state, action, sample))
+        count = len(action.devices) if isinstance(action, ActuatorAction) else 1
+        state = {"sent_s": None, "remaining": count}
+
+        def sent() -> None:
+            state["remaining"] -= 1
+            if state["remaining"] == 0:
+                state["sent_s"] = self._experiment_now_s()
+
+        def dispatch():
+            with core.observe_command_sends(sent):
+                request = self._request_experiment_state(action, sample)
+            if state["sent_s"] is None:
+                # Simulation/no-op controls do not write to a transport.
+                state["sent_s"] = self._experiment_now_s()
+            return request
+
+        future = self._experiment_executor.submit(dispatch)
+        future.dispatch_state = state
+        return self._track_experiment_io(future)
 
     def _submit_experiment_stop(self, action: MoveStepperAction) -> Future:
         self._experiment_cancel.set()
@@ -661,6 +697,8 @@ class DashboardRuntime:
             self._abort_experiment_state, action))
 
     def _require_experiment_io_idle(self) -> None:
+        if self._experiment_can_token and self.experiment.state != "running":
+            raise RuntimeError("Previous experiment motor lease is being retired; wait before loading or starting")
         if any(not future.done() for future in self._experiment_futures):
             raise RuntimeError("An experiment command or stop is still in flight; wait for its outcome")
 
@@ -672,6 +710,27 @@ class DashboardRuntime:
             current = self.devices.status(sample)
             if action.device == "can_motor":
                 before = current.get("stepper_can_motor_command_sequence")
+                if action.duration_ms is None:
+                    token = self._experiment_can_token or (uuid.uuid4().int & 0x7fffffff) or 1
+                    self.set_cubemars_motor({
+                        "action": "update" if self._experiment_can_token else "start",
+                        "token": token, "rpm": action.rpm,
+                        "ramp_rpm_s": current["stepper_can_motor_default_ramp_rpm_s"],
+                    }, wait_for_feedback=False)
+                    self._experiment_can_token = token
+                    if self._experiment_cancel.is_set():
+                        self._disarm_cubemars()
+                        self._experiment_can_token = 0
+                        raise RuntimeError("Experiment stopped while CAN motor acceptance was pending")
+                    return {"requested_rpm": action.rpm, "duration_ms": None,
+                            "before_sequence": before, "token": token}
+                if action.rpm == 0 and self._experiment_can_token:
+                    self.set_cubemars_motor({
+                        "action": "update", "token": self._experiment_can_token, "rpm": 0,
+                        "ramp_rpm_s": current["stepper_can_motor_default_ramp_rpm_s"],
+                    }, wait_for_feedback=False)
+                    self._experiment_can_token = 0
+                    return {"requested_rpm": 0, "before_sequence": before, "ramped_stop": True}
                 self.devices.cubemars(current, {"rpm": action.rpm, "duration_ms": action.duration_ms})
                 return {"requested_rpm": action.rpm, "duration_ms": action.duration_ms,
                         "before_sequence": before}
@@ -720,13 +779,13 @@ class DashboardRuntime:
             return {
                 "command_id": values["command_id"], "distance_mm": action.distance_mm,
                 "signed_distance_mm": receipt.result["signed_distance_mm"],
-                "signed_pulse_count": round(receipt.result["signed_distance_mm"] * core.DEFAULT_STEPPER_STEPS_PER_MM),
-                "pulse_rate_sps": round(action.speed_mm_s * core.DEFAULT_STEPPER_STEPS_PER_MM),
+                "signed_pulse_count": round(receipt.result["signed_distance_mm"] * core.stepper_steps_per_mm(current["stepper_mode"])),
+                "pulse_rate_sps": round(action.speed_mm_s * core.stepper_steps_per_mm(current["stepper_mode"])),
             }
-        if action.source != "recording" or action.set_point != "on":
+        if action.source != "recording" or action.set_point not in ("on", "off"):
             raise ValueError("Unsupported experiment requested state")
         # _poll_locked writes this sample exactly once after the request.
-        self.set_recording(True, include_latest=False)
+        self.set_recording(action.set_point == "on", include_latest=False)
 
     def _abort_experiment_state(self, action: MoveStepperAction) -> None:
         # Send once without recursively polling or waiting inside the runner.
@@ -739,8 +798,7 @@ class DashboardRuntime:
         with self._condition:
             self.experiment.on_io_event(time.monotonic() - self.monotonic0)
             self._require_experiment_io_idle()
-            self.experiment.load(values.get("csv"), name.strip(), time.monotonic() - self.monotonic0,
-                                 max_travel_mm=self.system_config.stepper_max_travel_mm)
+            self.experiment.load(values.get("csv"), name.strip(), time.monotonic() - self.monotonic0)
             self._experiment_cancel.clear()
             self.sequence += 1
             self._condition.notify_all()
@@ -755,7 +813,7 @@ class DashboardRuntime:
                 if isinstance(action, MoveStepperAction):
                     try:
                         core.validate_stepper_move(action.distance_mm, action.speed_mm_s,
-                                                   max_travel_mm=self.system_config.stepper_max_travel_mm)
+                                                   mode=self.devices.sources["stepper"].mode)
                     except ValueError as exc:
                         raise ValueError(f"Row {row}: {exc}") from exc
             self.experiment.start(time.monotonic() - self.monotonic0, values.get("program_id"))
@@ -909,19 +967,22 @@ class DashboardRuntime:
                 )
             self._condition.wait(timeout=min(remaining, 0.1))
 
-    def _finish_command_locked(self, receipt: core.CommandReceipt, *, poll: bool = True) -> dict[str, object]:
+    def _finish_command_locked(self, receipt: core.CommandReceipt, *, poll: bool = True,
+                               confirm: bool = True) -> dict[str, object]:
         if poll:
             self._poll_locked(time.monotonic() - self.monotonic0)
-        payload = self._confirm_command_locked(receipt)
-        return {**receipt.result, "stepper": payload, "sample": self.latest}
+        payload = self._confirm_command_locked(receipt) if confirm else self.devices.status(self.latest)
+        return {**receipt.result, **({"confirmed": False} if not confirm else {}),
+                "stepper": payload, "sample": self.latest}
 
-    def _stepper_command(self, command: Callable, *args: object, poll: bool = True) -> dict[str, object]:
+    def _stepper_command(self, command: Callable, *args: object, poll: bool = True,
+                         confirm: bool = True) -> dict[str, object]:
         """Snapshot under the runtime lock, send without it, then confirm."""
         with self._condition:
             current = self.devices.status(self.latest)
         receipt = command(current, *args)
         with self._condition:
-            return self._finish_command_locked(receipt, poll=poll)
+            return self._finish_command_locked(receipt, poll=poll, confirm=confirm)
 
     def move_stepper(self, values: dict[str, object]) -> dict[str, object]:
         with self._condition:
@@ -939,7 +1000,7 @@ class DashboardRuntime:
             raise ValueError("speed_mm_s is required")
         travel_mm, speed = core.validate_stepper_move(
             values["distance_mm"], values["speed_mm_s"],
-            max_travel_mm=self.system_config.stepper_max_travel_mm,
+            mode=self.devices.sources["stepper"].mode,
         )
         return {**values, "distance_mm": travel_mm, "speed_mm_s": speed}
 
@@ -964,8 +1025,8 @@ class DashboardRuntime:
     def set_stepper_local_run(self, values: dict[str, object]) -> dict[str, object]:
         return self._stepper_command(self.devices.local_run, values, poll=False)
 
-    def home_stepper(self) -> dict[str, object]:
-        return self._stepper_command(self.devices.home)
+    def home_stepper(self, values: dict[str, object] | None = None) -> dict[str, object]:
+        return self._stepper_command(self.devices.home, values)
 
     def set_stepper_speed(self, values: dict[str, object]) -> dict[str, object]:
         return self._stepper_command(self.devices.speed, values, poll=False)
@@ -981,7 +1042,7 @@ class DashboardRuntime:
         result["setpoint_us"] = result["stepper"].get("stepper_brushless_motor_setpoint_us")
         return result
 
-    def set_cubemars_motor(self, values: dict[str, object]) -> dict[str, object]:
+    def set_cubemars_motor(self, values: dict[str, object], *, wait_for_feedback: bool = True) -> dict[str, object]:
         if "action" not in values and type(values.get("rpm")) is int and values["rpm"] == 0:
             # Like E-STOP, release is sent before a slow sensor poll can hold the runtime lock.
             self._disarm_cubemars()
@@ -992,9 +1053,18 @@ class DashboardRuntime:
             with self._cubemars_state_lock:
                 generation = self._cubemars_generation
             with self._cubemars_command_lock:
+                self._cubemars_pending_receipt = None
+
+                def dispatch(current, *args):
+                    receipt = self._dispatch_cubemars(current, *args)
+                    if not wait_for_feedback:
+                        self._cubemars_pending_receipt = receipt
+                    return receipt
+
                 try:
                     result = self._stepper_command(
-                        self._dispatch_cubemars, values, generation, poll="action" not in values)
+                        dispatch, values, generation, poll="action" not in values,
+                        confirm=wait_for_feedback)
                 except RuntimeError:
                     with self._cubemars_state_lock:
                         owned = self._cubemars_token == values.get("token")
@@ -1009,6 +1079,7 @@ class DashboardRuntime:
                     if canceled:
                         # A Stop may win while Start is awaiting its receipt. It
                         # must never arm renewal, even if that late receipt passes.
+                        self._cubemars_pending_receipt = None
                         self._release_cubemars()
                         raise RuntimeError("CAN motor start was canceled by Stop")
         # The latest sensor sample can predate confirmation. Return the confirmed
@@ -1037,6 +1108,9 @@ class DashboardRuntime:
             if generation is not None and generation != self._cubemars_generation:
                 return 0
             token, self._cubemars_token = self._cubemars_token, 0
+            self._cubemars_pending_receipt = None
+            if token and token == self._experiment_can_token:
+                self._experiment_can_token = 0
             self._cubemars_generation += 1
             return token
 
@@ -1064,9 +1138,18 @@ class DashboardRuntime:
                 token, generation = self._cubemars_token, self._cubemars_generation
             if not token or self._stop_event.is_set():
                 return
+            if token == self._experiment_can_token and self.experiment.state != "running":
+                self._disarm_cubemars(generation)
+                self._experiment_can_token = 0
+                return  # Firmware lease expiry ends a failed experiment's run.
             source = self.devices.sources["stepper"]
             try:
                 current = dict(source.status())
+                pending_receipt = self._cubemars_pending_receipt
+                if pending_receipt is not None:
+                    if not pending_receipt.confirmed(current):
+                        return  # Spreadsheet timeout owns first-feedback waiting.
+                    self._cubemars_pending_receipt = None
                 receipt = self._dispatch_cubemars(current, {"action": "renew", "token": token}, generation)
                 deadline = time.monotonic() + 1.5
                 while True:

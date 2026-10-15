@@ -125,7 +125,7 @@ static void testExtendedCommandsAndAbort() {
   assert(SPI.requests == sent && (SPI.reg[0x0f] & 0x10));
   assert(!motor.run.active && strcmp(motor.run.reason, "can_tx_failed") == 0);
   SPI.holdAbort = false;
-  delay(21);
+  delay(101);
   motor.service(millis());
   expectQueued(1, {0, 0, 0, 0});
   assert(!(SPI.reg[0x0f] & 0x10) && !motor.run.active);
@@ -375,8 +375,8 @@ static void testErrorClockComparisonAndFirstCause() {
 
 static void testAllStopPathsAndServiceGapRollover() {
   const char *expected[] = {"duration_elapsed", "control_timeout", "feedback_stale",
-                            "motor_restart", "operator_stop", "can_tx_failed"};
-  for (unsigned path = 0; path < 6; ++path) {
+                            "motor_restart", "operator_stop"};
+  for (unsigned path = 0; path < 5; ++path) {
     SPI = SPIClass();
     CubeMarsCan motor(9); motor.begin();
     injectFeedback(); motor.service(millis());
@@ -391,10 +391,6 @@ static void testAllStopPathsAndServiceGapRollover() {
       motor.service(millis());
     }
     if (path == 4) { SPI.holdAbort = true; motor.release("operator_stop"); }
-    if (path == 5) {
-      for (unsigned address : {0x30u, 0x40u, 0x50u}) SPI.reg[address] |= 8;
-      delay(21); injectFeedback(); motor.service(millis());
-    }
     assert(!motor.run.active);
     Print stopped; motor.writeStatus(stopped, millis());
     assert(hexField(stopped, "sr") == expected[path]);
@@ -418,6 +414,58 @@ static void testAllStopPathsAndServiceGapRollover() {
   Print updated; motor.writeStatus(updated, millis());
   assert(numericField(updated, "mg") == gap);  // Updates/renewals don't reset it.
   motor.release("operator_stop");
+}
+
+static void testRefreshCadenceRejectRecoveryAndLatestSetpoint() {
+  SPI = SPIClass();
+  CubeMarsCan motor(9); motor.begin();
+  injectFeedback(); motor.service(millis());
+  assert(motor.start(5, 5000, millis()) == nullptr);
+  const uint32_t started = millis();
+  unsigned requests = SPI.requests;
+  for (unsigned address : {0x30u, 0x40u, 0x50u}) SPI.reg[address] &= ~8;
+  // Frequent service calls must not turn the 10 Hz refresh into a busy retry loop.
+  while (millis() - started < 90) { delay(5); injectFeedback(); motor.service(millis()); }
+  assert(SPI.requests == requests);
+  delay(11); injectFeedback(); motor.service(millis());
+  assert(SPI.requests == requests + 1);
+
+  for (unsigned address : {0x30u, 0x40u, 0x50u}) SPI.reg[address] |= 8;
+  for (unsigned i = 0; i < 3; ++i) {
+    delay(101); injectFeedback(); motor.service(millis());
+    assert(motor.run.active && motor.run.commandedRpm == 5);
+  }
+  Print rejected; motor.writeStatus(rejected, millis());
+  assert(numericField(rejected, "txfail") == 3);
+  assert(numericField(rejected, "txcode") == MCP2515::ERROR_ALLTXBUSY);
+  assert(numericField(rejected, "sc") == 0);
+  assert(motor.commandSequence == 1);
+
+  // Recover without a new Start or a command backlog.
+  for (unsigned address : {0x30u, 0x40u, 0x50u}) SPI.reg[address] &= ~8;
+  requests = SPI.requests;
+  delay(101); injectFeedback(); motor.service(millis());
+  assert(motor.run.active && SPI.requests == requests + 1);
+  expectQueued(3, {0, 0, 2, 0x76});
+  Print recovered; motor.writeStatus(recovered, millis());
+  assert(numericField(recovered, "txfail") == 3);
+  assert(numericField(recovered, "txcode") == MCP2515::ERROR_ALLTXBUSY);
+
+  // A failed transmission (not just busy buffers) is also tolerated after start.
+  for (unsigned address : {0x30u, 0x40u, 0x50u}) SPI.reg[address] = 0x10;
+  delay(101); injectFeedback(); motor.service(millis());
+  assert(motor.run.active);
+  Print failed; motor.writeStatus(failed, millis());
+  assert(numericField(failed, "txcode") == MCP2515::ERROR_FAILTX);
+  for (unsigned address : {0x30u, 0x40u, 0x50u}) SPI.reg[address] = 0;
+
+  // An explicit replacement sends its latest target; old refreshes aren't replayed.
+  assert(motor.start(6, 5000, millis()) == nullptr);
+  expectQueued(3, {0, 0, 2, 0xf4});
+  // Losing feedback still ends the run, even after tolerated send rejections.
+  delay(501); motor.service(millis());
+  assert(!motor.run.active && strcmp(motor.run.reason, "feedback_stale") == 0);
+  expectQueued(1, {0, 0, 0, 0});
 }
 
 static void testManualAdapterLeaseAndTelemetry() {
@@ -462,11 +510,48 @@ static void testManualAdapterLeaseAndTelemetry() {
   assert(motor.commandSequence == 5 && !motor.run.manualToken && !motor.requestedRpm);
   assert(motor.manual(1, 1, 125, millis(), false) == nullptr);
   for (unsigned address : {0x30u, 0x40u, 0x50u}) SPI.reg[address] |= 8;
-  delay(21); injectFeedback(); motor.service(millis());  // All TX buffers busy.
-  assert(!motor.run.active && !motor.run.manualToken);
-  assert(strcmp(motor.run.reason, "can_tx_failed") == 0);
+  delay(101); injectFeedback(); motor.service(millis());  // All TX buffers busy.
+  assert(motor.run.active && motor.run.manualToken == 125);
+  assert(strcmp(motor.run.reason, "running") == 0);
+  motor.release("operator_stop");
   expectQueued(1, {0, 0, 0, 0});  // Abort older speed frames, then release.
   assert(strcmp(motor.renew(125, millis()), "can_manual_inactive") == 0);
+}
+
+static void testRampedStopKeepsSpeedControlUntilTorqueRelease() {
+  SPI = SPIClass();
+  CubeMarsCan motor(9); motor.begin();
+  injectFeedback(); motor.service(millis());  // -10 output RPM, initially.
+  assert(motor.manual(-10, 80, 125, millis(), false) == nullptr);
+  assert(motor.manual(0, 80, 125, millis(), true) == nullptr);
+  assert(motor.run.active && motor.run.manualToken == 125 && motor.requestedRpm == 0);
+  Print stopping; motor.writeStatus(stopping, millis());
+  expectText(stopping, "\"cstop\":1");
+  expectText(stopping, "\"cr\":0");
+  expectText(stopping, "\"ce\":1");
+  for (unsigned address : {0x30u, 0x40u, 0x50u}) SPI.reg[address] = 0;
+  delay(101); injectFeedback(); motor.service(millis());
+  assert(motor.run.active && motor.run.appliedErpm < 0 && motor.run.appliedErpm > -1260);
+  assert(SPI.reg[0x33] == 3);  // Still issuing velocity commands during deceleration.
+  delay(30); injectFeedback(); motor.service(millis());
+  assert(!motor.run.active && !motor.run.manualToken && !motor.run.appliedErpm);
+  assert(strcmp(motor.run.reason, "operator_stop") == 0);
+  expectQueued(1, {0, 0, 0, 0});  // Torque release only after the ramp reaches zero.
+}
+
+static void testInitialRejectedSendStillRequiresExplicitNewStart() {
+  SPI = SPIClass();
+  CubeMarsCan motor(9); motor.begin();
+  injectFeedback(); motor.service(millis());
+  // A TX failure before acceptance is not an established run to preserve.
+  for (unsigned address : {0x30u, 0x40u, 0x50u}) SPI.reg[address] = 0x10;
+  assert(strcmp(motor.start(5, 1000, millis()), "can_tx_failed") == 0);
+  assert(!motor.run.active && motor.commandSequence == 0);
+  for (unsigned address : {0x30u, 0x40u, 0x50u}) SPI.reg[address] = 0;
+  delay(101); injectFeedback(); motor.service(millis());
+  assert(!motor.run.active);
+  expectQueued(1, {0, 0, 0, 0});
+  assert(motor.start(5, 1000, millis()) == nullptr);
 }
 
 int main() {
@@ -478,6 +563,9 @@ int main() {
   testDiagnosticRegisterReadIntegrityAndReceiveFailures();
   testDiagnosticSnapshotSurvivesServicedPrinting();
   testManualAdapterLeaseAndTelemetry();
+  testInitialRejectedSendStillRequiresExplicitNewStart();
+  testRampedStopKeepsSpeedControlUntilTorqueRelease();
+  testRefreshCadenceRejectRecoveryAndLatestSetpoint();
   testStopEvidenceSurvivesOverflowClearAndRecovery();
   testErrorClockComparisonAndFirstCause();
   testAllStopPathsAndServiceGapRollover();

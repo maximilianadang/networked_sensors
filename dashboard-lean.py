@@ -44,7 +44,7 @@ OPTIONS = (
     ("ed593-timeout", 1.0, None),
     ("ed593-rate-hz", 1.0, None),
     ("stepper-source", "controllino", core.STEPPER_SOURCE_MODES),
-    ("stepper-port", core.DEFAULT_STEPPER_USB_PORT, None),
+    ("stepper-port", "auto", None),
     ("stepper-baud", core.DEFAULT_STEPPER_USB_BAUD, None),
     ("stepper-url", "http://10.77.0.10", None),
     ("stepper-timeout", core.DEFAULT_STEPPER_NETWORK_TIMEOUT_S, None),
@@ -94,6 +94,8 @@ def parse_args(argv=None):
         for name, env in ENV_OPTIONS.items() if os.environ.get(env)
     ]
     args = parser.parse_args(env_args + list(sys.argv[1:] if argv is None else argv))
+    if args.stepper_port == "auto" and args.stepper_source != "controllino-usb":
+        args.stepper_port = core.DEFAULT_STEPPER_USB_PORT
     if args.esp32_source == "auto":
         args.esp32_source = ("off" if args.stepper_source.startswith("controllino")
                             else "sim" if args.stepper_source == "sim" else "real")

@@ -8,13 +8,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .runtime import DashboardRuntime
+from .runtime import DashboardRuntime, DEFAULT_EXPERIMENT_PATH
 
 
 DASHBOARD_ASSET_DIR = Path(__file__).with_name("static")
 EXPERIMENT_EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples"
 EXPERIMENT_EXAMPLES = {
-    "/api/experiment/example.csv": "esp32_health.csv",
+    "/api/experiment/example.csv": DEFAULT_EXPERIMENT_PATH.name,
     "/api/experiment/source-health.csv": "source_health.csv",
     "/api/experiment/start-recording.csv": "start_recording.csv",
     "/api/experiment/move-stepper.csv": "move_stepper.csv",
@@ -23,6 +23,7 @@ EXPERIMENT_EXAMPLES = {
     "/api/experiment/motion-readings.csv": "motion_readings.csv",
     "/api/experiment/dro-monitor.csv": "dro_monitor.csv",
     "/api/experiment/cubemars.csv": "cubemars.csv",
+    "/api/experiment/record-motor-solenoids.csv": "record_motor_solenoids.csv",
 }
 DASHBOARD_ASSET_TYPES = {
     "/assets/dashboard-lean.css": "text/css; charset=utf-8",
@@ -149,7 +150,7 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTT
                         runtime.set_stepper_brushless_pulse(parse_body(self))
                     )
                 elif path == "/api/stepper/home":
-                    self._send_json(runtime.home_stepper())
+                    self._send_json(runtime.home_stepper(parse_body(self)))
                 elif path == "/api/stepper/control-mode":
                     self._send_json(
                         runtime.set_stepper_control_mode(parse_body(self))

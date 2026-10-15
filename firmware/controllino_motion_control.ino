@@ -4,15 +4,17 @@
 //
 // Wiring and electrical polarity: wiring_controllino.h
 //
-// Installed hardware has no physical run/direction switches or limits.
-// V1 R-1/R0/R1 provides software Reverse/Stop/Forward in Local Speed mode.
-// H remains protocol-compatible but is rejected until a home switch exists.
-// D6/D8=-1 report absent limits. DRO freshness comes from validated input frames.
+// Installed hardware has no physical run/direction switches.
+// V1 R-1/R0/R1 requests negative/stop/positive pulses in Local Speed mode.
+// DI0/A12: bottom/Reverse; DI1/A13: top/Forward. HIGH clear, LOW actuated.
+// Home retracts to the bottom (negative) limit at the requested pulse rate.
+// Legacy d6/d8 fields represent positive/negative pulse directions, not pins.
 
 #include <SPI.h>
 #include <Ethernet.h>
 #include <math.h>
 #include <errno.h>
+#include <limits.h>
 #include <util/atomic.h>
 #include "wiring_controllino.h"
 #if CONTROLLINO_DRO_KIND == DRO_BACKEND_LINACE
@@ -22,15 +24,18 @@
 #endif
 #include "pressure_adc.h"
 #include "relay_bank.h"
+#include "directional_limits.h"
+#include "stepper_pwm_avr.h"
+static_assert(PIN_STEP == 3, "Timer3 OC3C STEP requires Arduino D3");
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
 #include "cubemars_can.h"
 CubeMarsCan cubeMars(PIN_CAN_CS);
 #endif
 
 // ---------- 1. Pin map and fixed configuration ----------
-constexpr long MIN_SPS = 25, MAX_SPS = 2520, DEFAULT_SPS = 1000;
-constexpr long MAX_RELATIVE_PULSES = 34565;  // conservative; recalibrate SRX/motor
-constexpr unsigned long STEP_TIMER_HZ = F_CPU / 64UL;
+// E09050: 5.08 mm/rev, SRX SW5–SW8 ON/ON/ON/OFF = 1000 pulses/rev.
+// Host speed bounds: 0.1–10 mm/s; nominal 1.5 mm/s at boot.
+constexpr long MIN_SPS = 20, MAX_SPS = 1969, DEFAULT_SPS = 295;
 constexpr unsigned long DRIVER_WAKE_MS = 250, OWNER_RELEASE_MS = 2000;
 constexpr unsigned int ESC_OFF_US = 1000, ESC_MAX_US = 2000;
 constexpr unsigned int ESC_TICKS_PER_US = F_CPU / 8UL / 1000000UL;
@@ -50,14 +55,10 @@ AbsoluteDroReader dro;
 void onDroClock() { dro.onClock(); }
 PressureAdc pressures;
 RelayBank solenoids;
+DirectionalLimits limits;
 
-// ---------- 2. Hardware-timed STEP and ESC outputs ----------
-volatile bool pulseOn = false, pulseFinite = false, pulseReached = false;
-volatile int8_t pulseDirection = 1;
-volatile long pulsePosition = 0, pulseTarget = 0, scheduledSps = 0;
-volatile uint16_t pendingCompare = 0;
-volatile long pendingSps = 0;
-volatile bool comparePending = false;
+// ---------- 2. Timer3 hardware STEP PWM and Timer1 auxiliary output ----------
+StepperPwm stepper;
 long cruiseSps = DEFAULT_SPS;
 
 volatile unsigned int auxTicks = ESC_OFF_US * ESC_TICKS_PER_US;
@@ -77,45 +78,24 @@ void setServoPulse(unsigned int pulseUs, byte releaseFrames = 0) {
     } else digitalWrite(PIN_AUX, LOW);
   }
 }
-uint16_t compareFor(long sps) {
-  unsigned long ticks = (STEP_TIMER_HZ + sps / 2) / sps;
-  return uint16_t(constrain(ticks, 2UL, 65536UL) - 1);
-}
-
-bool moving() { bool v; ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { v = pulseOn; } return v; }
-bool targetReached() { bool v; ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { v = pulseReached; } return v; }
-long position() { long v; ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { v = pulsePosition; } return v; }
-long signedSps() { long v; ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { v = scheduledSps * pulseDirection; } return v; }
+bool moving() { return stepper.moving(); }
+bool targetReached() { return stepper.reached(); }
+long position() { return stepper.position(); }
+long signedSps() { return stepper.signedSps(); }
 
 void stopPulses() {
-  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    pulseOn = pulseFinite = pulseReached = comparePending = false;
-    scheduledSps = 0;
-    TIMSK1 &= ~_BV(OCIE1A);
-  }
-  digitalWrite(PIN_STEP, STEP_IDLE);
+  stepper.stop();
 }
 
 void startPulses(int8_t direction, bool finite, long target) {
   stopPulses();
-  digitalWrite(PIN_DIR, direction > 0 ? DIR_FORWARD : DIR_REVERSE);
-  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    pulseDirection = direction; pulseFinite = finite; pulseTarget = target;
-    pulseReached = false; scheduledSps = cruiseSps;
-    OCR1A = compareFor(scheduledSps); TCNT1 = 0; TIFR1 = _BV(OCF1A);
-    pulseOn = true; TIMSK1 |= _BV(OCIE1A);
-  }
+  digitalWrite(PIN_DIR, direction > 0 ? DIR_POSITIVE : DIR_NEGATIVE);
+  stepper.start(direction, finite, target, cruiseSps);
 }
 
 // Apply speed changes at a pulse boundary, without acceleration or deceleration.
 void serviceSpeed() {
-  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    if (pulseOn && scheduledSps != cruiseSps) {
-      pendingCompare = compareFor(cruiseSps);
-      pendingSps = cruiseSps;
-      comparePending = true;
-    }
-  }
+  stepper.setSpeed(cruiseSps);
 }
 
 void setEsc(bool on) {
@@ -125,24 +105,14 @@ void setEsc(bool on) {
   }
 }
 
-ISR(TIMER1_COMPA_vect) {
-  if (!pulseOn) return;
-  digitalWrite(PIN_STEP, STEP_ACTIVE); delayMicroseconds(5);
-  digitalWrite(PIN_STEP, STEP_IDLE); pulsePosition += pulseDirection;
-  if (pulseFinite && ((pulseDirection > 0 && pulsePosition >= pulseTarget) ||
-      (pulseDirection < 0 && pulsePosition <= pulseTarget))) {
-    pulseOn = false; pulseReached = true; scheduledSps = 0;
-    TIMSK1 &= ~_BV(OCIE1A);
-  } else if (comparePending) {
-    OCR1A = pendingCompare; scheduledSps = pendingSps; comparePending = false;
-  }
-}
-ISR(TIMER3_OVF_vect) {
+ISR(TIMER3_COMPC_vect) { stepper.onStep(); }
+ISR(TIMER3_OVF_vect) { stepper.onPeriodEnd(); }
+ISR(TIMER1_OVF_vect) {
   if (servoReleaseFrames && --servoReleaseFrames == 0) auxPulseEnabled = false;
   if (auxPulseEnabled) digitalWrite(PIN_AUX, HIGH);
-  OCR3A = auxTicks;
+  OCR1A = auxTicks;
 }
-ISR(TIMER3_COMPA_vect) { digitalWrite(PIN_AUX, LOW); }
+ISR(TIMER1_COMPA_vect) { digitalWrite(PIN_AUX, LOW); }
 
 // ---------- 3. Machine state and safety transitions ----------
 enum Mode : byte { LOCAL_SPEED, WEB_POSITION };
@@ -184,23 +154,31 @@ void serviceMotion() {
     return;
   }
   int8_t wanted = mode == LOCAL_SPEED ? localCommand :
-      (state == WEB_MOVING ? (target > 0 ? 1 : -1) : 0);
+      (state == HOMING ? -1 : (state == WEB_MOVING ? (target > 0 ? 1 : -1) : 0));
   if (!wanted) {
     if (moving() || driverEnabled) halt(state, reason, false);
     return;
   }
+  if (limits.blocks(wanted)) {
+    if (state == HOMING) halt(WEB_READY, "home_complete");
+    else halt(LIMIT_BLOCKED, wanted > 0 ? "positive_limit" : "negative_limit");
+    statusPending = true;
+    return;
+  }
   if (!driverReady()) return;
   if (targetReached()) { halt(WEB_COMPLETE, "move_complete", false); return; }
-  int8_t active; ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { active = pulseDirection; }
+  const int8_t active = stepper.direction();
   if (!moving() || active != wanted) {
-    startPulses(wanted, mode == WEB_POSITION, target);
-    state = mode == WEB_POSITION ? WEB_MOVING : LOCAL_MOVING;
+    const bool homing = state == HOMING;
+    startPulses(wanted, mode == WEB_POSITION && !homing, target);
+    state = homing ? HOMING : (mode == WEB_POSITION ? WEB_MOVING : LOCAL_MOVING);
     reason = "none";
   }
   serviceSpeed();
 }
 
 void serviceRealtime() {
+  if (limits.poll(micros())) statusPending = true;
   dro.poll();
   pressures.poll(millis());
   serviceMotion();
@@ -384,11 +362,20 @@ void processCommand(char *line, byte source) {
     if (mode != LOCAL_SPEED) return reject("wrong_mode");
     if (!parseLong(line + 4, value) || value < -1 || value > 1)
       return reject("run_range");
+    if (limits.blocks(value)) return reject(value > 0 ? "positive_limit" : "negative_limit");
     localCommand = value;
     if (!value) halt(LOCAL_STOPPED, "run_off");
     return accept(source, value ? "none" : "run_off");
   }
-  if (!strcmp(line, "V1 H")) return reject("home_switch_unavailable");
+  if (!strncmp(line, "V1 H", 4)) {
+    if (mode != WEB_POSITION) return reject("wrong_mode");
+    if (moving() || driverEnabled || state == HOMING || state == WEB_MOVING) return reject("busy");
+    long sps;
+    if (!parseLong(line + 4, sps) || sps < MIN_SPS || sps > MAX_SPS)
+      return reject("speed_range");
+    cruiseSps = sps; target = 0;
+    state = HOMING; return accept(source);
+  }
   if (!strncmp(line, "V1 G", 4)) {
     if (mode != WEB_POSITION) return reject("wrong_mode");
     if (moving() || driverEnabled) return reject("busy");
@@ -399,11 +386,13 @@ void processCommand(char *line, byte source) {
     long delta, sps, id;
     if (!parseLong(line + 4, delta) || !parseLong(first + 1, sps) ||
         !parseLong(second + 1, id)) return reject("move_grammar");
-    if (!delta || labs(delta) > MAX_RELATIVE_PULSES) return reject("distance_range");
+    if (!delta || delta == LONG_MIN) return reject("distance_range");
     if (sps < MIN_SPS || sps > MAX_SPS) return reject("speed_range");
     if (id < 1 || id > 65535) return reject("id_range");
+    const int8_t direction = delta > 0 ? 1 : -1;
+    if (limits.blocks(direction)) return reject(direction > 0 ? "positive_limit" : "negative_limit");
     cruiseSps = sps; target = delta; commandId = id;
-    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { pulsePosition = 0; }
+    stepper.zero();
     state = WEB_MOVING; return accept(source);
   }
   reject("unknown_command");
@@ -417,7 +406,9 @@ void writeStatus(Print &destination, bool ack = false) {
   }
   out.print(F("{\"v\":1,\"t\":\"s\",\"d4\":")); out.print(localCommand ? 0 : 1);
   out.print(F(",\"d5\":")); out.print(localCommand < 0 ? 0 : 1);
-  out.print(F(",\"d6\":-1,\"d8\":-1,\"lx\":0,\"lp\":0,\"ln\":0,\"b\":0,\"r\":\"")); out.print(reason);
+  limits.writeStatus(out);
+  out.print(F(",\"b\":")); out.print(state == LIMIT_BLOCKED);
+  out.print(F(",\"r\":\"")); out.print(reason);
   out.print(F("\",\"sps\":")); out.print(signedSps());
   out.print(F(",\"csps\":")); out.print(cruiseSps);
   out.print(F(",\"aps\":")); out.print(moving() ? labs(signedSps()) : 0);
@@ -452,6 +443,7 @@ void writeStatus(Print &destination, bool ack = false) {
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
   cubeMars.writeStatus(out, millis());
 #endif
+  out.print(F(",\"hc\":1"));
   out.print(F(",\"mv\":")); out.print(moving()); out.print(F(",\"st\":")); out.print(state);
   out.print(F(",\"p\":")); out.print(position()); out.print(F(",\"g\":")); out.print(target);
   out.print(F(",\"c\":")); out.print(commandId); out.print(F(",\"o\":")); out.print(owner);
@@ -517,20 +509,21 @@ void setup() {
   solenoids.begin(SOLENOID_PINS, SOLENOID_ON, SOLENOID_OFF);
   pressures.begin(PRESSURE_PINS);
   digitalWrite(PIN_ENABLE, DRIVER_DISABLED); pinMode(PIN_ENABLE, OUTPUT);
-  digitalWrite(PIN_STEP, STEP_IDLE); digitalWrite(PIN_DIR, DIR_REVERSE);
-  pinMode(PIN_STEP, OUTPUT); pinMode(PIN_DIR, OUTPUT);
+  digitalWrite(PIN_STEP, STEP_IDLE); digitalWrite(PIN_DIR, DIR_NEGATIVE);
+  pinMode(PIN_DIR, OUTPUT); // stepper.begin() seeds and enables the STEP output.
+  limits.begin(PIN_LIMIT_POS, PIN_LIMIT_NEG);
   digitalWrite(PIN_AUX, AUX_IS_CUBEMARS ? HIGH : LOW); pinMode(PIN_AUX, OUTPUT);
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
   digitalWrite(PIN_RTC_CS, LOW); pinMode(PIN_RTC_CS, OUTPUT);
   digitalWrite(PIN_SPI_SS_ETHERNET_LIB, HIGH); pinMode(PIN_SPI_SS_ETHERNET_LIB, OUTPUT);
 #endif
 
-  TCCR1A = 0; TCCR1B = _BV(WGM12) | _BV(CS11) | _BV(CS10);
-  TIMSK1 &= ~_BV(OCIE1A);
+  stepper.begin();
+  TCCR1A = 0; TCCR1B = 0; TIMSK1 = 0;
   if (!AUX_IS_CUBEMARS) {
-    TCCR3A = _BV(WGM31); TCCR3B = _BV(WGM33) | _BV(WGM32) | _BV(CS31);
-    ICR3 = 20000U * ESC_TICKS_PER_US - 1; OCR3A = auxTicks;
-    TIMSK3 = _BV(TOIE3) | _BV(OCIE3A);
+    TCCR1A = _BV(WGM11); TCCR1B = _BV(WGM13) | _BV(WGM12) | _BV(CS11);
+    ICR1 = 20000U * ESC_TICKS_PER_US - 1; OCR1A = auxTicks;
+    TIMSK1 = _BV(TOIE1) | _BV(OCIE1A);
   }
 
   dro.begin(PIN_DRO_CLOCK, PIN_DRO_SECONDARY, onDroClock);
