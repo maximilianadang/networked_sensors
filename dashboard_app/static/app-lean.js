@@ -1,6 +1,6 @@
 // LEAN DASHBOARD — one module, ordered like the page (top to bottom, left to right).
 // PAGE MAP: 1 Status | 2 Toolbar | 3 Measurements | 4 Charts | 5 Motor Control
-//           6 Test Metadata | 7 Source details | 8 Shared helpers/API | 9 Startup
+//           6 Thermocouples / Test Metadata | 7 Source details | 8 Shared helpers/API | 9 Startup
 // Panel state lives inside factory functions; exports also support the original
 // dashboard and isolated tests. Importing this module alone never starts the app.
 import {auxMotorKind, canMotorStatus, createCanMotorComponent} from "./can-motor.js";
@@ -589,13 +589,14 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   const servo = createServoComponent({getLatest, applySample, postJson});
   const canMotor = createCanMotorComponent({getLatest, applySample, postJson, createActions});
 
-  let controlModeDirty = false;
+  let pendingControlMode = null;
   let messageSticky = false;
   let brushlessPulseDirty = false;
   let lastFreshDroPositionMm = null;
   const actions = createActions({refresh: updateControls});
 
-  function setCommandFeedback(message = "") {
+  function setCommandFeedback(message = "", state = "error") {
+    els.stepperCommandFeedback.dataset.state = state;
     setText(els.stepperCommandFeedback, message);
     els.stepperCommandFeedback.hidden = message === "";
   }
@@ -1081,14 +1082,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
         ? `${blockedLimit} BLOCKS ${arrowDirection === "down" ? "↓" : "↑"}`
         : "",
     );
-    if (latest.stepper_control_mode) {
-      if (!controlModeDirty) {
-        els.stepperModeWeb.checked = webPositionMode;
-        els.stepperModeLocal.checked = !webPositionMode;
-      } else if (els.stepperModeWeb.checked === webPositionMode) {
-        controlModeDirty = false;
-      }
-    }
+    renderControlMode(latest);
     setText(els.stepperDirectionStatus, directionCalibrationSafe
       ? `Normal (Forward → ${forwardInput} ${forwardEnd}; Reverse → ${reverseInput} ${reverseEnd})`
       : latest.stepper_direction_mapping === "inverted"
@@ -1163,9 +1157,10 @@ export function createStepperComponent({getLatest, applySample, limits}) {
         success(payload);
       },
       failure: error => {
-        const message = `${key} failed: ${error.message}`;
+        const unconfirmed = error.outcome === "unconfirmed";
+        const message = unconfirmed ? `${key}: awaiting controller confirmation` : `${key} failed: ${error.message}`;
         setText(target, message);
-        setCommandFeedback(message);
+        setCommandFeedback(message, unconfirmed ? "unconfirmed" : "error");
         failure?.(error);
       },
       finish
@@ -1276,21 +1271,50 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     });
   });
 
-  function requestControlMode() {
-    const webPosition = els.stepperModeWeb.checked;
-    const previous = getLatest()?.stepper_control_mode === "web_position";
-    controlModeDirty = true;
-    return command("mode", API.stepperControlMode, {web_position: webPosition}, {
+  function renderControlMode(latest) {
+    const mode = latest?.stepper_control_mode;
+    if (latest?.stepper_connected !== true || !["web_position", "local_velocity"].includes(mode)) return;
+    const webPosition = mode === "web_position";
+    // Radio selection represents actual state, never the requested state.
+    els.stepperModeWeb.checked = webPosition;
+    els.stepperModeLocal.checked = !webPosition;
+    if (pendingControlMode && pendingControlMode.webPosition === webPosition &&
+        latest.stepper_status_sequence !== pendingControlMode.beforeSequence) {
+      pendingControlMode = null;
+      setCommandFeedback();
+      setText(els.stepperMessage, `${webPosition ? "Positional" : "Directional"} selected`);
+    }
+  }
+
+  function requestControlMode(webPosition) {
+    const latest = getLatest();
+    const request = {webPosition, beforeSequence: latest?.stepper_status_sequence};
+    pendingControlMode = request;
+    messageSticky = true;
+    setCommandFeedback();
+    renderControlMode(latest); // Undo the browser's optimistic radio selection.
+    return actions.run("mode", () => postJson(API.stepperControlMode, {web_position: webPosition}), {
       success: p => {
-        const mode = p.stepper?.stepper_control_mode || p.sample?.stepper_control_mode;
-        requireConfirmation(p.confirmed === true && mode === (webPosition ? "web_position" : "local_velocity"), "the requested mode");
-        controlModeDirty = false;
+        if (p.sample) applySample(p.sample);
+        const actual = p.stepper || p.sample;
+        if (p.confirmed !== true || actual?.stepper_control_mode !==
+            (webPosition ? "web_position" : "local_velocity")) {
+          const error = new Error("Mode change is awaiting controller confirmation");
+          error.outcome = "unconfirmed";
+          throw error;
+        }
+        pendingControlMode = null;
+        renderControlMode({...actual, stepper_connected: true});
         setText(els.stepperMessage, `${webPosition ? "Positional" : "Directional"} selected`);
       },
-      failure: () => {
-        controlModeDirty = false;
-        els.stepperModeWeb.checked = previous;
-        els.stepperModeLocal.checked = !previous;
+      failure: error => {
+        renderControlMode(getLatest());
+        if (pendingControlMode !== request) return; // Telemetry already confirmed it.
+        if (error.outcome === "unconfirmed" || error instanceof TypeError) {
+          return;
+        }
+        pendingControlMode = null;
+        setCommandFeedback(`Mode request rejected: ${error.message}`);
       }
     });
   }
@@ -1348,7 +1372,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
     messageSticky = false;
   });
   for (const input of modeInputs) {
-    input.addEventListener("change", () => { if (input.checked) void requestControlMode(); });
+    input.addEventListener("change", () => { if (input.checked) void requestControlMode(input === els.stepperModeWeb); });
   }
   els.stepperForm.addEventListener("submit", event => { event.preventDefault(); void requestMove(); });
   for (const [id, action] of Object.entries({
@@ -1442,8 +1466,101 @@ export function createServoComponent({getLatest, applySample, postJson}) {
 }
 
 // ============================================================================
-// 6. TEST METADATA
+// 6. THERMOCOUPLES AND TEST METADATA
 // ============================================================================
+function thermocoupleReading(sample, device) {
+  let status = "";
+  if (sample.ed593_mode === "off") status = "Off";
+  else if (sample.ed593_transport_error) status = "Transport error";
+  else if (sample.ed593_connected !== true) status = "Stale";
+  else if (sample[`ed593_${device}_enabled`] === false) status = "Disabled";
+  else if (sample[`ed593_${device}_fault`] === true) status = "Sensor fault";
+  else if (sample[`ed593_${device}_ready`] !== true) status = "No reading";
+  const value = status ? null : finiteSampleNumber(sample, `ed593_${device}_temperature_c`);
+  return {value, status: status || (value === null ? "No reading" : "")};
+}
+
+export function createThermocoupleComponent({descriptors}) {
+  const els = elements(["thermocoupleForm", "thermocoupleReadings", "thermocoupleStatus", "thermocoupleEmpty", "thermocoupleSave"]);
+  const actions = createActions({
+    onError: error => setText(els.thermocoupleStatus, `Save failed: ${error.message}`)
+  });
+  let revision = 0;
+  let discoveredMask = null;
+  const rows = descriptors.map(({device, label, component}) => {
+    const row = document.createElement("div");
+    row.className = "thermocouple-row";
+    row.hidden = true;
+    const name = document.createElement("label");
+    name.textContent = label;
+    name.title = `ED-593 input ${device.toUpperCase()}`;
+    const reading = document.createElement("div");
+    reading.className = "thermocouple-reading";
+    const value = document.createElement("output");
+    value.setAttribute("aria-label", `${label} temperature in degrees Celsius`);
+    value.textContent = "--";
+    const status = document.createElement("small");
+    reading.append(value, status);
+    const input = document.createElement("input");
+    input.id = `thermocouple-${device}-component`;
+    input.name = device;
+    input.value = component;
+    input.maxLength = 80;
+    input.autocomplete = "off";
+    input.placeholder = "Component name";
+    input.setAttribute("aria-label", `${label} component name`);
+    name.htmlFor = input.id;
+    row.append(name, reading, input);
+    els.thermocoupleReadings.appendChild(row);
+    return {device, channelBit: 1 << Number(device.slice(2)), element: row, input, value, status};
+  });
+
+  els.thermocoupleForm.addEventListener("input", () => {
+    revision += 1;
+    setText(els.thermocoupleStatus, "Unsaved");
+  });
+  els.thermocoupleForm.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (actions.has("save")) return;
+    const submittedRevision = revision;
+    const names = Object.fromEntries(rows.map(({device, input}) => [device, input.value]));
+    setText(els.thermocoupleStatus, "Saving…");
+    await actions.run("save", () => postJson(API.thermocouples, names), {
+      success: payload => {
+        if (revision !== submittedRevision) {
+          setText(els.thermocoupleStatus, "Unsaved");
+          return;
+        }
+        const saved = new Map(payload.thermocouples.map(item => [item.device, item.component]));
+        for (const row of rows) row.input.value = saved.get(row.device) ?? row.input.value;
+        setText(els.thermocoupleStatus, "Saved");
+      }
+    });
+  });
+
+  function render(sample) {
+    const mask = sample.ed593_discovered_mask;
+    // The source snapshots discovery once per dashboard run, across browser
+    // refreshes and transport reconnects. Live faults never change this list.
+    if (Number.isInteger(mask) && mask >= 0 && mask <= 255 && mask !== discoveredMask) {
+      discoveredMask = mask;
+      for (const row of rows) row.element.hidden = !(mask & row.channelBit);
+    }
+    for (const row of rows) {
+      const reading = thermocoupleReading(sample, row.device);
+      setText(row.value, reading.value === null ? "--" : reading.value.toFixed(2));
+      setText(row.status, reading.status);
+    }
+    const anyVisible = rows.some(row => !row.element.hidden);
+    els.thermocoupleEmpty.hidden = anyVisible;
+    els.thermocoupleSave.disabled = !anyVisible;
+    setText(els.thermocoupleEmpty, sample.ed593_mode === "off" ? "ED-593 is off."
+      : discoveredMask === 0
+        ? "No enabled thermocouple inputs." : "Waiting for ED-593 channels…");
+  }
+  return {render};
+}
+
 // PANEL: Test Metadata — editing, saving and derived motion setpoints.
 // Markup: index-lean.html; appearance: dashboard-lean.css (search Test Metadata).
 
@@ -1630,8 +1747,8 @@ export function renderSources(sample, historyLength) {
     const row = document.createElement("tr");
     const enabled = sample[`ed593_tc${i}_enabled`];
     const fault = sample[`ed593_tc${i}_fault`];
-    const live = sample.ed593_connected === true && !sample.ed593_transport_error;
-    for (const value of [`TC ${i}`, live ? numberValue(sample, `ed593_tc${i}_temperature_c`, 2) : "--",
+    const reading = thermocoupleReading(sample, `tc${i}`);
+    for (const value of [`TC${i}`, reading.value === null ? "--" : reading.value.toFixed(2),
                          enabled === true ? "Yes" : enabled === false ? "No" : "Unknown",
                          fault === true ? "Yes" : fault === false ? "No" : "Unknown"]) {
       const cell = document.createElement("td");
@@ -1767,6 +1884,7 @@ export const API = Object.freeze({
   stopRun: "/api/run/stop",
   exportLatest: "/api/export/latest",
   metadata: "/api/metadata",
+  thermocouples: "/api/thermocouples",
   experimentLoad: "/api/experiment/load",
   experimentStart: "/api/experiment/start",
   experimentExample: "/api/experiment/record-motor-solenoids.csv",
@@ -1794,7 +1912,11 @@ async function request(url, payload) {
   let data;
   try { data = JSON.parse(text); }
   catch { throw new Error(text || `${response.status} ${response.statusText}`); }
-  if (!response.ok) throw new Error(data?.error || text || String(response.status));
+  if (!response.ok) {
+    const error = new Error(data?.error || text || String(response.status));
+    error.outcome = data?.outcome;
+    throw error;
+  }
   return data;
 }
 export const getJson = url => request(url);
@@ -2022,6 +2144,7 @@ export async function startDashboard() {
     getHistory: () => state.history
   });
   const experiment = createExperimentComponent();
+  const thermocouples = createThermocoupleComponent({descriptors: operationalConfig.thermocouples || []});
 
   let chartFrame = null;
   function scheduleCharts() {
@@ -2038,6 +2161,7 @@ export async function startDashboard() {
     toolbar.renderSample(state.latest);
     renderMetrics(state.latest, metadata?.powderFlowRateGPerS());
     measurements.render(state.latest);
+    thermocouples.render(state.latest);
     renderSources(state.latest, state.history.length);
     stepper.render(state.latest);
     scheduleCharts();

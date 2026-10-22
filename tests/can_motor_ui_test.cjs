@@ -57,7 +57,9 @@ async function browserChecks() {
         throw Error('Simulated transport loss');
       }
       sample = {...sample, stepper_can_motor_command_sequence: sample.stepper_can_motor_command_sequence + 1};
-      if (body.rpm === 0) sample = {...sample, stepper_can_motor_manual_token: 0,
+      if (body.rpm === 0 && body.action === 'update' && sample.stepper_can_motor_ramped_stop_capable)
+        sample = {...sample, stepper_can_motor_target_rpm: 0};
+      else if (body.rpm === 0) sample = {...sample, stepper_can_motor_manual_token: 0,
         stepper_can_motor_active: false, stepper_can_motor_target_rpm: 0};
       else sample = {...sample, stepper_can_motor_manual_token: body.token,
         stepper_can_motor_active: true, stepper_can_motor_target_rpm: body.rpm};
@@ -91,14 +93,16 @@ async function browserChecks() {
     check(element('target') && element('measured'), 'separate target and measured RPM readouts');
     check(!element('target').closest('details') && !element('measured').closest('details'),
       'primary RPM readouts remain visible');
-    check(!fieldset.querySelector('details').open, 'CAN diagnostics starts collapsed');
-    for (const key of ['electrical', 'health', 'rampHint', 'diagnostic']) {
-      check(Boolean(element(key)?.closest('details')), `${key} stays inside diagnostics`);
-    }
+    check(!fieldset.querySelector('details'), 'motor readings have no collapsible diagnostics');
+    check(element('electrical').getBoundingClientRect().height > 0,
+      'current and temperature are always visible');
+    check(element('electrical').textContent === '0.00 A / 28 °C',
+      'current and temperature display live values with units');
+    check(!element('health') && !element('rampHint') && !element('diagnostic'),
+      'motor panel omits fault, feedback age, acceleration and protocol diagnostic text');
     check(!/Negative RPM reverses|Leaving this tab|losing communication also releases/.test(fieldset.textContent),
       'no persistent instruction paragraph or obsolete focus-stop claim');
     check(!element('ramp') && !/Run duration/.test(fieldset.textContent), 'no extra ramp or duration input');
-    check(/80 RPM\/s/.test(element('rampHint').textContent), 'fixed ramp remains available in diagnostics');
     check(canMotorStatus(sample).ready === true, 'shared status reports ready telemetry');
     check(auxMotorKind({}) === 'cubemars', 'missing kind defaults to CubeMars');
     apply({stepper_aux_kind: undefined, stepper_connected: false});
@@ -145,9 +149,12 @@ async function browserChecks() {
     const update = requests.find(body => body.action === 'update');
     check(update.token === first.token && update.rpm === -3 && update.ramp_rpm_s === 80,
       'Apply preserves ownership and sends the new signed target');
-    apply({stepper_can_motor_rpm: 12.5});
+    apply({stepper_can_motor_rpm: 12.5, stepper_can_motor_current_a: 1.25,
+      stepper_can_motor_temperature_c: 35});
     check(element('target').textContent.includes('-3') && element('measured').textContent.includes('12.5'),
       'accepted target and actual measured speed remain distinct');
+    check(element('electrical').textContent === '1.25 A / 35 °C',
+      'persistent current and temperature update with telemetry');
     await settledStop();
     const stopped = requests.length;
     await sleep(350);
@@ -188,6 +195,7 @@ async function browserChecks() {
     await start();
     apply({stepper_can_motor_feedback_age_ms: 1000});
     check(run.disabled && !owned(), 'stale feedback ends UI ownership');
+    check(element('electrical').textContent === '— / —', 'stale electrical readings are unavailable');
     const staleCount = requests.length;
     apply({stepper_can_motor_feedback_age_ms: 0, stepper_can_motor_active: false, stepper_can_motor_manual_token: 0});
     await sleep(350);
@@ -214,8 +222,6 @@ async function browserChecks() {
       stepper_can_motor_diag_srec: 0, stepper_can_motor_diag_sg: 12500});
     check(canMotorStatus(sample).text === 'Motor ready' && canMotorStatus(sample).tone === 'ok',
       'shared status reflects recovered current health');
-    check(/receive buffer overflow/.test(element('diagnostic').textContent), 'historical stop cause stays inside diagnostics');
-    check(/Flags 0x40; slow read 0x40/.test(element('diagnostic').textContent), 'detailed flags remain in diagnostics');
 
     apply({stepper_can_motor_ramped_stop_capable: true});
     await start();
@@ -238,7 +244,7 @@ async function browserChecks() {
       main.style.width = `${width}px`;
       await sleep(30);
       check(fieldset.scrollWidth <= fieldset.clientWidth + 1, `panel does not overflow at ${width}px`);
-      for (const key of ['rpm', 'run', 'release', 'target', 'measured']) {
+      for (const key of ['rpm', 'run', 'release', 'target', 'measured', 'electrical']) {
         const inner = element(key).getBoundingClientRect(), outer = fieldset.getBoundingClientRect();
         check(inner.left >= outer.left - 1 && inner.right <= outer.right + 1, `${key} stays inside ${width}px panel`);
       }

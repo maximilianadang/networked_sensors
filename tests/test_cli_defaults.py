@@ -28,6 +28,29 @@ class CliDefaultsTests(unittest.TestCase):
         settings = self.parse()
         self.assertEqual(settings.stepper_source, "controllino")
         self.assertEqual(settings.esp32_source, "off")
+        self.assertEqual(settings.ed593_source, "real")
+        self.assertEqual(settings.ed593_host, "10.77.0.11")
+        self.assertEqual(settings.stepper_timeout, 5.0)
+
+    def test_network_address_defaults_follow_selected_transport(self):
+        for kind, address, adapter in (
+                ('controllino', core.DEFAULT_CONTROLLINO_NETWORK_URL, core.ControllinoStepperSource),
+                ('network', core.DEFAULT_STEPPER_NETWORK_URL, core.NetworkStepperSource)):
+            with self.subTest(source=kind):
+                settings = self.parse(('--stepper-source', kind))
+                sources = core.make_sources(stepper_source=settings.stepper_source,
+                                            stepper_network_url=settings.stepper_url)
+                source = next(source for source in sources if source.name=='stepper')
+                self.assertIsInstance(source, adapter)
+                self.assertEqual(source.base_url, address)
+                source.close()
+
+    def test_explicit_network_addresses_survive_cli_and_environment(self):
+        self.assertEqual(self.parse(environment={'CONTROLLINO_URL':'tcp://10.77.0.12:80'}).stepper_url,
+                         'tcp://10.77.0.12:80')
+        self.assertEqual(self.parse(('--stepper-url', 'tcp://10.77.0.13:81'),
+                                    {'CONTROLLINO_URL':'http://10.77.0.10'}).stepper_url,
+                         'tcp://10.77.0.13:81')
 
     def test_controllino_usb_discovers_by_default_and_preserves_explicit_port(self):
         self.assertEqual(self.parse(("--stepper-source", "controllino-usb")).stepper_port, "auto")

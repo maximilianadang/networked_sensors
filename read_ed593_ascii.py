@@ -13,11 +13,11 @@ import socket
 import threading
 import time
 
-DEFAULT_HOST = "10.77.0.11"  # Proposed bench address, not an assigned device IP.
+DEFAULT_HOST = "10.77.0.11"  # Bench ED-593, MAC 00:0A:4F:06:4F:91.
 DEFAULT_PORT = 9500
 CHANNELS = tuple(f"tc{i}" for i in range(8))
 EXPECTED_FIELDS = ("ed593_transport_error", "ed593_model", "ed593_format", "ed593_enabled_mask",
-                   "ed593_diagnostic_mask") + tuple(
+                   "ed593_diagnostic_mask", "ed593_discovered_mask") + tuple(
     f"ed593_{channel}_{suffix}" for channel in CHANNELS
     for suffix in ("temperature_c", "enabled", "fault", "ready")
 )
@@ -93,11 +93,18 @@ class Ed593Client:
                 raise ValueError("Invalid ED-593 channel mask reply")
             masks.append(int(reply[-2:], 16))
         reply = self.query(f"#{self.address:02X}")
+        # Disabled channels are omitted; enabled channels appear in channel order.
         # Signed decimal fields are concatenated without separators.
         fields = re.findall(r"[+-]\d+\.\d+", reply[1:])
-        if not reply.startswith(">") or len(fields) != 8 or "".join(fields) != reply[1:]:
-            raise ValueError("Expected eight signed Celsius values from ED-593")
-        return channel_values([float(value) for value in fields], *masks)
+        enabled_mask, diagnostic_mask = masks
+        if (not reply.startswith(">") or len(fields) != enabled_mask.bit_count()
+                or "".join(fields) != reply[1:]):
+            raise ValueError("Expected one signed Celsius value per enabled ED-593 channel")
+        readings = iter(float(value) for value in fields)
+        # Placeholders for disabled channels are masked to None by channel_values.
+        temperatures = [next(readings) if enabled_mask & (1 << index) else 0.0
+                        for index in range(8)]
+        return channel_values(temperatures, enabled_mask, diagnostic_mask)
 
 
 def channel_values(temperatures, enabled_mask, diagnostic_mask):
@@ -131,6 +138,7 @@ class RealEd593Source:
         self._stop = threading.Event()
         self._thread = None
         self._values = None
+        self._discovered_mask = None
         self._generation = self._emitted = 0
         self._received_at = None
 
@@ -143,6 +151,11 @@ class RealEd593Source:
                 self.last_error = str(exc)
             return
         with self._lock:
+            # Discover once per source lifetime, after the first successful read.
+            # Keep reading the live mask to decode omitted channels correctly.
+            if self._discovered_mask is None:
+                self._discovered_mask = values["ed593_enabled_mask"]
+            values["ed593_discovered_mask"] = self._discovered_mask
             self._values = values
             self._received_at = time.monotonic()
             self._generation += 1
@@ -188,4 +201,5 @@ class SimulatedEd593Source:
             return None
         self._next = elapsed_s + self.period_s
         values = channel_values([25 + i + math.sin(elapsed_s / 10) for i in range(8)], 0x0F, 0)
+        values["ed593_discovered_mask"] = 0x0F
         return SourceReading(self.name, self.mode, elapsed_s, values)

@@ -228,6 +228,72 @@ class BackendTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "rejected Stop: wrong_mode"):
             receipt.confirmed(fresh)
 
+    def test_mode_uses_actual_state_after_http_acknowledgement_timeout(self):
+        runtime = self.runtime()
+        send = self.stepper._write_command
+        def accepted_without_ack(command, description):
+            send(command, description)  # Firmware applied the mode request.
+            raise core.CommandNotConfirmedError('acknowledgement timed out')
+        with patch.object(self.stepper, '_write_command', side_effect=accepted_without_ack):
+            result = runtime.set_stepper_control_mode({'web_position': False})
+        self.assertTrue(result['confirmed'])
+        self.assertEqual(result['stepper']['stepper_control_mode'], 'local_velocity')
+        self.assertEqual(self.stepper.commands, [b'V1 M0\n'])  # Never resend automatically.
+
+    def test_missing_mode_confirmation_has_an_uncertain_outcome(self):
+        runtime = self.runtime()
+        with patch.object(self.stepper, '_write_command', side_effect=core.CommandNotConfirmedError('ack timed out')), \
+             patch.object(app.time, 'monotonic', side_effect=[0, 0, 2]):
+            with self.assertRaises(core.CommandNotConfirmedError) as raised:
+                runtime.set_stepper_control_mode({'web_position': False})
+        self.assertEqual(raised.exception.outcome, 'unconfirmed')
+        self.assertEqual(self.stepper.status()['stepper_control_mode'], 'web_position')
+
+    def test_network_ack_timeout_and_explicit_rejection_remain_distinct(self):
+        from urllib.error import URLError
+        source = core.NetworkStepperSource()
+        with patch.object(source._opener, 'open', side_effect=URLError('timed out')):
+            with self.assertRaises(core.CommandNotConfirmedError):
+                source._write_command(b'V1 M0\n', 'mode')
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'{"error":"busy"}'
+        with patch.object(source._opener, 'open', return_value=response):
+            with self.assertRaisesRegex(RuntimeError, 'rejected: busy') as rejected:
+                source._write_command(b'V1 M0\n', 'mode')
+        self.assertNotIsInstance(rejected.exception, core.CommandNotConfirmedError)
+        self.assertEqual(source.pending_command_error, 'busy')
+
+    def test_unrecognized_network_acknowledgement_is_not_a_controller_rejection(self):
+        source = core.NetworkStepperSource()
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = b'{"unexpected":"response"}'
+        with patch.object(source._opener, 'open', return_value=response):
+            with self.assertRaises(core.CommandNotConfirmedError):
+                source._write_command(b'V1 M0\n', 'mode')
+        self.assertIsNone(source.pending_command_error)
+
+    def test_mode_http_timeout_reports_unconfirmed_without_claiming_failure(self):
+        runtime = self.runtime()
+        handler = build_handler(runtime)
+        payload = b'{"web_position":false}'
+        class Connection:
+            response = bytearray()
+            def makefile(self, *args):
+                return BytesIO(b'POST /api/stepper/control-mode HTTP/1.0\r\nContent-Type: application/json\r\n' +
+                               f'Content-Length: {len(payload)}\r\n\r\n'.encode() + payload)
+            def sendall(self, data):
+                self.response.extend(data)
+        connection = Connection()
+        with patch.object(runtime, 'set_stepper_control_mode', side_effect=core.CommandNotConfirmedError('acknowledgement timed out')):
+            handler(connection, ('127.0.0.1', 0), None)
+        headers, body = bytes(connection.response).split(b'\r\n\r\n', 1)
+        self.assertIn(b'409', headers)
+        self.assertEqual(json.loads(body), {'error': 'acknowledgement timed out', 'outcome': 'unconfirmed'})
+
     def test_unconfirmed_servo_does_not_save_settings(self):
         runtime = self.runtime()
         self.stepper.apply = False
@@ -463,10 +529,43 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(request("POST", "/api/stepper/servo", {"action": "endpoint"})[0], 409)
         self.assertEqual(request("POST", "/api/stepper/move", {"distance_mm": True})[0], 400)
         self.assertEqual(request("POST", "/api/metadata", {"sample_number": "test"})[0], 200)
+        status, saved = request("POST", "/api/thermocouples", {"tc0":"Heater"})
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["thermocouples"][0], {"device":"tc0", "label":"TC-0", "component":"Heater"})
+        self.assertEqual(request("POST", "/api/thermocouples", {"tc8":"Invalid"})[0], 400)
         self.assertEqual(request("POST", "/api/solenoid/toggle?n=0")[0], 200)
         self.assertTrue(runtime.recording)
         self.assertEqual(request("POST", "/api/run/stop")[0], 200)
         self.assertTrue(runtime.latest_export_path().exists())
+
+    def test_thermocouple_names_update_recording_metadata_and_survive_restart(self):
+        runtime = self.runtime()
+        runtime.set_recording(True)
+        runtime.set_thermocouple_components({'tc0':'Heater', 'tc3':'Outlet', 'tc6':'Added probe'})
+        self.assertEqual(len(runtime.dashboard_config()['thermocouples']), 8)
+        self.assertEqual(runtime.dashboard_config()['thermocouples'][3]['component'], 'Outlet')
+        self.assertEqual(runtime.state()['metadata']['ed593_tc0_component'], 'Heater')
+        saved = json.loads(runtime.recorder.paths.metadata_json.read_text())
+        self.assertEqual(saved['metadata']['ed593_tc3_component'], 'Outlet')
+        self.assertEqual(saved['metadata']['ed593_tc6_component'], 'Added probe')
+        runtime.update_metadata({'sample_number':'named-probes'})
+        self.assertEqual(runtime.state()['metadata']['ed593_tc0_component'], 'Heater')
+        runtime.set_recording(False)
+        restarted = self.runtime()
+        self.assertEqual(restarted.dashboard_config()['thermocouples'][0]['component'], 'Heater')
+        self.assertEqual(restarted.state()['metadata']['ed593_tc3_component'], 'Outlet')
+        self.assertEqual(restarted.dashboard_config()['thermocouples'][6],
+                         {'device':'tc6', 'label':'TC-6', 'component':'Added probe'})
+        self.assertEqual(self.stepper.commands, [])
+
+    def test_failed_thermocouple_name_save_preserves_runtime_and_metadata(self):
+        runtime = self.runtime()
+        before = runtime.state()['metadata']
+        with patch.object(runtime.system_config, '_write_atomic', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(RuntimeError, 'Could not save thermocouple names'):
+                runtime.set_thermocouple_components({'tc0':'Unsaved'})
+        self.assertEqual(runtime.state()['metadata'], before)
+        self.assertEqual(runtime.dashboard_config()['thermocouples'][0]['component'], '')
 
     def test_experiment_http_load_start_and_stream_remain_read_only(self):
         runtime = self.runtime()

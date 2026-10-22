@@ -1,7 +1,9 @@
-# Controllino IO (firmware 1.5.8)
+# Controllino IO (firmware 1.6.0)
 
 All three motor builds use the LinACE encoder and expanded IO by default.
-The existing USB/Ethernet protocol and motor commands remain compatible.
+USB and Ethernet share the same V1 motor commands and compact JSON telemetry.
+Native Ethernet now uses a persistent TCP stream; install firmware 1.6.0 before
+using the updated Ethernet dashboard. USB remains compatible with older firmware.
 STEP uses Timer3 hardware PWM on X1 DO1 / Arduino D3 (OC3C), approximately
 50% duty, with the existing 250 ms driver-enable delay. Interrupts count falling
 edges and stop a positional move at the final period boundary; they do not
@@ -77,6 +79,45 @@ total remains gated by physical R5 (now logical solenoid 3). Channel labels,
 charts, calibration and recording metadata share
 the definitions in `controllino_io.py`.
 
+## Ethernet stream
+
+Run the dashboard with `--stepper-source controllino`. Its address defaults to
+`tcp://10.77.0.10:80`; override it with `--stepper-url` or `CONTROLLINO_URL`.
+An existing `http://host[:port]` setting is accepted as an address alias and
+uses the same TCP stream. The native controller no longer serves HTTP
+`/status` or `/command` endpoints. The legacy Yún HTTP bridge is unchanged;
+select it with `--stepper-source network` (default `http://arduino.local:8080`).
+
+One background worker owns the persistent connection and receives telemetry
+while command callers await acknowledgement. Newline-delimited requests use
+`@<id> V1 <command>`, with a positive 31-bit request ID. For example:
+
+```text
+@17 V1 M1
+{"v":1,"t":"a","ok":1,"id":17,"e":"none"}
+```
+
+The existing actual-state confirmation still follows acknowledgement. Telemetry
+advertises `net:"tcp"`; old firmware is not treated as a working stream source.
+An absent acknowledgement is an unknown outcome, whereas `ok:0` is an explicit
+rejection. The host reconnects after disconnection, discards pending commands
+and never replays them. Commands are not automatically retried. Request queues
+are bounded; a full queue rejects additional dispatch rather than accumulating
+late actuator requests. `--stepper-timeout` defaults to five seconds for network
+I/O and loss of stream telemetry; spreadsheet feedback deadlines remain separate.
+
+Firmware services USB and Ethernet cooperatively, without waiting for serial
+buffer space, TCP send completion or graceful connection teardown. Two replies
+and one telemetry frame per transport bound memory use; a slow output coalesces
+telemetry updates instead of queuing a history. Overflow discards a telemetry
+frame rather than sending truncated JSON; replies never interleave with a
+partially sent frame. The Ethernet library's WIZnet send/close adaptation
+is isolated in `ethernet_stream.h`; shared framing is in `stream_io.h`.
+Motion, limit checks, encoder acquisition and CAN lease/fault handling retain
+their existing behavior. Upload through direct USB if the USB extender cannot
+complete outbound transfers. The operator launches the dashboard after updating
+the firmware and restarting the backend.
+
 ## CubeMars manual control
 
 There is no configured 400 RPM operating cap. The firmware advertises the
@@ -114,7 +155,8 @@ rows with an explicit `duration_s` retain their timed-run behavior.
 For requested-state rows, `timeout_s` starts when the transport has sent the
 command, not when the row begins. Queueing, command preparation and the initial
 freshness/health gate have no CSV feedback deadline. USB marks a complete serial
-write; HTTP marks the complete request before awaiting its response. Multiple
+write; TCP marks the complete command frame; HTTP marks the complete request
+before awaiting its response. Multiple
 compatible targets begin their shared feedback window after the last command
 has been sent. Transport exceptions still fail immediately; this does not add
 command retries. Read-only check deadlines and `wait` timing still start at row

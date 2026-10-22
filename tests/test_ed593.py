@@ -40,8 +40,8 @@ class FakeSocket:
 
 
 def replies(**changes):
-    values = {"$01M0": "!01ED-593", "$012": "!01600680", "$016": "!010F", "$01B": "!0100",
-              "#01": ">-001.50+025.00+030.00+100.00+000.00+000.00+000.00+000.00"}
+    values = {"$01M0": "!01ED-593", "$012": "!010F0600", "$016": "!010F", "$01B": "!0100",
+              "#01": ">-001.50+025.00+030.00+100.00"}
     values.update(changes)
     return values
 
@@ -72,11 +72,37 @@ class Ed593Tests(unittest.TestCase):
         self.assertIsNone(values["ed593_tc7_temperature_c"])
         self.assertTrue(connection.closed)
 
+    def test_omitted_channels_preserve_physical_channel_numbers(self):
+        connection = FakeSocket(replies(**{"$016": "!01A5", "$01B": "!0104"}))
+        with patch("read_ed593_ascii.socket.create_connection", return_value=connection):
+            with Ed593Client("device") as client:
+                values = client.read()
+        self.assertEqual(values["ed593_tc0_temperature_c"], -1.5)
+        self.assertIsNone(values["ed593_tc1_temperature_c"])
+        self.assertTrue(values["ed593_tc2_fault"])
+        self.assertIsNone(values["ed593_tc2_temperature_c"])
+        self.assertEqual(values["ed593_tc5_temperature_c"], 30)
+        self.assertEqual(values["ed593_tc7_temperature_c"], 100)
+
+    def test_live_firmware_833_replies_before_and_after_disabling_empty_inputs(self):
+        for enabled, faults, readings in (
+                ("FF", "F0", "+0018.44+0018.40+0019.50+0023.81" + "+9999.9" * 4),
+                ("0F", "00", "+0018.80+0018.88+0020.04+0023.84")):
+            with self.subTest(enabled=enabled):
+                connection = FakeSocket(replies(**{"$016": "!01" + enabled,
+                    "$01B": "!01" + faults, "#01": ">" + readings}))
+                with patch("read_ed593_ascii.socket.create_connection", return_value=connection):
+                    with Ed593Client("device") as client:
+                        values = client.read()
+                self.assertTrue(all(values[f"ed593_tc{i}_ready"] for i in range(4)))
+                self.assertTrue(all(values[f"ed593_tc{i}_temperature_c"] is None for i in range(4, 8)))
+
     def test_rejects_wrong_units_checksum_config_and_ambiguous_replies(self):
         for changes in ({"$01M0": "!01ED-549"}, {"$012": "!01600684"}, {"$012": "!01600683"},
                         {"$012": "!016006C0"}, {"$012": "!02600680"},
                         {"$016": "!01100"}, {"$01B": "?01"},
                         {"#01": ">+025.00"}, {"#01": ">nan"},
+                        {"#01": ">" + "+025.00" * 8},
                         {"#01": ">" + "+025.00" * 8 + "junk"}):
             with self.subTest(changes=changes):
                 connection = FakeSocket(replies(**changes))
@@ -138,11 +164,43 @@ class Ed593Tests(unittest.TestCase):
         merger = SourceMerger(sources, stale_after_s=0.5)
         row = merger.poll(0, datetime.now(timezone.utc))
         self.assertTrue(row["ed593_connected"])
+        self.assertEqual(row["ed593_discovered_mask"], 0x0F)
         self.assertTrue(row["ed593_tc0_ready"])
         self.assertFalse(row["ed593_tc7_ready"])
         row = merger.poll(0.6, datetime.now(timezone.utc))
         self.assertFalse(row["ed593_connected"])
         self.assertEqual(row["ed593_age_ms"], 600)
+
+    def test_discovery_waits_for_success_and_survives_changes_until_restart(self):
+        for initial_mask in (0, 0xA5):
+            with self.subTest(initial_mask=initial_mask):
+                source = RealEd593Source()
+                restarted = RealEd593Source()
+                source._thread = restarted._thread = Mock()  # No hardware worker.
+                initial = channel_values([25.0] * 8, initial_mask, 0x04)
+                changed = channel_values([30.0] * 8, 0xCF, 0)
+                client = Mock()
+                client.__enter__ = Mock(return_value=client)
+                client.__exit__ = Mock(return_value=False)
+                client.read.side_effect = [OSError("not ready"), initial,
+                                           OSError("disconnected"), changed, dict(changed)]
+                with patch("read_ed593_ascii.Ed593Client", return_value=client):
+                    source._fetch()
+                    self.assertIsNone(source.poll(0))
+                    source._fetch()
+                    first = source.poll(1).values
+                    self.assertEqual(first["ed593_discovered_mask"], initial_mask)
+                    source._fetch()
+                    self.assertIn("disconnected", source.last_error)
+                    self.assertIsNone(source.poll(2))
+                    source._fetch()
+                    current = source.poll(3).values
+                    self.assertEqual(current["ed593_discovered_mask"], initial_mask)
+                    self.assertEqual(current["ed593_enabled_mask"], 0xCF)
+                    self.assertEqual(current["ed593_tc0_temperature_c"], 30.0)
+                    self.assertFalse(current["ed593_tc2_fault"])
+                    restarted._fetch()
+                    self.assertEqual(restarted.poll(0).values["ed593_discovered_mask"], 0xCF)
 
     def test_health_only_requires_selected_channels_and_worksheet_freshness(self):
         action = parse_program(EXAMPLE)[1]

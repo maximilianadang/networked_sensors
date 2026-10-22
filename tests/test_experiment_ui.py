@@ -6,6 +6,14 @@ from pathlib import Path
 
 
 class ExperimentUiTests(unittest.TestCase):
+    def test_thermocouple_readings_and_component_names(self):
+        runtime = shutil.which("gjs")
+        if runtime is None:
+            self.skipTest("GJS is required for the isolated JavaScript component checks")
+        result = subprocess.run([runtime, "-m", str(Path(__file__).with_name("thermocouple_ui_test.mjs"))],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_positional_move_uses_controller_specific_arming(self):
         runtime = shutil.which("gjs")
         if runtime is None:

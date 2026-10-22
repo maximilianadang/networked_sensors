@@ -7,12 +7,15 @@ DeviceControls is the operator-command boundary; adapters below it own I/O."""
 from __future__ import annotations
 
 import json
+from collections import deque
+from concurrent.futures import Future, TimeoutError as FutureTimeout
 from contextlib import contextmanager
 from contextvars import ContextVar
 import math
 import os
 import errno
 import socket
+import select
 import termios
 import threading
 import time
@@ -21,7 +24,7 @@ from http.client import HTTPConnection, HTTPSConnection, HTTPException
 from pathlib import Path
 from typing import BinaryIO, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import urlencode, urlparse
 from urllib.request import HTTPHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 
 from read_ed593_ascii import DEFAULT_HOST as DEFAULT_ED593_HOST, DEFAULT_PORT as DEFAULT_ED593_PORT
@@ -132,7 +135,8 @@ DXMR90_DATA_PATHS = ("direct", "republished")
 DEFAULT_STEPPER_USB_PORT = "/dev/ttyACM0"
 DEFAULT_STEPPER_USB_BAUD = 9600
 DEFAULT_STEPPER_NETWORK_URL = "http://arduino.local:8080"
-DEFAULT_STEPPER_NETWORK_TIMEOUT_S = 0.75
+DEFAULT_CONTROLLINO_NETWORK_URL = "tcp://10.77.0.10:80"
+DEFAULT_STEPPER_NETWORK_TIMEOUT_S = 5.0
 DEFAULT_STEPPER_MM_PER_PULSE = 0.00396875
 DEFAULT_STEPPER_STEPS_PER_MM = 1.0 / DEFAULT_STEPPER_MM_PER_PULSE
 CONTROLLINO_MM_PER_PULSE = 5.08 / 1000  # E09050; SRX SW5–SW8 ON/ON/ON/OFF.
@@ -336,6 +340,12 @@ def validate_servo_settings(values: object) -> dict[str, object]:
     return {"off_pulse_us": zero, "displacement_deg": angle}
 
 
+class CommandNotConfirmedError(RuntimeError):
+    """The controller outcome is unknown; absence of an ACK is not rejection."""
+
+    outcome = "unconfirmed"
+
+
 @dataclass
 class CommandReceipt:
     """Sent command and its device-specific evidence of acceptance.
@@ -405,9 +415,9 @@ class DeviceControls:
             raise RuntimeError("move direction is unavailable")
         # Controllino convention: Forward/up is positive, Reverse/down negative.
         signed_distance = -travel_mm if direction == "reverse" else travel_mm
-        stepper.move(signed_distance, values["speed_mm_s"], values.get("command_id"))
-        # Capture before polling: a telemetry poll can clear the pending ID.
-        expected_id = getattr(stepper, "pending_command_id", None)
+        dispatched = stepper.move(signed_distance, values["speed_mm_s"], values.get("command_id"))
+        # An independent reader may confirm the move before dispatch returns.
+        expected_id = dispatched.get("command_id", getattr(stepper, "pending_command_id", None))
         return self._receipt(
             stepper, current, "the move",
             lambda p: p.get("stepper_command_id") == expected_id
@@ -455,7 +465,12 @@ class DeviceControls:
         if not isinstance(requested, bool):
             raise ValueError("web_position must be true or false")
         mode = "web_position" if requested else "local_velocity"
-        stepper.set_control_mode(requested)
+        try:
+            stepper.set_control_mode(requested)
+        except CommandNotConfirmedError:
+            # The controller may have applied the request before its
+            # acknowledgement was lost. Fresh actual-state telemetry decides.
+            pass
         return self._receipt(
             stepper, current, "the control mode", lambda p: p.get("stepper_control_mode") == mode,
             confirmed=True, requested_control_mode=mode,
@@ -2154,7 +2169,7 @@ class UsbStepperSource:
         self.pending_command_id = resolved_name
         command = f"V1 G{delta_steps},{speed_sps},{wire_id}\n".encode("ascii")
         self._write_command(command, "move")
-        return self.status()
+        return dict(self.status(), command_id=resolved_name)
 
     def _validate_move_authority(
         self,
@@ -2211,6 +2226,25 @@ class UsbStepperSource:
             if resolved == self.pending_command_id:
                 self.pending_command_id = None
 
+    def _receive_ack(self, payload: dict[str, object]) -> None:
+        self.pending_command_error = None if payload.get("ok") == 1 else str(payload.get("e", "rejected"))
+
+    def _decode_stream_line(self, raw: bytes) -> dict[str, float | int | bool | str | None] | None:
+        """One V1 line decoder shared by serial and native TCP transports."""
+        line = raw.decode("utf-8", errors="replace").strip()
+        if line.startswith("Command rejected:"):
+            self.pending_command_error = line.removeprefix("Command rejected:").strip()
+            return None
+        if not line.startswith("{"):
+            return None
+        payload = json.loads(line)
+        if isinstance(payload, dict) and payload.get("v") == 1 and payload.get("t") == "a":
+            self._receive_ack(payload)
+            return None
+        values = self.decode_status_line(line)
+        self._resolve_command_id(values)
+        return values
+
     def poll(self, elapsed_s: float) -> SourceReading | None:
         if not self._open(elapsed_s):
             return None
@@ -2232,26 +2266,13 @@ class UsbStepperSource:
 
         while b"\n" in self._buffer:
             raw_line, self._buffer = self._buffer.split(b"\n", 1)
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if line.startswith("Command rejected:"):
-                self.pending_command_error = line.removeprefix(
-                    "Command rejected:"
-                ).strip()
-                continue
-            if not line.startswith("{"):
-                continue
             try:
-                payload = json.loads(line)
-                if isinstance(payload, dict) and payload.get("v") == 1 and payload.get("t") == "a":
-                    self.pending_command_error = (
-                        None if payload.get("ok") == 1 else str(payload.get("e", "rejected"))
-                    )
-                    continue
-                latest = self.decode_status_line(line)
+                values = self._decode_stream_line(raw_line)
             except ValueError as exc:
                 self.last_error = str(exc)
                 continue
-            self._resolve_command_id(latest)
+            if values is not None:
+                latest = values
         if latest is None:
             return None
         self.last_error = None
@@ -2259,7 +2280,60 @@ class UsbStepperSource:
         return SourceReading(self.name, self.mode, elapsed_s, latest)
 
 
-class NetworkStepperSource(UsbStepperSource):
+class BackgroundStepperSource(UsbStepperSource):
+    """Shared status cache and lifecycle for transports with an independent reader."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._state_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._generation = self._emitted_generation = 0
+
+    def _transport_connected(self) -> bool:
+        with self._state_lock:
+            return self._last_values is not None and self.last_error is None
+
+    def _require_connected(self) -> dict[str, float | int | bool | str | None]:
+        with self._state_lock:
+            if self._last_values is None or self.last_error is not None:
+                raise RuntimeError(f"{self.mode} stepper is not connected")
+            return dict(self._last_values)
+
+    def _ensure_started(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, name=f"{self.mode}-stepper-source", daemon=True)
+        self._thread.start()
+
+    def _set_error(self, message: str | None) -> None:
+        with self._state_lock:
+            self.last_error = message
+
+    def status(self) -> Mapping[str, float | int | bool | str | None]:
+        with self._state_lock:
+            values = dict(super().status())
+            if self._last_values is None:
+                values["stepper_control_owner"] = "none"
+            return values
+
+    def poll(self, elapsed_s: float) -> SourceReading | None:
+        self._ensure_started()
+        with self._state_lock:
+            if self._last_values is None or self._generation == self._emitted_generation:
+                return None
+            values = dict(self._last_values)
+            self._emitted_generation = self._generation
+        return SourceReading(self.name, self.mode, elapsed_s, values)
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, self.timeout + self.period_s))
+
+
+class NetworkStepperSource(BackgroundStepperSource):
     """Poll and command the Yún Linux UART bridge over its trusted-LAN API.
 
     The Linux service only relays the existing bounded ``V1`` command lines and
@@ -2285,21 +2359,10 @@ class NetworkStepperSource(UsbStepperSource):
         if timeout <= 0:
             raise ValueError("stepper network timeout must be positive")
 
+        super().__init__()
         self.base_url = normalized_url
         self.timeout = timeout
-        self.last_error: str | None = None
-        self._last_values: dict[str, float | int | bool | str | None] | None = None
-        self._next_command_id = 1
-        self._command_names: dict[int, str] = {}
-        self.pending_command_id: str | None = None
-        self.pending_command_error: str | None = None
-        self._command_lock = threading.Lock()
         self._opener = build_opener(ProxyHandler({}), _ObservedHTTPHandler(), _ObservedHTTPSHandler())
-        self._state_lock = threading.Lock()
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._generation = 0
-        self._emitted_generation = 0
 
     def _decode_network_status(
         self, body: str
@@ -2330,25 +2393,6 @@ class NetworkStepperSource(UsbStepperSource):
         if isinstance(payload, dict) and isinstance(payload.get("error"), str):
             return str(payload["error"])
         return "invalid acknowledgement"
-
-    def _transport_connected(self) -> bool:
-        with self._state_lock:
-            return self._last_values is not None and self.last_error is None
-
-    def _ensure_started(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run,
-            name=f"{self.mode}-stepper-network-source",
-            daemon=True,
-        )
-        self._thread.start()
-
-    def _set_error(self, message: str | None) -> None:
-        with self._state_lock:
-            self.last_error = message
 
     def _fetch_status(self) -> None:
         url = f"{self.base_url}{self.status_path}"
@@ -2384,26 +2428,6 @@ class NetworkStepperSource(UsbStepperSource):
             if self._stop_event.wait(self.period_s):
                 break
 
-    def status(self) -> Mapping[str, float | int | bool | str | None]:
-        with self._state_lock:
-            if self._last_values is not None:
-                values = dict(self._last_values)
-            else:
-                values = {field: None for field in self.expected_fields}
-                values["stepper_command_capable"] = False
-                values["stepper_speed_command_capable"] = False
-                values["stepper_direction_command_capable"] = False
-                values["stepper_mode_command_capable"] = False
-                values["stepper_home_capable"] = False
-                values["stepper_estop_capable"] = False
-                values["stepper_estop_latched"] = False
-                values["stepper_brushless_motor_capable"] = False
-                values["stepper_brushless_motor_variable_capable"] = False
-                values["stepper_brushless_motor_on"] = False
-                values["stepper_control_owner"] = "none"
-            values["stepper_transport_error"] = self.last_error
-        return values
-
     def _write_command(self, command: bytes, description: str) -> None:
         command_text = command.decode("ascii").strip()
         request = self._command_request(command_text)
@@ -2437,11 +2461,13 @@ class NetworkStepperSource(UsbStepperSource):
                 json.JSONDecodeError,
             ) as exc:
                 self._set_error(f"{url}: {exc}")
-                raise RuntimeError(
-                    f"network stepper {description} command failed: {exc}"
+                raise CommandNotConfirmedError(
+                    f"network stepper {description} acknowledgement not received: {exc}"
                 ) from exc
 
             acknowledgement_error = self._acknowledgement_error(acknowledgement)
+            if acknowledgement_error == "invalid acknowledgement":
+                raise CommandNotConfirmedError(f"network stepper {description} acknowledgement was not recognized")
             if acknowledgement_error is not None:
                 self.pending_command_error = acknowledgement_error
                 raise RuntimeError(
@@ -2450,22 +2476,192 @@ class NetworkStepperSource(UsbStepperSource):
                 )
             self._set_error(None)
 
-    def poll(self, elapsed_s: float) -> SourceReading | None:
-        self._ensure_started()
+
+@dataclass
+class _StreamRequest:
+    identity: int
+    frame: bytes
+    sent: Future = field(default_factory=Future)
+    acknowledged: Future = field(default_factory=Future)
+    offset: int = 0
+
+
+class TcpStepperSource(BackgroundStepperSource):
+    """One persistent V1 stream; its worker owns reads and bounded queued writes.
+
+    Commands are never replayed after reconnect. Acknowledgements are correlated
+    by request ID; actual state is confirmed by DeviceControls as for serial.
+    """
+
+    mode = "tcp"
+    MAX_PENDING = 16
+    MAX_LINE = 8192
+
+    def __init__(self, base_url: str = DEFAULT_CONTROLLINO_NETWORK_URL,
+                 timeout: float = DEFAULT_STEPPER_NETWORK_TIMEOUT_S) -> None:
+        parsed = urlparse(base_url)
+        if (parsed.scheme not in ("tcp", "http") or not parsed.hostname
+                or parsed.path not in ("", "/") or parsed.query or parsed.fragment
+                or parsed.username or parsed.password):
+            raise ValueError("Controllino stream address must be tcp://host:port")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("stepper network timeout must be finite and positive")
+        super().__init__()
+        port = 80 if parsed.port is None else parsed.port
+        if not 1 <= port <= 65535:
+            raise ValueError("Controllino stream port must be between 1 and 65535")
+        self.address = (parsed.hostname, port)
+        self.base_url = f"tcp://{parsed.netloc}"
+        self.timeout = timeout
+        self._socket: socket.socket | None = None
+        self._requests: dict[int, _StreamRequest] = {}
+        self._outbound: deque[_StreamRequest] = deque()
+        self._next_request_id = 1
+
+    def _disconnect_stream(self, message: str) -> None:
         with self._state_lock:
-            if (
-                self._last_values is None
-                or self._generation == self._emitted_generation
-            ):
-                return None
-            values = dict(self._last_values)
-            self._emitted_generation = self._generation
-        return SourceReading(self.name, self.mode, elapsed_s, values)
+            connection, self._socket = self._socket, None
+            pending = list(self._requests.values())
+            self._requests.clear()
+            self._outbound.clear()
+            # Keep measured values for value-only reading checks. last_error
+            # makes this disconnected and prevents commands using cached state.
+            self.last_error = message
+        if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        for request in pending:
+            for future in (request.sent, request.acknowledged):
+                if not future.done():
+                    future.set_exception(CommandNotConfirmedError(message))
+
+    def _validate_stream_status(self, values: Mapping[str, object]) -> None:
+        pass
+
+    def _receive_ack(self, payload: dict[str, object]) -> None:
+        identity = payload.get("id")
+        if type(identity) is not int:
+            return
+        with self._state_lock:
+            request = self._requests.get(identity)
+            if request is None or request.acknowledged.done():
+                return  # An obsolete or unrelated ACK cannot confirm this request.
+            ok = payload.get("ok")
+            if type(ok) not in (int, bool) or ok not in (0, 1):
+                request.acknowledged.set_exception(CommandNotConfirmedError("unrecognized stream acknowledgement"))
+            elif ok:
+                request.acknowledged.set_result(None)
+            else:
+                error = str(payload.get("e") or "rejected")
+                # Synchronous ACK outcomes belong to this caller. A shared
+                # rejection flag would poison other callers' state receipts.
+                request.acknowledged.set_exception(RuntimeError(f"motion controller rejected command: {error}"))
+
+    def _write_command(self, command: bytes, description: str) -> None:
+        self._require_connected()
+        line = command.rstrip(b"\r\n")
+        if not line.startswith(b"V1 ") or b"\n" in line or b"\r" in line:
+            raise ValueError("A stream request must contain one V1 command")
+        with self._state_lock:
+            if self._socket is None or self.last_error:
+                raise RuntimeError("Controllino TCP stream is disconnected")
+            if len(self._requests) >= self.MAX_PENDING:
+                raise RuntimeError("Controllino command queue is full")
+            identity = self._next_request_id
+            self._next_request_id = 1 if identity == 0x7fffffff else identity + 1
+            frame = f"@{identity} ".encode("ascii") + line + b"\n"
+            if len(frame) > 64:
+                raise ValueError("V1 command exceeds the controller's line capacity")
+            request = _StreamRequest(identity, frame)
+            self._requests[identity] = request
+            self._outbound.append(request)
+            self.pending_command_error = None
+        deadline = time.monotonic() + self.timeout
+        try:
+            request.sent.result(timeout=max(0, deadline-time.monotonic()))
+            _command_sent()  # In the caller's context, after the complete frame was sent.
+            request.acknowledged.result(timeout=max(0, deadline-time.monotonic()))
+        except FutureTimeout as exc:
+            if not request.sent.done():
+                # Cancel a blocked/partial write by abandoning this connection;
+                # it must never execute later or prefix a subsequent command.
+                self._disconnect_stream(f"TCP {description} dispatch timed out")
+            raise CommandNotConfirmedError(f"TCP {description} acknowledgement not received") from exc
+        finally:
+            with self._state_lock:
+                self._requests.pop(identity, None)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            connection = None
+            try:
+                connection = socket.create_connection(self.address, timeout=self.timeout)
+                connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                connection.setblocking(False)
+                with self._state_lock:
+                    if self._stop_event.is_set():
+                        connection.close()
+                        break
+                    self._socket = connection
+                    self.last_error = "Waiting for controller stream telemetry"
+                buffer = b""
+                last_status = time.monotonic()
+                while not self._stop_event.is_set():
+                    with self._state_lock:
+                        if self._socket is not connection:
+                            break
+                        writing = bool(self._outbound)
+                    readable, writable, _ = select.select([connection], [connection] if writing else [], [], .05)
+                    if readable:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            raise ConnectionError("Controller closed the TCP stream")
+                        buffer += chunk
+                        while b"\n" in buffer:
+                            line, buffer = buffer.split(b"\n", 1)
+                            if len(line) > self.MAX_LINE:
+                                raise ValueError("Controller stream frame is too long")
+                            values = self._decode_stream_line(line)
+                            if values is not None:
+                                self._validate_stream_status(values)
+                                with self._state_lock:
+                                    self._last_values = values
+                                    self.last_error = None
+                                    self._generation += 1
+                                last_status = time.monotonic()
+                        if len(buffer) > self.MAX_LINE:
+                            raise ValueError("Controller stream frame is too long")
+                    if writable:
+                        with self._state_lock:
+                            if self._socket is connection and self._outbound:
+                                request = self._outbound[0]
+                                try:
+                                    count = connection.send(request.frame[request.offset:])
+                                    if not count:
+                                        raise ConnectionError("Controller stream write closed")
+                                except BlockingIOError:
+                                    count = 0
+                                request.offset += count
+                                if request.offset == len(request.frame):
+                                    self._outbound.popleft()
+                                    request.sent.set_result(None)
+                    if time.monotonic()-last_status > self.timeout:
+                        raise TimeoutError("Controller telemetry stream timed out")
+            except (OSError, ValueError) as exc:
+                self._disconnect_stream(f"{self.base_url}: {exc}")
+            finally:
+                if connection is not None:
+                    connection.close()
+            if self._stop_event.wait(.5):
+                break
 
     def close(self) -> None:
         self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=max(1.0, self.timeout + self.period_s))
+        self._disconnect_stream("Controller stream closed")
+        super().close()
 
 
 def solenoid_count(stepper_mode: str) -> int:
@@ -2505,7 +2701,7 @@ class ControllinoProtocol:
     mode = "controllino"  # Dashboard behavior depends on the machine, not the cable.
     expected_fields = UsbStepperSource.expected_fields + (
         "stepper_dro_kind", "stepper_pressure_capable", "stepper_pressure_sample_age_ms", "stepper_pressure_sequence",
-        "stepper_firmware_version", "stepper_aux_kind", "stepper_aux_pin",
+        "stepper_firmware_version", "stepper_network_protocol", "stepper_aux_kind", "stepper_aux_pin",
         "stepper_servo_capable", "stepper_servo_enabled", "stepper_servo_pulse_us",
         "stepper_servo_min_us", "stepper_servo_max_us",
         "stepper_servo_release_capable", "stepper_servo_releasing",
@@ -2644,6 +2840,7 @@ class ControllinoProtocol:
         values.update(
             {
                 "stepper_firmware_version": version,
+                "stepper_network_protocol": payload.get("net"),
                 "stepper_aux_kind": kind,
                 "stepper_aux_pin": payload.get("apin"),
                 "stepper_servo_capable": servo,
@@ -2809,34 +3006,12 @@ class ControllinoProtocol:
         return self.status()
 
 
-class ControllinoStepperSource(ControllinoProtocol, NetworkStepperSource):
-    """Direct Ethernet transport for the Controllino MAXI motion firmware."""
+class ControllinoStepperSource(ControllinoProtocol, TcpStepperSource):
+    """Native Ethernet stream; USB and TCP share V1 command/state semantics."""
 
-    status_path = "/status"
-    command_path = "/command"
-
-    def _command_request(self, command_text: str) -> Request:
-        url = f"{self.base_url}{self.command_path}?value={quote(command_text, safe='')}"
-        return Request(
-            url,
-            data=b"",
-            headers={"Accept": "application/json", "Cache-Control": "no-store"},
-            method="POST",
-        )
-
-    @staticmethod
-    def _acknowledgement_error(payload: object) -> str | None:
-        if (
-            isinstance(payload, dict)
-            and payload.get("v") == 1
-            and payload.get("t") == "a"
-        ):
-            if payload.get("ok") in (1, True):
-                return None
-            error = payload.get("e")
-            return str(error) if isinstance(error, str) and error else "rejected"
-        return "invalid acknowledgement"
-
+    def _validate_stream_status(self, values: Mapping[str, object]) -> None:
+        if values.get("stepper_network_protocol") != "tcp":
+            raise ValueError("Native TCP requires Controllino firmware 1.6.0 or newer; use direct USB to update")
 
 
 def discover_controllino_usb(*, sys_tty: Path = Path("/sys/class/tty"),
@@ -3453,7 +3628,7 @@ def make_sources(
     stepper_source: str = "sim",
     stepper_port: str = DEFAULT_STEPPER_USB_PORT,
     stepper_baud: int = DEFAULT_STEPPER_USB_BAUD,
-    stepper_network_url: str = DEFAULT_STEPPER_NETWORK_URL,
+    stepper_network_url: str | None = None,
     stepper_network_timeout: float = DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
     scenario: str = "healthy",
     drop_after_s: float = DEFAULT_DROP_AFTER_S,
@@ -3528,14 +3703,14 @@ def make_sources(
         stepper = UsbStepperSource(port=stepper_port, baud=stepper_baud)
     elif stepper_source == "network":
         stepper = NetworkStepperSource(
-            base_url=stepper_network_url,
+            base_url=stepper_network_url or DEFAULT_STEPPER_NETWORK_URL,
             timeout=stepper_network_timeout,
         )
     elif stepper_source == "controllino-usb":
         stepper = ControllinoUsbStepperSource(port=stepper_port, baud=stepper_baud)
     elif stepper_source == "controllino":
         stepper = ControllinoStepperSource(
-            base_url=stepper_network_url,
+            base_url=stepper_network_url or DEFAULT_CONTROLLINO_NETWORK_URL,
             timeout=stepper_network_timeout,
         )
     else:

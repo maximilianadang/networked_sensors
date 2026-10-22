@@ -2,7 +2,7 @@
 
 // One auxiliary backend per build. Keep the previous 0/1 build flag compatible.
 // The dashboard discovers the selected capability through telemetry.
-constexpr char FIRMWARE_VERSION[] = "1.5.10";
+constexpr char FIRMWARE_VERSION[] = "1.6.0";
 #define DRO_BACKEND_ABSOLUTE 0
 #define DRO_BACKEND_LINACE 1
 #ifndef CONTROLLINO_DRO_KIND

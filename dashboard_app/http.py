@@ -124,6 +124,8 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTT
                 elif path == "/api/metadata":
                     metadata = runtime.update_metadata(parse_body(self))
                     self._send_json({"metadata": metadata})
+                elif path == "/api/thermocouples":
+                    self._send_json({"thermocouples": runtime.set_thermocouple_components(parse_body(self))})
                 elif path == "/api/experiment/load":
                     self._send_json({"experiment": runtime.load_experiment(parse_body(self))})
                 elif path == "/api/experiment/start":
@@ -174,10 +176,10 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTT
                     status=HTTPStatus.NOT_FOUND,
                 )
             except RuntimeError as exc:
-                self._send_json(
-                    {"error": str(exc)},
-                    status=HTTPStatus.CONFLICT,
-                )
+                payload = {"error": str(exc)}
+                if getattr(exc, "outcome", None) == "unconfirmed":
+                    payload["outcome"] = "unconfirmed"
+                self._send_json(payload, status=HTTPStatus.CONFLICT)
 
         def _send_html(self, body: str) -> None:
             payload = body.encode("utf-8")

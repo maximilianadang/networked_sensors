@@ -1,29 +1,84 @@
 ED-593 read-only setup
 
-Proposed bench address: 10.77.0.11, subnet 255.255.255.0. This address has
-not been assigned or checked on the network. Change --ed593-host if needed.
-Use channels TC0 through TC3 for the four probes; disable unused TC4–TC7.
-Select the thermocouple type matching each physical probe; the application
-never writes channel/type configuration. Enable open-wire detection on the
-device. Select Celsius temperature format and ASCII/DCON, address 01,
-TCP port 9500. Checksum setting must match --ed593-checksum (off by default).
+Bench commissioned on 2026-10-22:
+  ED-593 firmware 8.33, MAC 00:0A:4F:06:4F:91.
+  Static address 10.77.0.11, subnet 255.255.255.0, no gateway; DHCP off.
+  Laptop Ethernet address 10.77.0.2/24; Controllino address 10.77.0.10.
+  ASCII/DCON address 01, TCP port 9500, Celsius, checksum off.
+  TC0 through TC3 enabled; unused TC4 through TC7 disabled.
+  Cold-junction compensation and open-wire detection on; offset 0 C.
+  Enabled mask 0F and diagnostic mask 00 verified using live hardware.
+
+The four enabled channels are currently configured as Type K. The physical
+probe types have NOT been identified: verify a probe/cable/connector marking
+or part number before relying on temperature accuracy. Type belongs to the
+thermocouple's metal pair; the corresponding controller setting must match.
+The dashboard reader never writes channel/type configuration.
+
+The device was discovered using Ethernet UPnP at its factory fallback address
+192.168.127.254. A temporary 192.168.127.1/24 laptop address allowed setup;
+it was removed after assigning and verifying the permanent bench address.
+Controller web settings are now available at http://10.77.0.11/.
 
 Launch real reader:
   python dashboard-lean.py --ed593-source real --ed593-host 10.77.0.11
+Current bench launch (unrelated sources disabled):
+  python dashboard-lean.py --host 127.0.0.1 --esp32-source off --dxmr90-source off
+Open http://127.0.0.1:8000/ and expand "ED-593 thermocouples (°C)" for channel
+readings, enabled/fault states and response age. The header dot shows connectivity.
+The primary thermocouple panel sits above Test Metadata. Display labels TC-0,
+TC-1, TC-2 and TC-3 correspond to physical inputs TC0, TC1, TC2 and TC3.
+Enter the component beside each temperature and click "Save names". Names persist
+in system_config.json under thermocouples, keyed by physical channel (tc0 etc.).
+All eight inputs are supported. The first successful poll after dashboard
+startup discovers the enabled inputs and fixes the displayed channel list
+until the dashboard restarts. Temperatures and faults continue updating.
+Enabled input TC6 displays TC-6, including when other inputs are skipped.
+A channel's identity is its physical input, not the order in which it appears
+or a serial number on the probe. Browser refreshes and transport reconnects
+keep the same startup discovery.
+Saved names do not determine which inputs are displayed. They remain attached
+to their inputs through disabling, faults, disconnects and reconnection.
+Enabled faulted inputs remain visible with a fault indication; stale or faulted
+readings have no current numeric temperature. Source details retain all eight
+of the device's zero-based TC0–TC7 input labels.
+TC4–TC7 are currently disabled on the device. A disabled input cannot report a
+newly attached probe: enable that input and configure its thermocouple type in
+the ED-593 settings when adding a probe, then restart the dashboard to discover
+it. No code or dashboard config-file changes are needed. The dashboard does
+not write device settings. The diagnostic mask cannot distinguish an empty
+input from an open-wire or out-of-range fault, so enabled faults are not hidden
+as presumed empty inputs.
+Recording metadata includes ed593_tc0_component through ed593_tc7_component;
+saved edits also update an active recording. Raw temperature column names and
+spreadsheet device identifiers remain ed593_tc0_temperature_c and tc0, etc.
 Simulation:
   python dashboard-lean.py --esp32-source sim --dxmr90-source sim --stepper-source sim --ed593-source sim
-Default ED-593 mode is off until commissioning. Polling defaults to 1 Hz;
+The dashboard now defaults to ED-593 real mode at 10.77.0.11. Disable it with
+--ed593-source off. ED593_SOURCE and ED593_HOST can override defaults; explicit
+CLI arguments take precedence. The library factory retains its offline defaults.
+Polling defaults to 1 Hz;
 --ed593-rate-hz and --ed593-timeout are configurable. These are communication
 settings, not experiment acceptance thresholds.
 
 The reader sends only $aaM0 (model identity), $aa2 (configuration),
 $aa6 (enabled channels), $aaB
-(channel diagnostic mask) and #aa (all eight temperature readings). Replies
+(channel diagnostic mask) and #aa (temperature readings). Disabled channels are
+omitted from #aa: firmware 8.33 returns four signed fields with enabled mask 0F,
+and eight with mask FF. Values are mapped to physical channel numbers using the
+enabled mask; the field count must match. The enabled mask remains part of
+normal acquisition so changing device settings cannot silently shift readings
+to another channel. It does not change the startup list of displayed channels.
+Replies
 are CR-terminated; checksums, when enabled, are the hexadecimal sum of ASCII
 bytes modulo 256. Unsupported/ambiguous replies fail closed and are retained
-as transport errors. Celsius/configuration and diagnostic-mask assumptions
-must be verified against the device's own Console command reference during
-commissioning; no live ED-593 hardware has been tested here.
+as transport errors. Live checks confirmed model !01ED-593, configuration
+!010F0600, channel masks, and readings before and after disabling the empty
+inputs. The empty enabled inputs originally produced diagnostic mask F0 and
++9999.9 sentinels; these are masked to unavailable readings. Regression tests
+include captured replies and noncontiguous enabled-channel mapping.
+Repeated 1 Hz polls and a short dashboard recording verified four temperature
+columns in merged_samples.csv and ed593_raw.csv, with unused readings blank.
 
 A complete successful poll updates response freshness. This is not proof of
 a new physical conversion: ED-593 has no per-channel timestamp in these
@@ -60,4 +115,5 @@ https://www.brainboxes.com/files/catalog/product/ED/ED-593/documents/ED-593-data
 The ED-593 setup guide documents #01 for temperatures and says Modbus is not
 currently supported, despite datasheet claims. This implementation uses ASCII.
 The related ED-582 command manual documents temperature-unit bits and channel
-fault masks; confirm these on the ED-593 before relying on real-device checks.
+fault masks. Celsius replies and empty-input faults were checked on this ED-593;
+the combined mask does not distinguish individual fault causes.

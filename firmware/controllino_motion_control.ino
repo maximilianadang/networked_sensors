@@ -26,6 +26,8 @@
 #include "relay_bank.h"
 #include "directional_limits.h"
 #include "stepper_pwm_avr.h"
+#include "stream_io.h"
+#include "ethernet_stream.h"
 static_assert(PIN_STEP == 3, "Timer3 OC3C STEP requires Arduino D3");
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
 #include "cubemars_can.h"
@@ -186,32 +188,6 @@ void serviceRealtime() {
   cubeMars.service(millis());
 #endif
 }
-
-// Service input acquisition and motion while serial TX fills or HTTP output
-// waits, including the 9600-baud ESC/MS62 variants. No SPI runs in ISRs.
-class ServicedPrint : public Print {
- public:
-  explicit ServicedPrint(Print &output) : output_(output) {}
-  ~ServicedPrint() { flush(); }
-  size_t write(uint8_t value) override {
-    if (&output_ == &Serial) {
-      serviceRealtime();
-      return output_.write(value);  // At most one UART byte of back-pressure.
-    }
-    buffer_[length_++] = value;
-    if (length_ == sizeof(buffer_)) flush();
-    return 1;
-  }
-  void flush() {
-    if (!length_) return;
-    serviceRealtime();
-    output_.write(buffer_, length_); length_ = 0;
-    serviceRealtime();
-  }
- private:
-  Print &output_;
-  uint8_t buffer_[32], length_ = 0;
-};
 
 // ---------- 4. V1 command parser and compact status contract ----------
 bool parseLong(char *text, long &value) {
@@ -398,10 +374,10 @@ void processCommand(char *line, byte source) {
   reject("unknown_command");
 }
 
-void writeStatus(Print &destination, bool ack = false) {
-  ServicedPrint out(destination);
+void writeStatus(Print &out, bool ack = false, uint32_t requestId = 0) {
   if (ack) {
     out.print(F("{\"v\":1,\"t\":\"a\",\"ok\":")); out.print(accepted);
+    out.print(F(",\"id\":")); out.print(requestId);
     out.print(F(",\"e\":\"")); out.print(error); out.println(F("\"}")); return;
   }
   out.print(F("{\"v\":1,\"t\":\"s\",\"d4\":")); out.print(localCommand ? 0 : 1);
@@ -420,7 +396,7 @@ void writeStatus(Print &destination, bool ack = false) {
 #if CONTROLLINO_DRO_KIND == DRO_BACKEND_LINACE
   dro.writeStatus(out, millis());
 #else
-  // Keep the shared Yún legacy reader untouched; serviced printing may poll
+  // Keep the shared Yún legacy reader untouched; buffered printing may poll
   // the live reader, so serialize an independent copy of its reading.
   const AbsoluteDroReader reading = dro;
   reading.writeStatus(out, millis());
@@ -443,7 +419,7 @@ void writeStatus(Print &destination, bool ack = false) {
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
   cubeMars.writeStatus(out, millis());
 #endif
-  out.print(F(",\"hc\":1"));
+  out.print(F(",\"net\":\"tcp\",\"hc\":1"));
   out.print(F(",\"mv\":")); out.print(moving()); out.print(F(",\"st\":")); out.print(state);
   out.print(F(",\"p\":")); out.print(position()); out.print(F(",\"g\":")); out.print(target);
   out.print(F(",\"c\":")); out.print(commandId); out.print(F(",\"o\":")); out.print(owner);
@@ -451,58 +427,57 @@ void writeStatus(Print &destination, bool ack = false) {
 }
 
 // ---------- 5. USB/Ethernet service and safe startup ----------
-constexpr byte COMMAND_SIZE = 48;
-char usbBuffer[COMMAND_SIZE];
-byte usbLength = 0;
+StreamIO::Line usbLine, networkLine;
+StreamIO::Output usbOutput, networkOutput;
+EthernetStream network;
 
-void serviceUsb() {
-  while (Serial.available()) {
-    serviceRealtime();
-    char c = Serial.read();
-    if (c == '\r') continue;
-    if (c == '\n') {
-      usbBuffer[usbLength] = 0;
-      if (usbLength) processCommand(usbBuffer, OWNER_USB);
-      writeStatus(Serial, true); usbLength = 0;
-    } else if (usbLength + 1 < COMMAND_SIZE) usbBuffer[usbLength++] = c;
-    else { usbLength = 0; reject("command_too_long"); }
-  }
+void receiveCommand(StreamIO::Line &reader, StreamIO::Output &output, char c, byte source) {
+  const StreamIO::Line::Result result = reader.push(c);
+  if (result == StreamIO::Line::MORE) return;
+  uint32_t id = 0;
+  char *line = reader.data();
+  if (result == StreamIO::Line::TOO_LONG) reject("command_too_long");
+  else if (!StreamIO::request(line, id)) reject("request_id_invalid");
+  else processCommand(line, source);
+  StreamIO::Frame<StreamIO::ACK_BYTES> &reply = output.reply();
+  reply.clear(); writeStatus(reply, true, id);
+  if (!output.commitReply() && source == OWNER_NETWORK) network.close();
 }
 
-void decodeUrl(char *text) {
-  char *read = text, *write = text;
-  while (*read) {
-    if (*read == '+') { *write++ = ' '; ++read; }
-    else if (*read == '%' && read[1] && read[2]) {
-      char hex[3] = {read[1], read[2], 0};
-      *write++ = strtol(hex, nullptr, 16); read += 3;
-    } else *write++ = *read++;
-  }
-  *write = 0;
+void prepareStatus(StreamIO::Output &output) {
+  if (!output.statusDue || !output.canStatus()) return;
+  output.status.clear(); writeStatus(output.status); output.commitStatus();
+}
+
+void serviceUsb() {
+  for (uint8_t budget = 64; budget && usbOutput.canReply() && Serial.available(); --budget)
+    receiveCommand(usbLine, usbOutput, Serial.read(), OWNER_USB);
+  prepareStatus(usbOutput);
+  const uint16_t count = min(usbOutput.size(), uint16_t(Serial.availableForWrite()));
+  if (count) usbOutput.advance(Serial.write(usbOutput.data(), count));
 }
 
 void serviceNetwork() {
-  EthernetClient client = server.available();
-  if (!client) return;
-  char request[112] = {}; byte length = 0;
-  unsigned long deadline = millis() + 100;
-  while (client.connected() && long(deadline - millis()) > 0) {
-    serviceRealtime();
-    if (!client.available()) continue;
-    char c = client.read();
-    if (c == '\n') break;
-    if (c != '\r' && length + 1 < sizeof(request)) request[length++] = c;
+  // accept() also replenishes the listener. Call it every loop, including
+  // while the current client's TCP send is awaiting acknowledgement.
+  EthernetClient incoming = server.accept();
+  if (incoming) {
+    if (network.connected()) EthernetStream::close(incoming);
+    else {
+      network.close(); network.client = incoming;
+      networkLine.clear(); networkOutput.clear();
+    }
   }
-  char *value = strstr(request, "/command?value=");
-  if (value) {
-    value += 15; char *space = strchr(value, ' '); if (space) *space = 0;
-    decodeUrl(value); processCommand(value, OWNER_NETWORK);
+  if (!network.connected()) {
+    network.close(); networkLine.clear(); networkOutput.clear(); return;
   }
-  ServicedPrint response(client);
-  response.println(F("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\n"));
-  response.flush();
-  client.setConnectionTimeout(5);
-  writeStatus(client, value != nullptr); delay(1); client.stop();
+  const int completed = network.completed();
+  if (completed < 0) { networkLine.clear(); networkOutput.clear(); return; }
+  if (completed) networkOutput.advance(completed);
+  for (uint8_t budget = 64; budget && networkOutput.canReply() && network.client.available(); --budget)
+    receiveCommand(networkLine, networkOutput, network.client.read(), OWNER_NETWORK);
+  prepareStatus(networkOutput);
+  if (!network.busy()) network.send(networkOutput.data(), networkOutput.size());
 }
 
 void setup() {
@@ -529,8 +504,11 @@ void setup() {
   dro.begin(PIN_DRO_CLOCK, PIN_DRO_SECONDARY, onDroClock);
   Serial.begin(AUX_IS_CUBEMARS ? 115200 : 9600);
   Ethernet.begin(mac, ip, dns, gateway, subnet); server.begin();
-  // Bound the library's synchronous TCP send retries (LAN controller traffic).
-  Ethernet.setRetransmissionTimeout(5); Ethernet.setRetransmissionCount(1);
+  // Normal LAN TCP retries. Hardware transmission is polled, so these cannot
+  // hold the control loop while a peer is slow or disconnected.
+  Ethernet.setRetransmissionTimeout(200); Ethernet.setRetransmissionCount(3);
+  usbOutput.status.service(serviceRealtime);
+  networkOutput.status.service(serviceRealtime);
 #if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
   cubeMars.begin();
 #endif
@@ -547,6 +525,7 @@ void loop() {
       millis() - ownerAtMs >= OWNER_RELEASE_MS) owner = OWNER_NONE;
   unsigned long interval = AUX_IS_CUBEMARS || moving() ? 100 : 1000;
   if (statusPending || millis() - lastStatusMs >= interval) {
-    writeStatus(Serial); lastStatusMs = millis(); statusPending = false;
+    usbOutput.statusDue = networkOutput.statusDue = true;
+    lastStatusMs = millis(); statusPending = false;
   }
 }

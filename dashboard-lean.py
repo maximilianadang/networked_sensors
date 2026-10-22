@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Flow dashboard entry point; minimal Controllino/Yun distribution.
 
-Run ./dashboard-lean.py for Controllino Ethernet. For Yun LAN, add
+Run ./dashboard-lean.py for Controllino TCP (firmware 1.6.0+). For Yun LAN, add
 --stepper-source network --stepper-url http://arduino.local:8080.
 For Yun USB, use --stepper-source usb --stepper-port /dev/ttyACM0.
 Upload via tools/firmware_upload.ipynb; provision Yun LAN with
@@ -37,7 +37,7 @@ OPTIONS = (
     ("esp32-url", core.DEFAULT_ESP32_BASE_URL, None),
     ("esp32-timeout", core.DEFAULT_ESP32_TIMEOUT_S, None),
     ("dxmr90-source", "real", core.SOURCE_MODES),
-    ("ed593-source", "off", core.SOURCE_MODES),
+    ("ed593-source", "real", core.SOURCE_MODES),
     ("ed593-host", core.DEFAULT_ED593_HOST, None),
     ("ed593-port", core.DEFAULT_ED593_PORT, None),
     ("ed593-address", 1, None),
@@ -46,7 +46,7 @@ OPTIONS = (
     ("stepper-source", "controllino", core.STEPPER_SOURCE_MODES),
     ("stepper-port", "auto", None),
     ("stepper-baud", core.DEFAULT_STEPPER_USB_BAUD, None),
-    ("stepper-url", "http://10.77.0.10", None),
+    ("stepper-url", None, None),
     ("stepper-timeout", core.DEFAULT_STEPPER_NETWORK_TIMEOUT_S, None),
     ("dxmr90-host", core.DEFAULT_DXMR90_HOST, None),
     ("dxmr90-port", core.DEFAULT_DXMR90_PORT, None),
@@ -74,6 +74,7 @@ ENV_OPTIONS = {
     "host": "DASHBOARD_HOST", "port": "DASHBOARD_PORT",
     "esp32-source": "ESP32_SOURCE", "esp32-url": "ESP32_URL",
     "dxmr90-source": "DXMR90_SOURCE", "dxmr90-host": "DXMR90_HOST",
+    "ed593-source": "ED593_SOURCE", "ed593-host": "ED593_HOST",
     "stepper-url": "CONTROLLINO_URL",
 }
 
@@ -84,8 +85,8 @@ def parse_args(argv=None):
     for name, default, choices in OPTIONS:
         parser.add_argument(
             f"--{name}", default=default, choices=choices,
-            type=Path if isinstance(default, Path) else type(default),
-            help=f"{name.replace('-', ' ')} (default: {default})",
+            type=Path if isinstance(default, Path) else str if default is None else type(default),
+            help=f"{name.replace('-', ' ')} (default: {default if default is not None else 'source default'})",
         )
     parser.add_argument("--ed593-checksum", action="store_true", help="use DCON checksums (must match device configuration)")
     parser.add_argument("--verbose-http", action="store_true", help="log HTTP requests")

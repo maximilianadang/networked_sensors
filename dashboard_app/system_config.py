@@ -14,9 +14,11 @@ from typing import Any
 try:
     from ..supervisor_core import validate_servo_settings
     from ..controllino_io import validate_pressure_config
+    from ..read_ed593_ascii import CHANNELS as ED593_CHANNELS
 except ImportError:  # pragma: no cover - direct dashboard-lean.py execution
     from supervisor_core import validate_servo_settings
     from controllino_io import validate_pressure_config
+    from read_ed593_ascii import CHANNELS as ED593_CHANNELS
 
 
 DEFAULT_SYSTEM_CONFIG_PATH = Path(__file__).resolve().parents[1] / "system_config.json"
@@ -38,6 +40,8 @@ DEFAULT_SYSTEM_CONFIG: dict[str, object] = {
     },
     "servo": {"off_pulse_us": 2500, "displacement_deg": 120.0},
     "pressure_inputs": validate_pressure_config(),
+    # Names follow physical inputs; live telemetry determines which rows appear.
+    "thermocouples": {channel: "" for channel in ED593_CHANNELS},
 }
 
 
@@ -105,7 +109,39 @@ class SystemConfig:
         normalized["geometry"] = normalized_geometry
         normalized["servo"] = validate_servo_settings(payload.get("servo", DEFAULT_SYSTEM_CONFIG["servo"]))
         normalized["pressure_inputs"] = validate_pressure_config(payload.get("pressure_inputs"))
+        normalized["thermocouples"] = {**DEFAULT_SYSTEM_CONFIG["thermocouples"],
+                                     **self._validate_thermocouples(payload.get("thermocouples", {}))}
         return normalized
+
+    @staticmethod
+    def _validate_thermocouples(values: object) -> dict[str, str]:
+        if not isinstance(values, dict) or set(values) - set(ED593_CHANNELS):
+            raise ValueError("thermocouples must map ED-593 channels tc0–tc7 to component names")
+        result = {}
+        for channel, name in values.items():
+            if not isinstance(name, str) or len(name) > 80:
+                raise ValueError(f"{channel} component name must be text of at most 80 characters")
+            result[channel] = name.strip()
+        return {channel: result[channel] for channel in ED593_CHANNELS if channel in result}
+
+    @property
+    def thermocouple_components(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._values["thermocouples"])
+
+    def thermocouple_descriptors(self) -> list[dict[str, str]]:
+        components = self.thermocouple_components
+        return [{"device": channel, "label": f"TC-{index}", "component": components[channel]}
+                for index, channel in enumerate(ED593_CHANNELS)]
+
+    def set_thermocouple_components(self, values: object) -> None:
+        with self._lock:
+            components = self._validate_thermocouples(values)
+            updated = deepcopy(self._values)
+            updated["thermocouples"] = {**updated["thermocouples"], **components}
+            if self.path is not None:
+                self._write_atomic(updated)
+            self._values = updated
 
     def set_servo(self, values: dict[str, Any]) -> None:
         with self._lock:

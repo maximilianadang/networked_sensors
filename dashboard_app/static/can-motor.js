@@ -45,14 +45,9 @@ export function createCanMotorComponent({getLatest, applySample, postJson, creat
       <button data-can="release" class="stop" type="button">Stop</button>
     </div>
     <small data-can="feedback" role="status" aria-live="polite" hidden></small>
-    <details><summary>CAN diagnostics</summary>
-      <small data-can="rampHint"></small>
-      <dl class="can-motor-readings">
-        <dt>Current / temperature</dt><dd data-can="electrical">— / —</dd>
-        <dt>Motor fault / feedback age</dt><dd data-can="health">— / —</dd>
-      </dl>
-      <small data-can="diagnostic"></small>
-    </details>`;
+    <dl class="can-motor-readings">
+      <dt>Current / temperature</dt><dd data-can="electrical">— / —</dd>
+    </dl>`;
   document.getElementById("brushlessMotorToggle").closest("fieldset")
     .insertAdjacentElement("afterend", panel);
   const el = Object.fromEntries([...panel.querySelectorAll("[data-can]")]
@@ -87,21 +82,12 @@ export function createCanMotorComponent({getLatest, applySample, postJson, creat
     el.feedback.textContent = error.message;
   }
 
-  function stopDescription(reason, flags) {
-    if (reason === "can_bus_error" && Number.isInteger(flags) && (flags & 0xc0) && !(flags & 0x3f))
-      return "receive buffer overflow";
-    return ({can_bus_error: "CAN controller error", can_tx_failed: "CAN transmit failed",
-      control_timeout: "controller connection timed out", feedback_stale: "motor feedback lost",
-      motor_restart: "motor restarted", motor_fault: "motor fault", emergency_stop: "E-STOP",
-      operator_stop: "operator stop", duration_elapsed: "timed run completed"})[reason] || reason;
-  }
-
   function render(sample = {}) {
     panel.hidden = auxMotorKind(sample) !== "cubemars";
     if (panel.hidden) { forget(); return; }
     const field = name => sample[`stepper_can_motor_${name}`];
     if (owned && ((Number(field("command_sequence")) - acceptedSequence) >>> 0) > 0x7fffffff) return;
-    const {connected, identified, age, fresh, ready} = canMotorStatus(sample);
+    const {connected, identified, fresh, ready} = canMotorStatus(sample);
     if (owned && (!ready || field("manual_token") !== owned || !field("active"))) {
       const stopped = rampStopping && !field("active") && field("error") === "operator_stop";
       forget();
@@ -113,9 +99,6 @@ export function createCanMotorComponent({getLatest, applySample, postJson, creat
     const rpm = Number(el.rpm.value), ramp = field("default_ramp_rpm_s"), maxRpm = field("max_rpm");
     el.rpm.min = Number.isFinite(maxRpm) ? -maxRpm : "";
     el.rpm.max = Number.isFinite(maxRpm) ? maxRpm : "";
-    el.rampHint.textContent = Number.isFinite(ramp)
-      ? `Fixed acceleration · ${value(ramp, 0)} RPM/s`
-      : "Fixed acceleration · Waiting for controller settings";
     const valid = el.rpm.value !== "" && Number.isInteger(rpm) && rpm !== 0
       && Math.abs(rpm) <= maxRpm
       && Number.isInteger(ramp) && ramp >= 1 && ramp <= field("max_ramp_rpm_s");
@@ -129,11 +112,6 @@ export function createCanMotorComponent({getLatest, applySample, postJson, creat
     el.measured.textContent = connected && identified && fresh ? value(field("rpm")) : "—";
     el.electrical.textContent = fresh
       ? `${value(field("current_a"), 2)} A / ${value(field("temperature_c"), 0)} °C` : "— / —";
-    el.health.textContent = `${value(field("fault"), 0)} / ${value(age, 0)} ms`;
-    const hex = number => Number.isInteger(number) && number >= 0 ? `0x${number.toString(16).padStart(2, "0")}` : "—";
-    el.diagnostic.textContent = field("diag_sr")
-      ? `Last stop: ${stopDescription(field("diag_sr"), field("diag_se"))}. Flags ${hex(field("diag_se"))}; slow read ${hex(field("diag_ss"))}. Error counters TX ${value(field("diag_st"), 0)}, RX ${value(field("diag_srec"), 0)}. Service gap ${value(field("diag_sg") / 1000, 2)} ms.`
-      : `Current flags ${hex(field("diag_ef"))}; error counters TX ${value(field("diag_tec"), 0)}, RX ${value(field("diag_rec"), 0)}. No recorded stop event.`;
     panel.title = field("error") && field("error") !== "none" ? field("error") : "";
   }
 

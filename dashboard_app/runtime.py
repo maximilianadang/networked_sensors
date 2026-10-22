@@ -216,7 +216,7 @@ class DashboardRuntime:
         dxmr90_word_order: str,
         dxmr90_data_path: str,
         dxmr90_rate_hz: float,
-        stepper_network_url: str = core.DEFAULT_STEPPER_NETWORK_URL,
+        stepper_network_url: str | None = None,
         stepper_network_timeout: float = core.DEFAULT_STEPPER_NETWORK_TIMEOUT_S,
         system_config_path: Path | None = None,
         ed593_source: str = "off",
@@ -301,6 +301,7 @@ class DashboardRuntime:
         # This display-only reference survives dashboard and transport restarts.
         # It is never sent to the motion controller.
         self.system_config = SystemConfig(system_config_path)
+        self.metadata.update(self._thermocouple_metadata())
         self.sequence = 0
         self._dro_velocity_samples: deque[tuple[float, float, int]] = deque()
         self._dro_velocity_last_frame_count: int | None = None
@@ -623,6 +624,7 @@ class DashboardRuntime:
             "solenoid_count": core.solenoid_count(self.devices.sources["stepper"].mode),
             "solenoids": core.solenoid_descriptors(self.devices.sources["stepper"].mode),
             "controllino_pressures": pressure_descriptors(self.system_config.pressure_inputs),
+            "thermocouples": self.system_config.thermocouple_descriptors(),
             "stepper": {
                 "max_distance_mm": core.max_stepper_move_mm(self.devices.sources["stepper"].mode),
                 "max_travel_mm": self.system_config.stepper_max_travel_mm,
@@ -875,6 +877,22 @@ class DashboardRuntime:
             self._condition.notify_all()
             return self.run_state_locked()
 
+    def _thermocouple_metadata(self) -> dict[str, str]:
+        return {f"ed593_{channel}_component": name
+                for channel, name in self.system_config.thermocouple_components.items()}
+
+    def set_thermocouple_components(self, values: dict[str, object]) -> list[dict[str, str]]:
+        with self._condition:
+            try:
+                self.system_config.set_thermocouple_components(values)
+            except OSError as exc:
+                raise RuntimeError(f"Could not save thermocouple names: {exc}") from exc
+            self.metadata.update(self._thermocouple_metadata())
+            if self.recorder is not None:
+                self.recorder.update_metadata(self.metadata)
+            self._condition.notify_all()
+            return self.system_config.thermocouple_descriptors()
+
     def update_metadata(self, values: dict[str, object]) -> dict[str, str]:
         with self._condition:
             for key in DEFAULT_METADATA:
@@ -962,7 +980,7 @@ class DashboardRuntime:
                 return payload
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise RuntimeError(
+                raise core.CommandNotConfirmedError(
                     f"motion controller did not confirm {receipt.description} within 1.5 seconds"
                 )
             self._condition.wait(timeout=min(remaining, 0.1))
