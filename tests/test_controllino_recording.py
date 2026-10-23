@@ -10,6 +10,9 @@ from controllino_io import transform_pressure_sample, validate_pressure_config
 from recorder import FlowRunRecorder
 
 
+MBAR_PER_PSI = 68.94757293168361
+
+
 def calibration(unit="psi", reference="gauge", low=0, high=10):
     return {"voltage_min": .5, "voltage_max": 4.5,
             "pressure_min": low, "pressure_max": high,
@@ -68,8 +71,8 @@ class ControllinoRecordingTests(unittest.TestCase):
                          ["AI10", "AI11", "AI12", "AI13", "AI0", "AI1", "AI2"])
         self.assertEqual(channels[0], dict(id=1, label="Chamber pressure", terminal="AI10",
                                           group="low", group_index=1, group_label="Low pressure",
-                                          unit="psi", reference="gauge", calibrated=True,
-                                          mean=6.25, samples=2))
+                                          unit="mbar", reference="gauge", calibrated=True,
+                                          mean=round(6.25 * MBAR_PER_PSI, 6), samples=2))
         self.assertEqual(channels[4], dict(id=5, label="Absolute inlet", terminal="AI0",
                                           group="high", group_index=1, group_label="High pressure",
                                           unit="psi", reference="absolute", calibrated=True,
@@ -79,6 +82,8 @@ class ControllinoRecordingTests(unittest.TestCase):
         self.assertEqual(metrics["air_flow_g_per_min_active"][0], 30)
         exported = recorder.paths.export_csv.read_text()
         self.assertIn("# pressure_1_bar:,\n", exported)
+        self.assertIn("# controllino_pressure_1_unit:,mbar", exported)
+        self.assertIn(f"# controllino_pressure_1_mean_first1s:,{6.25 * MBAR_PER_PSI:.6f}", exported)
         self.assertIn("# controllino_pressure_5_unit:,psi", exported)
         self.assertIn("# controllino_pressure_5_reference:,absolute", exported)
         self.assertIn("# controllino_pressure_1_group:,low", exported)
@@ -89,7 +94,7 @@ class ControllinoRecordingTests(unittest.TestCase):
         with recorder.paths.merged_csv.open() as stream:
             raw = next(csv.DictReader(stream))
         self.assertEqual(raw["esp32_p1_bar"], "901")  # retained as raw source evidence
-        self.assertEqual(raw["stepper_pressure1_value"], "5.0")
+        self.assertAlmostEqual(float(raw["stepper_pressure1_value"]), 5 * MBAR_PER_PSI)
         self.assertAlmostEqual(float(raw["stepper_pressure5_value"]), 70 / 6.894757293168361)
         self.assertEqual(raw["stepper_pressure5_adc"], "250")
         self.assertEqual(raw["stepper_pressure5_voltage_v"], "2.5")
@@ -112,7 +117,7 @@ class ControllinoRecordingTests(unittest.TestCase):
             row["stepper_pressure1_value"] = bad_value
             recorder.record_sample(row, ())
         metric = recorder.summary()["metrics"]["controllino_pressure_first1s"][0]
-        self.assertEqual((metric["mean"], metric["samples"]), (5, 1))
+        self.assertEqual((metric["mean"], metric["samples"]), (round(5 * MBAR_PER_PSI, 6), 1))
         # Unknown calibration cannot acquire a pressure from raw counts/volts,
         # even if an inconsistent caller supplied an apparent value.
         row = self.sample(100.9)
@@ -130,7 +135,7 @@ class ControllinoRecordingTests(unittest.TestCase):
         metrics = recorder.summary()["metrics"]
         self.assertEqual(metrics["pressure_bar_first1s"], [None, None, None])
         self.assertIsNone(metrics["pressure_combined_bar_first1s"])
-        self.assertEqual(metrics["controllino_pressure_first1s"][0]["mean"], 5)
+        self.assertEqual(metrics["controllino_pressure_first1s"][0]["mean"], round(5 * MBAR_PER_PSI, 6))
         self.assertEqual(metrics["controllino_pressure_first1s"][0]["samples"], 1)
 
     def test_existing_non_io_recordings_keep_legacy_pressure_and_flow(self):
@@ -144,18 +149,20 @@ class ControllinoRecordingTests(unittest.TestCase):
         self.assertNotIn("controllino_pressure_first1s", metrics)
         self.assertIn("# pressure_1_bar:,902.000", recorder.paths.export_csv.read_text())
 
-    def test_all_seven_calibrated_channels_record_psi_and_keep_their_references(self):
+    def test_all_seven_calibrated_channels_record_group_units_and_keep_their_references(self):
         self.config = validate_pressure_config({str(i): {
             "label": f"P{i}", "volts_per_count": .01,
             "calibration": calibration("psi", "absolute", i, i + 100),
         } for i in range(1, 8)})
         channels = self.recorder(self.sample()).summary()["metrics"]["controllino_pressure_first1s"]
         for c, source_psi in zip(channels, range(51, 58)):
-            self.assertAlmostEqual(c["mean"], source_psi, places=6)
+            expected = source_psi * MBAR_PER_PSI if c["id"] <= 4 else source_psi
+            self.assertEqual(c["mean"], round(expected, 6))
         self.assertEqual([(c["group"], c["group_index"]) for c in channels],
                          [("low", 1), ("low", 2), ("low", 3), ("low", 4),
                           ("high", 1), ("high", 2), ("high", 3)])
-        self.assertTrue(all(c["unit"] == "psi" and c["reference"] == "absolute" for c in channels))
+        self.assertEqual([c["unit"] for c in channels], ["mbar"] * 4 + ["psi"] * 3)
+        self.assertTrue(all(c["reference"] == "absolute" for c in channels))
 
 
 if __name__ == "__main__":

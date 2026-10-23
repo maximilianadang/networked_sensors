@@ -13,7 +13,7 @@ from copy import deepcopy
 
 PRESSURE_STALE_MS = 500
 STANDARD_VOLTS_PER_COUNT = 5.0 * 6.14 / 1024
-# Calibration keeps its source units; published engineering values are psi.
+# Calibration keeps its source units; each channel defines its published unit.
 # SI prefixes are case-sensitive (MPa is megapascal, not millipascal).
 PSI_PER_BAR = 14.503773773020923
 PRESSURE_TO_PSI = {"Pa": 1e-5 * PSI_PER_BAR, "kPa": .01 * PSI_PER_BAR,
@@ -25,6 +25,7 @@ PRESSURE_INPUTS = tuple(
         "group": "low" if index <= 4 else "high",
         "group_label": "Low pressure" if index <= 4 else "High pressure",
         "group_index": index if index <= 4 else index - 4,
+        "unit": "mbar" if index <= 4 else "psi",
         "input_range_v": (0, 10) if index in (3, 4) else None,
         "supply_v": 5 if index in (5, 6, 7) else None,
         "supply_known": index in (5, 6, 7),
@@ -64,6 +65,11 @@ def _text(value: object, key: str, limit: int) -> str:
     return value.strip()
 
 
+def _pressure_endpoints(calibration: Mapping, unit: str) -> tuple[float, float]:
+    factor = PRESSURE_TO_PSI[calibration["unit"]] / PRESSURE_TO_PSI[unit]
+    return calibration["pressure_min"] * factor, calibration["pressure_max"] * factor
+
+
 def validate_pressure_config(values: object = None) -> dict[str, dict]:
     """Merge partial version-1 configuration with defaults; reject silent typos."""
     if values is None:
@@ -72,7 +78,9 @@ def validate_pressure_config(values: object = None) -> dict[str, dict]:
         raise ValueError("pressure_inputs must be an object keyed by channel IDs '1' through '7'")
     result = deepcopy(DEFAULT_PRESSURE_CONFIG)
     calibration_keys = {"voltage_min", "voltage_max", "pressure_min", "pressure_max", "unit", "reference"}
-    for channel_id, update in values.items():
+    for descriptor in PRESSURE_INPUTS:
+        channel_id = str(descriptor["id"])
+        update = values.get(channel_id, {})
         key = f"pressure_inputs.{channel_id}"
         if not isinstance(update, dict) or set(update) - {"label", "volts_per_count", "calibration"}:
             raise ValueError(f"{key} supports label, volts_per_count and calibration only")
@@ -96,12 +104,11 @@ def validate_pressure_config(values: object = None) -> dict[str, dict]:
                    for name in ("voltage", "pressure")):
             raise ValueError(f"{key}.calibration spans must be finite")
         calibration["unit"] = _text(calibration["unit"], f"{key}.calibration.unit", 16)
-        factor = PRESSURE_TO_PSI.get(calibration["unit"])
-        if factor is None:
+        if calibration["unit"] not in PRESSURE_TO_PSI:
             raise ValueError(f"{key}.calibration.unit must be one of {', '.join(PRESSURE_TO_PSI)}")
-        low, high = (calibration[f"pressure_{end}"] * factor for end in ("min", "max"))
+        low, high = _pressure_endpoints(calibration, descriptor["unit"])
         if not all(_finite(value) for value in (low, high, high - low)) or low >= high:
-            raise ValueError(f"{key}.calibration must have finite ascending endpoints and span in psi")
+            raise ValueError(f"{key}.calibration must have finite ascending endpoints and span in {descriptor['unit']}")
         calibration["reference"] = _text(calibration["reference"], f"{key}.calibration.reference", 40)
     return result
 
@@ -124,7 +131,6 @@ def pressure_descriptors(config: Mapping[str, Mapping]) -> list[dict]:
             **{f"{name}_key": prefix + suffix for name, suffix in
                (("adc", "adc"), ("voltage", "voltage_v"), ("value", "value"), ("valid", "valid"))},
             "calibrated": calibration is not None,
-            "unit": "psi",
             "reference": calibration["reference"] if calibration else None,
             "data_key": prefix + "value",
         })
@@ -132,7 +138,7 @@ def pressure_descriptors(config: Mapping[str, Mapping]) -> list[dict]:
 
 
 def transform_pressure_sample(sample: dict, config: Mapping[str, Mapping], *, stale_after_ms: float = PRESSURE_STALE_MS) -> None:
-    """Derive calibrated psi values once, retaining raw evidence when stale/invalid.
+    """Derive calibrated channel-unit values, retaining raw evidence when invalid.
 
 Config must be normalized by validate_pressure_config. Uncalibrated channels
 are valid when their raw ADC sample is fresh; calibrated channels additionally
@@ -159,7 +165,6 @@ need a voltage scale and a voltage inside the inclusive calibration range.
             if valid:
                 fraction = ((voltage - calibration["voltage_min"])
                             / (calibration["voltage_max"] - calibration["voltage_min"]))
-                factor = PRESSURE_TO_PSI[calibration["unit"]]
-                low, high = (calibration[f"pressure_{end}"] * factor for end in ("min", "max"))
+                low, high = _pressure_endpoints(calibration, channel["unit"])
                 sample[prefix + "value"] = low + fraction * (high - low)
         sample[prefix + "valid"] = bool(valid)

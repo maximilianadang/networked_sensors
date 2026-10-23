@@ -248,7 +248,7 @@ export function createControllinoMeasurementsComponent({descriptors = [], getHis
     value.textContent = "--";
     const unit = document.createElement("span");
     unit.className = "unit";
-    unit.textContent = descriptor.unit.toUpperCase();
+    unit.textContent = descriptor.unit;
     channel.appendChild(unit);
     row.append(channel, value);
     cards.find(card => card.group === descriptor.group).values.appendChild(row);
@@ -264,7 +264,7 @@ export function createControllinoMeasurementsComponent({descriptors = [], getHis
       const title = panel.querySelector("h2"), legend = panel.querySelector(".legend");
       const channels = rows.filter(row => row.descriptor.group === group);
       const name = group ? channels[0].descriptor.group_label : "Mass flow";
-      const unit = group ? channels[0].descriptor.unit.toUpperCase() : "g/min";
+      const unit = group ? channels[0].descriptor.unit : "g/min";
       return {id, group, name, unit, panel, title, legend, channels,
         legacyTitle: title.textContent, legacyLegend: Array.from(legend.children)};
     });

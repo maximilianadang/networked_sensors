@@ -55,6 +55,7 @@ class ControllinoChannelTests(unittest.TestCase):
         self.assertIsNone(startup["stepper_pressure1_adc"])
 
     def test_calibration_history_and_recording_use_the_same_values(self):
+        expected_mbar = 344.7378646584181  # 5 PSI.
         self.fixture.config_path.write_text(json.dumps({
             "version": 1, "stepper": {"dro_home": 135.46},
             "pressure_inputs": {"1": {"volts_per_count": .01, "calibration": {
@@ -62,22 +63,22 @@ class ControllinoChannelTests(unittest.TestCase):
                 "pressure_min": 0, "pressure_max": 10, "unit": "psi", "reference": "gauge"}}}}))
         runtime = self.runtime()
         sample = runtime.latest
-        self.assertEqual(sample["stepper_pressure1_value"], 5)
+        self.assertAlmostEqual(sample["stepper_pressure1_value"], expected_mbar)
         self.assertEqual(sample["stepper_pressure3_adc"], 350)
         self.assertIsNone(sample["stepper_pressure3_voltage_v"])
         self.assertIsNone(sample["stepper_pressure5_value"])
         descriptors = runtime.dashboard_config()["controllino_pressures"]
-        self.assertEqual(descriptors[0]["unit"], "psi")
+        self.assertEqual(descriptors[0]["unit"], "mbar")
         self.assertEqual(descriptors[2]["data_key"], "stepper_pressure3_value")
         runtime.set_recording(True)
         with runtime._condition:
             runtime._poll_locked(.2)
-        self.assertEqual(runtime.history[-1]["stepper_pressure1_value"], 5)
+        self.assertAlmostEqual(runtime.history[-1]["stepper_pressure1_value"], expected_mbar)
         path = runtime.recorder.paths.merged_csv
         runtime.set_recording(False)
         with path.open() as stream:
             row = list(csv.DictReader(stream))[-1]
-        self.assertEqual(float(row["stepper_pressure1_value"]), 5)
+        self.assertAlmostEqual(float(row["stepper_pressure1_value"]), expected_mbar)
         self.assertEqual(row["stepper_pressure5_value"], "")
         self.assertEqual(runtime.run_config_locked()["system_config"]["pressure_inputs"]["1"]["calibration"]["unit"], "psi")
         self.controller.payload["adcage"] = 600

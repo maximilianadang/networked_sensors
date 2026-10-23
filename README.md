@@ -263,6 +263,10 @@ To add a probe, enable its input and select its matching thermocouple type on
 the ED-593, then restart the dashboard. Temperatures and faults keep updating
 between discoveries. The dashboard reads device settings without changing them.
 
+Low-pressure inputs **P1–P4** use **millibar (mbar)** in readings, charts and
+recording summaries; high-pressure inputs **P5–P7** use **PSI**. Calibration
+settings retain their original units and are converted when readings are produced.
+
 `system_config.json` stores the DRO reference, graphic travel span, pressure
 calibration, thermocouple names and other machine settings. The graphic travel
 span does not limit commanded moves. Restart after editing the file manually;

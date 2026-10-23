@@ -218,7 +218,8 @@ Each entry is keyed by the stable P1–P7 ID and accepts `label`,
 - A calibration requires `voltage_min`, `voltage_max`, `pressure_min`,
   `pressure_max`, `unit` and `reference` from the sensor's specifications.
 - Calibration units may be `Pa`, `kPa`, `MPa`, `hPa`, `mbar`, `bar` or `psi`
-  (case-sensitive). The host converts pressure values and summary means to PSI.
+  (case-sensitive). The host converts pressure values and summary means to
+  **mbar** for low-pressure P1–P4 and **PSI** for high-pressure P5–P7.
   Configuration and recording metadata retain the original calibration units,
   endpoints and gauge/absolute reference. Unit conversion does not change that
   reference. Unsupported units are rejected.

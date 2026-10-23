@@ -12,6 +12,9 @@ from controllino_io import (
 from dashboard_app.system_config import SystemConfig
 
 
+MBAR_PER_PSI = 68.94757293168361
+
+
 def sample(**changes):
     result = {"stepper_pressure_capable": True, "stepper_connected": True,
               "stepper_transport_error": None, "stepper_pressure_sample_age_ms": 20,
@@ -59,10 +62,11 @@ class PressureTests(unittest.TestCase):
         self.assertEqual([c["group_label"] for c in descriptors],
                          ["Low pressure"] * 4 + ["High pressure"] * 3)
         self.assertEqual((descriptors[0]["unit"], descriptors[0]["data_key"]),
-                         ("psi", "stepper_pressure1_value"))
+                         ("mbar", "stepper_pressure1_value"))
         self.assertEqual((descriptors[2]["unit"], descriptors[2]["data_key"]),
-                         ("psi", "stepper_pressure3_value"))
-        self.assertTrue(all(c["data_key"] == c["value_key"] and c["unit"] == "psi" for c in descriptors))
+                         ("mbar", "stepper_pressure3_value"))
+        self.assertEqual([c["unit"] for c in descriptors], ["mbar"] * 4 + ["psi"] * 3)
+        self.assertTrue(all(c["data_key"] == c["value_key"] for c in descriptors))
         self.assertFalse(any(c["calibrated"] for c in descriptors))
 
     def test_linear_conversion_inclusive_endpoints_and_no_extrapolation(self):
@@ -72,12 +76,15 @@ class PressureTests(unittest.TestCase):
             with self.subTest(adc=adc):
                 values = sample(stepper_pressure1_adc=adc)
                 transform_pressure_sample(values, config)
-                self.assertEqual(values["stepper_pressure1_value"], expected)
+                if expected is None:
+                    self.assertIsNone(values["stepper_pressure1_value"])
+                else:
+                    self.assertAlmostEqual(values["stepper_pressure1_value"], expected * MBAR_PER_PSI)
                 self.assertEqual(values["stepper_pressure1_voltage_v"], adc * .01)
                 self.assertEqual(values["stepper_pressure1_valid"], expected is not None)
         descriptor = pressure_descriptors(config)[0]
         self.assertEqual((descriptor["label"], descriptor["unit"], descriptor["reference"], descriptor["data_key"]),
-                         ("Inlet", "psi", "gauge", "stepper_pressure1_value"))
+                         ("Inlet", "mbar", "gauge", "stepper_pressure1_value"))
 
     def test_configured_calibration_still_requires_verified_voltage_scale(self):
         config = validate_pressure_config({"3": {"calibration": calibration()}})
@@ -87,38 +94,50 @@ class PressureTests(unittest.TestCase):
         self.assertIsNone(values["stepper_pressure3_value"])
         config = validate_pressure_config({"3": {"volts_per_count": .01, "calibration": calibration()}})
         transform_pressure_sample(values, config)
-        self.assertEqual(values["stepper_pressure3_value"], 4)
+        self.assertAlmostEqual(values["stepper_pressure3_value"], 4 * MBAR_PER_PSI)
 
-    def test_equivalent_input_units_publish_psi_without_rewriting_calibration(self):
+    def test_equivalent_input_units_publish_group_units_without_rewriting_calibration(self):
         # Each source range describes the same -1..3 bar physical pressure.
-        for unit, units_per_bar in (("Pa", 100000), ("kPa", 100), ("MPa", .1),
-                                    ("hPa", 1000), ("mbar", 1000), ("bar", 1),
-                                    ("psi", 14.503773773020923)):
-            with self.subTest(unit=unit):
-                original = {"1": {"volts_per_count": .01, "calibration": calibration(
-                    pressure_min=-units_per_bar, pressure_max=3 * units_per_bar,
-                    unit=unit, reference="absolute")}}
-                before = deepcopy(original)
-                config = validate_pressure_config(original)
-                for adc, expected in ((100, -1), (200, 1), (300, 3)):
-                    values = sample(stepper_pressure1_adc=adc)
-                    transform_pressure_sample(values, config)
-                    self.assertAlmostEqual(values["stepper_pressure1_value"], expected * 14.503773773020923)
-                    self.assertEqual(values["stepper_pressure1_voltage_v"], adc * .01)
-                    self.assertEqual(values["stepper_pressure1_adc"], adc)
-                self.assertEqual(original, before)
-                self.assertEqual(config["1"]["calibration"], before["1"]["calibration"])
-                descriptor = pressure_descriptors(config)[0]
-                self.assertEqual((descriptor["unit"], descriptor["reference"]), ("psi", "absolute"))
+        for channel_id in range(1, 8):
+            output_unit, output_per_bar = ("mbar", 1000) if channel_id <= 4 else ("psi", 14.503773773020923)
+            prefix = f"stepper_pressure{channel_id}_"
+            for unit, units_per_bar in (("Pa", 100000), ("kPa", 100), ("MPa", .1),
+                                        ("hPa", 1000), ("mbar", 1000), ("bar", 1),
+                                        ("psi", 14.503773773020923)):
+                with self.subTest(channel=channel_id, unit=unit):
+                    original = {str(channel_id): {"volts_per_count": .01, "calibration": calibration(
+                        pressure_min=-units_per_bar, pressure_max=3 * units_per_bar,
+                        unit=unit, reference="absolute")}}
+                    before = deepcopy(original)
+                    config = validate_pressure_config(original)
+                    for adc, expected in ((100, -1), (200, 1), (300, 3)):
+                        values = sample(**{prefix + "adc": adc})
+                        transform_pressure_sample(values, config)
+                        self.assertAlmostEqual(values[prefix + "value"], expected * output_per_bar)
+                        self.assertEqual(values[prefix + "voltage_v"], adc * .01)
+                        self.assertEqual(values[prefix + "adc"], adc)
+                    self.assertEqual(original, before)
+                    self.assertEqual(config[str(channel_id)]["calibration"], before[str(channel_id)]["calibration"])
+                    descriptor = pressure_descriptors(config)[channel_id - 1]
+                    self.assertEqual((descriptor["unit"], descriptor["reference"]), (output_unit, "absolute"))
 
     def test_units_and_converted_ranges_fail_before_sampling(self):
         for values in (dict(unit="V"), dict(unit="counts"), dict(unit="PSI"),
                        dict(unit="mPa"), dict(unit="unknown"),
                        dict(unit="MPa", pressure_min=0, pressure_max=1e308),
                        dict(unit="bar", pressure_min=-1e307, pressure_max=1e307),
-                       dict(unit="Pa", pressure_min=0, pressure_max=1e-320)):
+                       dict(unit="Pa", pressure_min=0, pressure_max=1e-323)):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 validate_pressure_config({"1": {"calibration": calibration(**values)}})
+
+    def test_converted_ranges_are_validated_in_each_channels_published_unit(self):
+        huge = calibration(pressure_min=0, pressure_max=1e307)
+        for channel_id in range(1, 5):
+            with self.subTest(channel=channel_id), self.assertRaisesRegex(ValueError, "span in mbar"):
+                validate_pressure_config({str(channel_id): {"calibration": huge}})
+        for channel_id in range(5, 8):
+            normalized = validate_pressure_config({str(channel_id): {"calibration": huge}})
+            self.assertEqual(normalized[str(channel_id)]["calibration"], huge)
 
     def test_combined_age_health_and_raw_validation_preserve_evidence(self):
         config = validate_pressure_config({"1": {"volts_per_count": .01, "calibration": calibration()}})
