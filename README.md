@@ -2,7 +2,6 @@
 
 Run the bench dashboard to monitor sensors, control the piston, CAN motor and
 valves, record measurements, and execute experiments designed as CSV spreadsheets.
-`main` contains the current system; `dev-legacy` preserves the previous `main`.
 
 ## Start the dashboard
 
@@ -26,10 +25,9 @@ network access to both address ranges shown below.
 | DXMR90 | `192.168.0.1:502` (Modbus TCP) | Three SICK flow sensors |
 | ED-593 | `10.77.0.11:9500` (DCON ASCII) | Thermocouple inputs TC0–TC7 |
 
-Controllino Ethernet requires firmware **1.6.0 or newer**. ESP32 is automatically
-disabled for Controllino launches. Override addresses with `--stepper-url
-tcp://HOST:PORT`, `--dxmr90-host HOST` or `--ed593-host HOST`. Disable an unused
-source with `--dxmr90-source off` or `--ed593-source off`.
+Controllino Ethernet requires firmware **1.6.0 or newer**. Override addresses with
+`--stepper-url tcp://HOST:PORT`, `--dxmr90-host HOST` or `--ed593-host HOST`.
+Disable an unused source with `--dxmr90-source off` or `--ed593-source off`.
 
 For a direct USB connection to the current Controllino AK80-6 build, use:
 
