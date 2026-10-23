@@ -1,6 +1,8 @@
-# Experiment CSV reference
+# Bench experiment CSV reference
 
-Rows run in order after **Start experiment**. Loading only validates and previews the file; commands also undergo device checks when they run.
+For the installed Controllino MAXI firmware **1.6.0** with CubeMars CAN motor, LinACE DRO and three solenoid outputs, plus ED-593 **TC0–TC3** and DXMR90. Configuration checked **2026-10-23**.
+
+Rows run in order after **Start experiment**. Loading validates and previews the file. Use health rows to check live readiness before hardware commands.
 
 ## Format
 
@@ -8,10 +10,10 @@ Use comma-delimited UTF-8 CSV. Excel UTF-8 exports work. Column order is free; n
 
 Required headers: `action`, `source`, `max_age_ms`, `health`, `timeout_s`. Other headers are optional. Keep required headers even when a row requires blank cells. Every row must match the header's cell count. No duplicate/unknown headers or comment rows. Limits: **1–1000 action rows, 256 KiB**.
 
-Numbers must be finite; use decimal points. **Leave unused cells blank.**
+Numbers must be finite; use decimal points. **Leave unused cells blank.** Omit `pulse_us`: this bench uses CAN motor control.
 
 ```text
-action,source,device,max_age_ms,health,timeout_s,set_point,min_mm,max_mm,min_c,max_c,speed_mm_s,duration_s,direction,pulse_us,rpm
+action,source,device,max_age_ms,health,timeout_s,set_point,min_mm,max_mm,min_c,max_c,speed_mm_s,duration_s,direction,rpm
 ```
 
 ## Columns
@@ -19,7 +21,7 @@ action,source,device,max_age_ms,health,timeout_s,set_point,min_mm,max_mm,min_c,m
 | Column | Values and meaning |
 | --- | --- |
 | `action` | `telemetry_health`, `requested_state`, `reading_state`, `wait`. |
-| `source` | `esp32`, `dxmr90`, `controllino`, `ed593`, `recording`; blank for `wait`. |
+| `source` | `controllino`, `ed593`, `dxmr90`, `recording`; blank for `wait`. |
 | `device` | Target from the action tables below. Use semicolons for health-check or solenoid groups; targets must be unique and nonempty. |
 | `max_age_ms` | Maximum response age in milliseconds, ≥ 0. Inclusive; `0` requires age zero. |
 | `health` | `ok` checks that transport-error telemetry exists and reports no error. Blank omits this check where allowed. |
@@ -32,8 +34,7 @@ action,source,device,max_age_ms,health,timeout_s,set_point,min_mm,max_mm,min_c,m
 | `speed_mm_s` | Stepper speed magnitude: **0.1–10 mm/s**, inclusive. |
 | `duration_s` | Seconds: wait length, nominal stepper travel duration, or CAN run duration. |
 | `direction` | Stepper `forward` or `reverse`: up/positive or down/negative travel. |
-| `pulse_us` | ESC pulse: integer **1000–2000 µs**, inclusive. |
-| `rpm` | CAN output-shaft speed: integer **−793–793 RPM**. Negative reverses direction; zero stops/releases. Firmware may impose tighter limits. |
+| `rpm` | CAN output-shaft speed: integer **−793–793 RPM**, as advertised by the installed firmware. Negative reverses direction; zero stops/releases. |
 
 ## Health checks
 
@@ -41,12 +42,13 @@ action,source,device,max_age_ms,health,timeout_s,set_point,min_mm,max_mm,min_c,m
 
 | `source` | Allowed `device` values | Additional checks |
 | --- | --- | --- |
-| `esp32` | `pressure_adc`, `flow_adc` | ADC ready. |
 | `dxmr90` | Blank only. | None. |
-| `ed593` | `tc0`, `tc1`, `tc2`, `tc3`, `tc4`, `tc5`, `tc6`, `tc7` | Channel ready, enabled, fault-free. |
-| `controllino` | `stepper`, `dro`, `pulse_measurement`, `servo`, `brushless_motor`, `can_motor`, `solenoid1`, `solenoid2`, `solenoid3`, `pressure1`, `pressure2`, `pressure3`, `pressure4`, `pressure5`, `pressure6`, `pressure7` | Corresponding capability flags; pressure validity for pressure targets; ready/fresh feedback for CAN; effective measurement age for DRO. |
+| `ed593` | `tc0`, `tc1`, `tc2`, `tc3` | Channel ready, enabled, fault-free. |
+| `controllino` | `stepper`, `dro`, `pulse_measurement`, `can_motor`, `solenoid1`, `solenoid2`, `solenoid3`, `pressure1`, `pressure2`, `pressure5`, `pressure6`, `pressure7` | Corresponding capability flags; configured input validity for pressure; ready/fresh feedback for CAN; effective measurement age for DRO. |
 
-`health=ok` alone does not check freshness or device readiness. Use `controllino` as the source and `stepper` as its device. Thermocouple component names are display labels; CSV targets remain `tc0`–`tc7`.
+`health=ok` alone does not check freshness or device readiness. Use `controllino` as the source and `stepper` as its device. Thermocouple component names are display labels; CSV targets are `tc0`–`tc3`.
+
+ESP32 is disabled; ESC and servo backends are absent; TC4–TC7 are disabled. Pressure inputs 3 and 4 lack voltage scales, so their health checks cannot pass. Pressure targets above check configured ADC input validity, not sensor cable detection.
 
 ## Commands
 
@@ -58,16 +60,11 @@ action,source,device,max_age_ms,health,timeout_s,set_point,min_mm,max_mm,min_c,m
 | `controllino` | `stepper` | `positional`, `directional` | None. |
 | `controllino` | `stepper` | `move` | `speed_mm_s`, positive `duration_s`, `direction`. |
 | `controllino` | `solenoid1`, `solenoid2`, `solenoid3`, or a group | `open`, `closed` | None. |
-| `esp32` | `solenoid1`, `solenoid2`, `solenoid3`, `solenoid4`, or a group | `open`, `closed` | None. |
-| `controllino` | `brushless_motor` | `pulse` | `pulse_us`. |
-| `controllino` | `brushless_motor` | `on`, `off` | None; `pulse_us` blank. |
 | `controllino` | `can_motor` | `speed` | `rpm`; optional `duration_s`, as below. |
 
 Commands confirm the reported requested state. A stepper move waits for matching firmware completion. Solenoid groups request all targets before confirmation; confirmation covers electrical outputs only. `open` energizes a normally closed solenoid; `closed` de-energizes it. The selected source must own those outputs in the active configuration.
 
 For stepper modes/moves, a blank `device` is also accepted. Select `positional` before `move`. `directional` selects local-velocity mode without starting motion. Travel is **speed × duration**, rounded to pulses; acceleration can extend movement time. Travel must round to at least one pulse and fit 2,147,483,647 pulses. The displayed travel span is not this command limit. Firmware mode, limits, and E-STOP still apply.
-
-`brushless_motor` requires ESC firmware; `can_motor` requires CubeMars firmware. `servo` supports health checks only.
 
 ### CAN runs
 
@@ -77,7 +74,7 @@ For stepper modes/moves, a blank `device` is also accepted. Select `positional` 
 | Nonzero | Number | Timed run: **0.020–5.000 s** on current firmware, in whole milliseconds. |
 | `0` | Leave blank | Stop and wait for release. A maintained run ramps to zero; other runs release directly. Any supplied duration is ignored. |
 
-Stop a maintained run before starting a timed run. The CSV parser's duration ceiling is 2147483.647 s; execution enforces the connected firmware's tighter limit.
+Stop a maintained run before starting a timed run. A `telemetry_health` row with `source=controllino` and `device=can_motor` checks readiness. Nonzero motor commands require fresh, fault-free feedback.
 
 A nonzero CAN row advances when the target is accepted, not when measured RPM reaches it or the run finishes. Add `wait` for a dwell.
 
@@ -87,7 +84,7 @@ A nonzero CAN row advances when the target is accepted, not when measured RPM re
 
 | `source` | `device` | `set_point` | Required bounds | Behavior |
 | --- | --- | --- | --- | --- |
-| `ed593` | One of `tc0`–`tc7` | `check` or blank | `min_c`, `max_c` | Check once. |
+| `ed593` | One of `tc0`–`tc3` | `check` or blank | `min_c`, `max_c` | Check once. |
 | `controllino` | `dro` | `check` or blank | `min_mm`, `max_mm` | Check once. |
 | `controllino` | `dro` | `on` | `min_mm`, `max_mm` | Check, then monitor during later rows. |
 | `controllino` | `dro` | `off` | Blank | Disable the monitor; all other check/request cells must be blank. |
@@ -126,4 +123,4 @@ reading_state,ed593,tc2,3000,ok,10,check,0,100
 reading_state,ed593,tc3,3000,ok,10,check,0,100
 ```
 
-Other CSV files in this folder cover individual actions. [record_motor_solenoids.csv](record_motor_solenoids.csv) shows a complete recording/motor/solenoid/stepper sequence. [Parser](../dashboard_app/experiment.py).
+[record_motor_solenoids.csv](record_motor_solenoids.csv) uses this bench's recording, CAN motor, solenoids and stepper; it requires ready CAN feedback. Other files may target older hardware configurations. [Parser](../dashboard_app/experiment.py).

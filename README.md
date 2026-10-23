@@ -75,7 +75,7 @@ choose another destination.
 
 ## Run a spreadsheet experiment
 
-The [CSV reference](examples/README.md) lists every action, parameter, value and limit.
+The [CSV reference](examples/README.md) lists actions, parameters and limits for the installed bench.
 
 Expand **Experiment spreadsheet**. The dashboard initially loads
 [`examples/record_motor_solenoids.csv`](examples/record_motor_solenoids.csv).
