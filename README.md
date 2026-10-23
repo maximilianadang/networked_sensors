@@ -25,11 +25,38 @@ Open <http://127.0.0.1:8000/>. Keep the terminal open and press **Ctrl+C** there
 to shut down the dashboard. Closing the browser leaves the backend running;
 an active CAN motor run continues while its backend and controller remain healthy.
 
-The default launch connects to the following real devices. The laptop needs
-network access to both address ranges shown below. Configure its Ethernet adapter
-with an unused IPv4 address in each subnet (`10.77.0.0/24` and `192.168.0.0/24`).
+`--host` controls browser access; it does not change sensor communication:
+
+| Launch setting | Browser access |
+| --- | --- |
+| `--host 127.0.0.1` | Only the computer running the dashboard |
+| `--host 0.0.0.0` | Any of that computer's network interfaces, including Ethernet and Wi-Fi |
+
+For shared access over Ethernet or the **Mars** Wi-Fi network, run one dashboard
+instance with:
+
+```sh
+python3 dashboard.py --host 0.0.0.0 --port 8000
+```
+
+On Windows, replace `python3` with `py -3`. Other devices open
+`http://<dashboard-computer-IP>:8000/`, using the computer's reachable IP address,
+not `0.0.0.0`. The dashboard computer can use Ethernet while browser clients use
+Mars Wi-Fi, provided the access point bridges or routes to that LAN. Wi-Fi isolation
+and the computer's firewall must allow access to TCP port 8000. Clients need only
+a browser and share the same dashboard state and controls. There is no login;
+use a trusted private network because anyone with access can control equipment.
+
+If `--host` is omitted, the default is `0.0.0.0` unless `DASHBOARD_HOST` overrides it.
+
+The default launch connects to the following real devices. The computer running
+the dashboard needs network access to both address ranges shown below. Configure
+its Ethernet adapter with an unused IPv4 address in each subnet (`10.77.0.0/24`
+and `192.168.0.0/24`).
 For example, use `10.77.0.3/24` and `192.168.0.20/24` if those addresses are free.
-Each laptop needs different addresses; this OS network configuration is outside Git.
+Each dashboard computer needs different addresses; this OS network configuration
+is outside Git. Browser-only clients need access to the dashboard computer, not
+direct access to both sensor subnets.
 
 | Source | Default address | Role |
 | --- | --- | --- |
