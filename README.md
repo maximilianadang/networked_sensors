@@ -49,6 +49,8 @@ use a trusted private network because anyone with access can control equipment.
 
 If `--host` is omitted, the default is `0.0.0.0` unless `DASHBOARD_HOST` overrides it.
 
+### Configure the sensor-network adapter
+
 The default launch connects to the following real devices. The computer running
 the dashboard needs network access to both address ranges shown below. Configure
 its Ethernet adapter with an unused IPv4 address in each subnet (`10.77.0.0/24`
@@ -67,6 +69,98 @@ direct access to both sensor subnets.
 Controllino Ethernet requires firmware **1.6.0 or newer**. Override addresses with
 `--stepper-url tcp://HOST:PORT`, `--dxmr90-host HOST` or `--ed593-host HOST`.
 Disable an unused source with `--dxmr90-source off` or `--ed593-source off`.
+
+The steps below use a dedicated Ethernet adapter connected to the sensor switch's
+**LAN** side. Keep your Wi-Fi/Internet adapter's settings unchanged. Use both
+addresses on the **same Ethernet adapter**:
+
+| Computer address (example; must be unused) | Subnet mask | Reaches |
+| --- | --- | --- |
+| `192.168.0.20` | `255.255.255.0` (`/24`) | DXMR90 |
+| `10.77.0.3` | `255.255.255.0` (`/24`) | Controllino and ED-593 |
+
+If the DXMR90 already works with an existing static `192.168.0.x` address, keep
+that address instead of `192.168.0.20`. These are computer addresses; keep the
+devices' addresses unchanged. The dedicated sensor adapter needs no default
+gateway or DNS server. Administrator access may be needed to change these settings.
+
+#### Windows
+
+1. Press **Win+R**, enter `ncpa.cpl`, and press Enter to open Network Connections.
+2. Right-click the Ethernet adapter connected to the sensor switch and select
+   **Properties**. Select **Internet Protocol Version 4 (TCP/IPv4)**, then **Properties**.
+3. Select **Use the following IP address**. Set the address to `192.168.0.20`
+   (or keep your existing static address) and the subnet mask to `255.255.255.0`.
+   Leave the default gateway and DNS server fields blank on this dedicated adapter.
+4. Click **Advanced…**. Under **IP addresses**, click **Add…** and enter
+   `10.77.0.3` with subnet mask `255.255.255.0`. Both addresses should now appear
+   in the list.
+5. Confirm with **OK** in each dialog. Run `ipconfig` in PowerShell or Command
+   Prompt and confirm both addresses appear under that Ethernet adapter.
+
+These settings persist across restarts. If the adapter previously used DHCP,
+this procedure replaces it with the two static addresses above.
+
+#### Linux (NetworkManager)
+
+Find the active Ethernet connection's profile name:
+
+```sh
+nmcli -f NAME,DEVICE connection show --active
+```
+
+Replace `Wired connection 1` below with that profile name and adjust the example
+addresses if necessary. Save both addresses to the profile, then reconnect it:
+
+```sh
+sudo nmcli connection modify "Wired connection 1" \
+  ipv4.method manual ipv4.addresses "192.168.0.20/24,10.77.0.3/24" \
+  ipv4.gateway "" ipv4.dns "" ipv4.never-default yes
+sudo nmcli connection up "Wired connection 1"
+```
+
+Run `ip -br -4 address` to confirm both addresses appear on the Ethernet adapter.
+These settings persist across restarts. On Linux systems without NetworkManager,
+configure the same two static addresses through the installed network manager.
+
+#### macOS
+
+1. Open **System Settings → Network**, select the Ethernet adapter connected to
+   the sensor switch, then open **Details → TCP/IP**. On older macOS versions,
+   use **System Preferences → Network → Advanced → TCP/IP**.
+2. Set **Configure IPv4** to **Manually**. Enter `192.168.0.20` (or keep your
+   existing static address), subnet mask `255.255.255.0`, and leave **Router**
+   blank. Apply the settings.
+3. In Terminal, run `networksetup -listallhardwareports`. Find the **Device**
+   name for that Ethernet adapter, such as `en5`; do not select the Wi-Fi device.
+4. Add the second address, replacing `en5` with the device name you found:
+
+```sh
+sudo ifconfig en5 alias 10.77.0.3 netmask 255.255.255.0
+ifconfig en5
+```
+
+Both IPv4 addresses should appear in the output. The first address is saved in
+Network settings; the `ifconfig` alias is temporary. Reapply the alias after a
+restart or if reconnecting the adapter removes it, before launching the dashboard.
+
+#### Verify connectivity
+
+On Windows, run:
+
+```powershell
+ping -n 2 192.168.0.1
+ping -n 2 10.77.0.10
+ping -n 2 10.77.0.11
+```
+
+On Linux or macOS, use `-c 2` instead of `-n 2`. Replies confirm IP reachability;
+then launch the dashboard and check **Source details** for application-level
+connection errors. If only the DXMR90 replies, check the adapter's `10.77.0.x/24`
+address. If only the Controllino and ED-593 reply, check its `192.168.0.x/24` address.
+Sharing a switch alone does not provide routes between the two IP subnets.
+
+### Optional USB connection
 
 For a direct USB connection to the current Controllino AK80-6 build on Linux, use:
 
