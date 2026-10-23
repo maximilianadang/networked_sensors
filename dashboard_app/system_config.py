@@ -15,7 +15,7 @@ try:
     from ..supervisor_core import validate_servo_settings
     from ..controllino_io import validate_pressure_config
     from ..read_ed593_ascii import CHANNELS as ED593_CHANNELS
-except ImportError:  # pragma: no cover - direct dashboard-lean.py execution
+except ImportError:  # pragma: no cover - direct dashboard.py execution
     from supervisor_core import validate_servo_settings
     from controllino_io import validate_pressure_config
     from read_ed593_ascii import CHANNELS as ED593_CHANNELS

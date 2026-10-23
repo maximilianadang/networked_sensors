@@ -21,9 +21,9 @@ it was removed after assigning and verifying the permanent bench address.
 Controller web settings are now available at http://10.77.0.11/.
 
 Launch real reader:
-  python dashboard-lean.py --ed593-source real --ed593-host 10.77.0.11
+  python dashboard.py --ed593-source real --ed593-host 10.77.0.11
 Current bench launch (unrelated sources disabled):
-  python dashboard-lean.py --host 127.0.0.1 --esp32-source off --dxmr90-source off
+  python dashboard.py --host 127.0.0.1 --esp32-source off --dxmr90-source off
 Open http://127.0.0.1:8000/ and expand "ED-593 thermocouples (°C)" for channel
 readings, enabled/fault states and response age. The header dot shows connectivity.
 The primary thermocouple panel sits above Test Metadata. Display labels TC-0,
@@ -53,7 +53,7 @@ Recording metadata includes ed593_tc0_component through ed593_tc7_component;
 saved edits also update an active recording. Raw temperature column names and
 spreadsheet device identifiers remain ed593_tc0_temperature_c and tc0, etc.
 Simulation:
-  python dashboard-lean.py --esp32-source sim --dxmr90-source sim --stepper-source sim --ed593-source sim
+  python dashboard.py --esp32-source sim --dxmr90-source sim --stepper-source sim --ed593-source sim
 The dashboard now defaults to ED-593 real mode at 10.77.0.11. Disable it with
 --ed593-source off. ED593_SOURCE and ED593_HOST can override defaults; explicit
 CLI arguments take precedence. The library factory retains its offline defaults.

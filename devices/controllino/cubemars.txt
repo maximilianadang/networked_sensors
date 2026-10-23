@@ -92,7 +92,7 @@ Manual dashboard control (firmware 1.4.0)
   remains unverified: the user reported the supply entering CC during their
   higher-speed attempt. The current-limit setting has not been confirmed.
   Current commissioning dashboard: http://127.0.0.1:8765/ (other sensor sources off).
-  Launch: python dashboard-lean.py --host 127.0.0.1 --port 8765 \
+  Launch: python dashboard.py --host 127.0.0.1 --port 8765 \
     --esp32-source off --dxmr90-source off --ed593-source off \
     --stepper-source controllino-usb --stepper-port /dev/cu.usbmodem1101 \
     --stepper-baud 115200

@@ -9,7 +9,7 @@ import supervisor_core as core
 
 
 _spec = importlib.util.spec_from_file_location(
-    "dashboard_lean_cli", Path(__file__).resolve().parents[1] / "dashboard-lean.py")
+    "dashboard_cli", Path(__file__).resolve().parents[1] / "dashboard.py")
 dashboard = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dashboard)
 

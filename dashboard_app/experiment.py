@@ -22,7 +22,7 @@ from typing import Callable, Mapping
 
 try:
     from .. import supervisor_core as core
-except ImportError:  # Direct dashboard-lean.py execution.
+except ImportError:  # Direct dashboard.py execution.
     import supervisor_core as core
 
 

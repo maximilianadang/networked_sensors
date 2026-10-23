@@ -9,7 +9,7 @@ Use Python 3.10 or newer. The dashboard uses Python's standard library; firmware
 uploads have separate toolchain requirements. From this directory, run:
 
 ```sh
-python3 dashboard-lean.py --host 127.0.0.1 --port 8000
+python3 dashboard.py --host 127.0.0.1 --port 8000
 ```
 
 Open <http://127.0.0.1:8000/>. Keep the terminal open and press **Ctrl+C** there
@@ -32,13 +32,13 @@ Disable an unused source with `--dxmr90-source off` or `--ed593-source off`.
 For a direct USB connection to the current Controllino AK80-6 build, use:
 
 ```sh
-python3 dashboard-lean.py --host 127.0.0.1 \
+python3 dashboard.py --host 127.0.0.1 \
   --stepper-source controllino-usb --stepper-port auto --stepper-baud 115200
 ```
 
 USB discovery follows the controller across port renumbering. If several
 compatible boards are attached, select one with `--stepper-port /dev/serial/by-id/...`.
-Use `python3 dashboard-lean.py --help` for all launch options. Explicit CLI options
+Use `python3 dashboard.py --help` for all launch options. Explicit CLI options
 override environment settings.
 
 ## Use the controls

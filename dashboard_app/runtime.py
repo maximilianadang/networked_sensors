@@ -21,7 +21,7 @@ try:
     from ..recorder import FlowRunRecorder, list_recordings, resolve_artifact
     from .. import supervisor_core as core
     from ..controllino_io import pressure_descriptors, transform_pressure_sample
-except ImportError:  # pragma: no cover - direct dashboard-lean.py execution
+except ImportError:  # pragma: no cover - direct dashboard.py execution
     from recorder import FlowRunRecorder, list_recordings, resolve_artifact
     import supervisor_core as core
     from controllino_io import pressure_descriptors, transform_pressure_sample
