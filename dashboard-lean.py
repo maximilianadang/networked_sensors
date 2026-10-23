@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Flow dashboard entry point; minimal Controllino/Yun distribution.
+"""Flow-management dashboard entry point.
 
-Run ./dashboard-lean.py for Controllino TCP (firmware 1.6.0+). For Yun LAN, add
---stepper-source network --stepper-url http://arduino.local:8080.
-For Yun USB, use --stepper-source usb --stepper-port /dev/ttyACM0.
-Upload via tools/firmware_upload.ipynb; provision Yun LAN with
-devices/yun/provision_yun.sh. Full tests and guides live on dev-organized.
-Boundary regression tests here: python -m unittest discover -s tests -v.
+See README.md for setup, controls, recording and CSV experiments, and
+firmware/README.md for controller wiring and protocol details.
+Tests: python -m unittest discover -s tests -v.
 
 Where to edit: supervisor_core.py owns device protocols/control rules;
 dashboard_app/runtime.py owns sampling, settings, recording, and coordination;
