@@ -75,6 +75,8 @@ choose another destination.
 
 ## Run a spreadsheet experiment
 
+The [CSV reference](examples/README.md) lists every action, parameter, value and limit.
+
 Expand **Experiment spreadsheet**. The dashboard initially loads
 [`examples/record_motor_solenoids.csv`](examples/record_motor_solenoids.csv).
 Review the displayed rows, then click **Start experiment**. To run your own

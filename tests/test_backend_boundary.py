@@ -595,6 +595,8 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(request("POST", "/api/experiment/load", {"csv": "invalid"})[0], 400)
         default_csv = (Path(__file__).resolve().parents[1] / "examples" / "record_motor_solenoids.csv").read_bytes()
         self.assertEqual(request("GET", "/api/experiment/example.csv"), (200, default_csv))
+        reference = (Path(__file__).resolve().parents[1] / "examples" / "README.md").read_bytes()
+        self.assertEqual(request("GET", "/api/experiment/reference.md"), (200, reference))
         all_source_example = (Path(__file__).resolve().parents[1] / "examples" / "source_health.csv").read_bytes()
         self.assertEqual(request("GET", "/api/experiment/source-health.csv"), (200, all_source_example))
         recording_example = (Path(__file__).resolve().parents[1] / "examples" / "start_recording.csv").read_bytes()

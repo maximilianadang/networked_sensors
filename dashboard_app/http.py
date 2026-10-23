@@ -82,6 +82,8 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTT
                     self._send_json(runtime.latest_payload())
                 elif path == "/api/experiment":
                     self._send_json({"experiment": runtime.experiment_state()})
+                elif path == "/api/experiment/reference.md":
+                    self._send_file(EXPERIMENT_EXAMPLE_DIR / "README.md", download_name="experiment_csv_reference.md")
                 elif path in EXPERIMENT_EXAMPLES:
                     self._send_file(EXPERIMENT_EXAMPLE_DIR / EXPERIMENT_EXAMPLES[path])
                 elif path == "/api/history":
@@ -224,7 +226,7 @@ def build_handler(runtime: DashboardRuntime, quiet: bool = True) -> type[BaseHTT
                 )
                 return
             suffix = path.suffix.lower()
-            content_type = "application/json" if suffix == ".json" else "text/csv"
+            content_type = {".json": "application/json", ".md": "text/markdown; charset=utf-8"}.get(suffix, "text/csv")
             payload = path.read_bytes()
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
