@@ -7,6 +7,7 @@ from unittest.mock import patch
 import supervisor_core as core
 
 
+@unittest.skipIf(core.termios is None, "USB discovery tests require Unix serial support")
 class UsbDiscoveryTests(unittest.TestCase):
     def setUp(self):
         temporary = TemporaryDirectory()

@@ -16,7 +16,6 @@ import os
 import errno
 import socket
 import select
-import termios
 import threading
 import time
 from dataclasses import dataclass, field
@@ -26,6 +25,11 @@ from typing import BinaryIO, Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import HTTPHandler, HTTPSHandler, ProxyHandler, Request, build_opener
+
+try:
+    import termios
+except ImportError:  # Windows can use the network transports without Unix USB I/O.
+    termios = None
 
 from read_ed593_ascii import DEFAULT_HOST as DEFAULT_ED593_HOST, DEFAULT_PORT as DEFAULT_ED593_PORT
 from controllino_io import CONTROLLINO_RELAYS, PRESSURE_INPUTS, SOLENOID_COUNT, pressure_fields
@@ -1364,21 +1368,15 @@ class UsbStepperSource:
     supports_commands = True
     supports_speed_command = True
 
-    _BAUD_CONSTANTS = {
-        9600: termios.B9600,
-        19200: termios.B19200,
-        38400: termios.B38400,
-        57600: termios.B57600,
-        115200: termios.B115200,
-    }
+    _BAUD_RATES = (9600, 19200, 38400, 57600, 115200)
 
     def __init__(
         self,
         port: str = DEFAULT_STEPPER_USB_PORT,
         baud: int = DEFAULT_STEPPER_USB_BAUD,
     ) -> None:
-        if baud not in self._BAUD_CONSTANTS:
-            allowed = ", ".join(str(value) for value in self._BAUD_CONSTANTS)
+        if baud not in self._BAUD_RATES:
+            allowed = ", ".join(str(value) for value in self._BAUD_RATES)
             raise ValueError(f"unsupported stepper USB baud {baud}; expected {allowed}")
         self.port = port
         self.baud = baud
@@ -1901,6 +1899,10 @@ class UsbStepperSource:
         if elapsed_s + 1e-9 < self._next_open_attempt_s:
             return False
         self._next_open_attempt_s = elapsed_s + 1.0
+        if termios is None:
+            self.last_error = ("USB serial is unavailable on this platform; "
+                               "use Ethernet (--stepper-source controllino)")
+            return False
         fd: int | None = None
         try:
             fd = os.open(self._usb_port_to_open(), os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
@@ -1909,8 +1911,7 @@ class UsbStepperSource:
             attributes[1] = 0
             attributes[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
             attributes[3] = 0
-            attributes[4] = self._BAUD_CONSTANTS[self.baud]
-            attributes[5] = self._BAUD_CONSTANTS[self.baud]
+            attributes[4] = attributes[5] = getattr(termios, f"B{self.baud}")
             attributes[6][termios.VMIN] = 0
             attributes[6][termios.VTIME] = 0
             termios.tcsetattr(fd, termios.TCSANOW, attributes)

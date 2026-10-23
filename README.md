@@ -5,19 +5,31 @@ valves, record measurements, and execute experiments designed as CSV spreadsheet
 
 ## Start the dashboard
 
-Use Python 3.10 or newer. The dashboard uses Python's standard library; firmware
-uploads have separate toolchain requirements. From this directory, run:
+Use Python 3.10 or newer. Ethernet operation supports Linux, macOS and Windows
+using Python's standard library. Firmware uploads have separate toolchain
+requirements. From this directory, run on Linux or macOS:
 
 ```sh
 python3 dashboard.py --host 127.0.0.1 --port 8000
 ```
+
+On Windows, use the Python launcher:
+
+```powershell
+py -3 dashboard.py --host 127.0.0.1 --port 8000
+```
+
+If `py` is unavailable, use `python` instead of `py -3`.
 
 Open <http://127.0.0.1:8000/>. Keep the terminal open and press **Ctrl+C** there
 to shut down the dashboard. Closing the browser leaves the backend running;
 an active CAN motor run continues while its backend and controller remain healthy.
 
 The default launch connects to the following real devices. The laptop needs
-network access to both address ranges shown below.
+network access to both address ranges shown below. Configure its Ethernet adapter
+with an unused IPv4 address in each subnet (`10.77.0.0/24` and `192.168.0.0/24`).
+For example, use `10.77.0.3/24` and `192.168.0.20/24` if those addresses are free.
+Each laptop needs different addresses; this OS network configuration is outside Git.
 
 | Source | Default address | Role |
 | --- | --- | --- |
@@ -29,15 +41,19 @@ Controllino Ethernet requires firmware **1.6.0 or newer**. Override addresses wi
 `--stepper-url tcp://HOST:PORT`, `--dxmr90-host HOST` or `--ed593-host HOST`.
 Disable an unused source with `--dxmr90-source off` or `--ed593-source off`.
 
-For a direct USB connection to the current Controllino AK80-6 build, use:
+For a direct USB connection to the current Controllino AK80-6 build on Linux, use:
 
 ```sh
 python3 dashboard.py --host 127.0.0.1 \
   --stepper-source controllino-usb --stepper-port auto --stepper-baud 115200
 ```
 
-USB discovery follows the controller across port renumbering. If several
+Linux USB discovery follows the controller across port renumbering. If several
 compatible boards are attached, select one with `--stepper-port /dev/serial/by-id/...`.
+On macOS, use an explicit USB port such as `--stepper-port /dev/cu.usbmodemXXXX`
+with the same source and baud options. Windows uses Ethernet; the built-in USB
+serial transport requires Unix support.
+
 Use `python3 dashboard.py --help` for all launch options. Explicit CLI options
 override environment settings.
 
