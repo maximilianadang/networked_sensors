@@ -140,10 +140,10 @@ def pressure_descriptors(config: Mapping[str, Mapping]) -> list[dict]:
 def transform_pressure_sample(sample: dict, config: Mapping[str, Mapping], *, stale_after_ms: float = PRESSURE_STALE_MS) -> None:
     """Derive calibrated channel-unit values, retaining raw evidence when invalid.
 
-Config must be normalized by validate_pressure_config. Uncalibrated channels
-are valid when their raw ADC sample is fresh; calibrated channels additionally
-need a voltage scale and a voltage inside the inclusive calibration range.
-"""
+    Config must be normalized by validate_pressure_config. Uncalibrated channels
+    are valid when their raw ADC sample is fresh; calibrated channels additionally
+    need a voltage scale and a voltage inside the inclusive calibration range.
+    """
     age, source_age = sample.get("stepper_pressure_sample_age_ms"), sample.get("stepper_age_ms")
     fresh = (sample.get("stepper_pressure_capable") is True and sample.get("stepper_connected") is True
              and not sample.get("stepper_transport_error") and _finite(age) and age >= 0

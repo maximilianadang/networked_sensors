@@ -37,7 +37,7 @@
         "voltage_min": 0
       },
       "label": "Low pressure 3",
-      "volts_per_count": null
+      "volts_per_count": 0.02998046875
     },
     "4": {
       "calibration": {
@@ -49,7 +49,7 @@
         "voltage_min": 0
       },
       "label": "Low pressure 4",
-      "volts_per_count": null
+      "volts_per_count": 0.02998046875
     },
     "5": {
       "calibration": {
@@ -93,9 +93,19 @@
     "off_pulse_us": 2500
   },
   "stepper": {
-    "dro_home": 289.42,
+    "dro_home": 289.32,
     "dro_kind": "linace",
     "max_travel_mm": 277.0
+  },
+  "thermocouples": {
+    "tc0": "Stepper",
+    "tc1": "",
+    "tc2": "",
+    "tc3": "",
+    "tc4": "",
+    "tc5": "",
+    "tc6": "",
+    "tc7": ""
   },
   "version": 1
 }
