@@ -85,7 +85,7 @@
         "voltage_min": 0
       },
       "label": "High pressure 3",
-      "volts_per_count": 0.02998046875
+      "volts_per_count": 0.03345833333333333
     }
   },
   "servo": {

@@ -226,8 +226,9 @@ Each entry is keyed by the stable P1–P7 ID and accepts `label`,
 - Standard-input voltage scaling is nominal for a 24 V-powered controller:
   `5 * 6.14 / 1024` V/count ([manufacturer](https://www.controllino.com/inputs/)).
   Confirm the reference voltage/divider before calibrating pressure.
-- P6 (AI1) uses `0.8 / 24` V/count, measured on the installed bench on
-  2026-10-23: 0.798–0.801 V at the terminal and 24 ADC counts.
+- Bench voltage calibration (2026-10-23): P6 (AI1) uses `0.800 / 24` V/count
+  from a measured 0.798–0.801 V; P7 (AI2) uses `0.803 / 24` V/count from a
+  measured 0.803 V. Both channels reported 24 ADC counts at calibration.
 - AI12/AI13 cannot report pressure until their `volts_per_count` is verified
   and sensor calibration supplied; a 0–10 V input rating alone does not establish
   ADC scaling. Their raw counts remain recorded.
