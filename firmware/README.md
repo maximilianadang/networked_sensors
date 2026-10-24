@@ -239,12 +239,19 @@ contains converted values and validity; `stepper_raw.csv` contains raw telemetry
 Recording metadata freezes the configuration used for the run. New pressure
 summaries include all seven channels and never substitute old ESP32 values.
 
-The installation configuration uses the user-confirmed 0–5 V, 0–100 PSI
-range for low-pressure P1–P4 (reference unspecified). High-pressure P5–P7
-use McMaster 2957N36's supplier-listed nominal 0–5 V output and 0–75 PSI
-absolute range. Those sensor ranges do not establish the controller's ADC
-voltage scale; AI12/AI13 remain unscaled and their pressure stays unavailable
-until that separate scale is verified.
+P1 uses a provisional bench calibration from 2026-10-23: the released baseline
+was 0 ADC counts, and the captured 24-count pulse peak corresponded to the
+operator's 19.25 mbar reference peak. This gives `19.25 / 24` mbar/count
+(about 0.8021 mbar/count). Its existing `volts_per_count` is retained. Keeping
+the existing 0–5 V validity range gives an extrapolated `pressure_max` of
+133.76764386536374 mbar; this is not a verified sensor full-scale rating.
+Additional held reference pressures are needed to validate the fit's accuracy.
+
+Low-pressure P2–P4 still have 0–5 V, 0–100 PSI configured (reference unspecified)
+and need their own reference checks. High-pressure P5–P7 use McMaster 2957N36's
+supplier-listed nominal 0–5 V output and 0–75 PSI absolute range. Sensor pressure
+ranges do not establish the controller's ADC voltage scale. AI12/AI13 pressure
+stays unavailable while their separate `volts_per_count` setting is null.
 
 ## Mass flow
 

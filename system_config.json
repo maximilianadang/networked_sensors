@@ -5,10 +5,10 @@
   "pressure_inputs": {
     "1": {
       "calibration": {
-        "pressure_max": 100,
+        "pressure_max": 133.76764386536374,
         "pressure_min": 0,
         "reference": "unspecified",
-        "unit": "psi",
+        "unit": "mbar",
         "voltage_max": 5,
         "voltage_min": 0
       },
