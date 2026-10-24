@@ -73,7 +73,7 @@
         "voltage_min": 0
       },
       "label": "High pressure 2",
-      "volts_per_count": 0.02998046875
+      "volts_per_count": 0.03333333333333333
     },
     "7": {
       "calibration": {
