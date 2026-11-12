@@ -1,6 +1,5 @@
 """Three SICK channels through real parsing and recording, without device I/O."""
 import csv
-import math
 import struct
 import tempfile
 import unittest
@@ -33,10 +32,10 @@ class Master:
             return [12]
         if register in (1002, 2002):
             return process_words(.6 if register == 1002 else 1.2, self.order)
-        if register == 3001:
+        if register == 3002:
             if self.error:
                 raise self.error
-            return [self.status, *process_words(self.flow, self.order)]
+            return process_words(self.flow, self.order)
         raise AssertionError(f"Unexpected register {register}")
 
 
@@ -52,58 +51,44 @@ class SickFlowTests(unittest.TestCase):
                 self.assertEqual(values["port3_mass_flow_g_min"], 50)
                 self.assertTrue(values["port3_flow_valid"])
                 self.assertIsNone(values["port3_error"])
-                self.assertEqual(client.calls, [(12001, 1), (1002, 16), (2002, 16), (3001, 17)])
+                self.assertEqual(client.calls, [(12001, 1), (1002, 16), (2002, 16), (3002, 16)])
 
-    def test_invalid_port_status_does_not_turn_retained_data_into_live_flow(self):
-        for status in (0, 1, 2, 4):
+    def test_third_uses_process_data_without_a_separate_status_gate(self):
+        for status in (0, 1, 2, 3, 4):
             with self.subTest(status=status):
-                values = read_direct_sick_values(Master(status=status, flow=99), "high-low")
-                self.assertIsNone(values["port3_mass_flow_g_min"])
-                self.assertFalse(values["port3_flow_valid"])
-                self.assertEqual(values["port3_status"], status)
-                self.assertTrue(values["port3_error"])
-                self.assertAlmostEqual(values["total_mass_flow_g_min"], 30, places=5)
-        zero = read_direct_sick_values(Master(status=3, flow=0), "high-low")
-        self.assertEqual(zero["port3_mass_flow_g_min"], 0)
-        self.assertTrue(zero["port3_flow_valid"])
+                values = read_direct_sick_values(Master(status=status, flow=0), "high-low")
+                self.assertEqual(values["port3_mass_flow_g_min"], 0)
+                self.assertTrue(values["port3_flow_valid"])
+                self.assertIsNone(values["port3_status"])
+                self.assertIsNone(values["port3_error"])
 
-    def test_third_timeout_exception_or_nonfinite_value_does_not_lose_pair(self):
-        truncated = Master()
-        original = truncated.read_holding_registers
-        truncated.read_holding_registers = lambda register, count: (
-            [3, 0] if register == 3001 else original(register, count))
-        for client in (Master(error=TimeoutError("port 3 timeout")),
-                       Master(error=ModbusError("illegal address")),
-                       Master(flow=math.nan), Master(flow=math.inf), truncated):
-            with self.subTest(client=client):
-                values = read_direct_sick_values(client, "high-low")
-                self.assertIsNone(values["port3_mass_flow_g_min"])
-                self.assertFalse(values["port3_flow_valid"])
-                self.assertTrue(values["port3_error"])
-                self.assertAlmostEqual(values["total_mass_flow_g_min"], 30, places=5)
-
-    def test_optional_failure_updates_live_pair_and_clears_prior_third(self):
-        source = core.RealDxmr90Source()
-        source._ensure_started = Mock()  # This test never starts transport threads.
-        self.addCleanup(source.close)
-        with patch.object(core, "ModbusTcpClient") as factory:
-            factory.return_value.__enter__.return_value = Master()
-            source._fetch()
-            self.assertEqual(source.poll(0).values["dxmr90_port3_mass_flow_g_min"], 50)
-            factory.return_value.__enter__.return_value = Master(error=TimeoutError("optional timeout"))
-            source._fetch()
-            values = source.poll(.1).values
-            factory.return_value.__enter__.return_value = Master(flow=6)
-            source._fetch()
-            recovered = source.poll(.2).values
-        self.assertIsNone(source.last_error)
-        self.assertAlmostEqual(values["dxmr90_total_mass_flow_g_min"], 30, places=5)
-        self.assertIsNone(values["dxmr90_port3_mass_flow_g_min"])
-        self.assertFalse(values["dxmr90_port3_flow_valid"])
-        self.assertEqual(values["dxmr90_port3_error"], "optional timeout")
-        self.assertTrue(recovered["dxmr90_port3_flow_valid"])
-        self.assertEqual(recovered["dxmr90_port3_mass_flow_g_min"], 100)
-        self.assertIsNone(recovered["dxmr90_port3_error"])
+    def test_each_port_read_failure_uses_the_same_source_error_path_and_recovers(self):
+        for register in (1002, 2002, 3002):
+            for error in (TimeoutError("read timeout"), ModbusError("illegal address"),
+                          ValueError("invalid process data")):
+                with self.subTest(register=register, error=error):
+                    source = core.RealDxmr90Source()
+                    source._ensure_started = Mock()
+                    self.addCleanup(source.close)
+                    master = Master()
+                    read = master.read_holding_registers
+                    def failing_read(address, count):
+                        if address == register:
+                            raise error
+                        return read(address, count)
+                    with patch.object(core, "ModbusTcpClient") as factory:
+                        factory.return_value.__enter__.return_value = master
+                        source._fetch()
+                        self.assertEqual(source.poll(0).values["dxmr90_port3_mass_flow_g_min"], 50)
+                        master.read_holding_registers = failing_read
+                        source._fetch()
+                        self.assertEqual(source.last_error, str(error))
+                        self.assertIsNone(source.poll(.1))
+                        master.read_holding_registers = read
+                        master.flow = 6
+                        source._fetch()
+                        self.assertIsNone(source.last_error)
+                        self.assertEqual(source.poll(.2).values["dxmr90_port3_mass_flow_g_min"], 100)
 
     def test_republished_mode_has_no_invented_third_sensor_register(self):
         source = core.RealDxmr90Source(data_path="republished")

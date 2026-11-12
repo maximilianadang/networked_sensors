@@ -62,7 +62,7 @@ direct access to both sensor subnets.
 
 | Source | Default address | Role |
 | --- | --- | --- |
-| Controllino MAXI | `10.77.0.10:80` (TCP) | Piston/stepper, LinACE DRO, travel limits, AK80-6 CAN motor, three solenoids and seven pressure inputs |
+| Controllino MAXI | `10.77.0.10:80` (TCP) | Piston/stepper, LinACE DRO, travel limits, AK80-6 CAN motor, three solenoids and eight pressure inputs (AI08 requires firmware 1.6.1) |
 | DXMR90 | `192.168.0.1:502` (Modbus TCP) | Three SICK flow sensors |
 | ED-593 | `10.77.0.11:9500` (DCON ASCII) | Thermocouple inputs TC0–TC7 |
 
@@ -263,9 +263,12 @@ To add a probe, enable its input and select its matching thermocouple type on
 the ED-593, then restart the dashboard. Temperatures and faults keep updating
 between discoveries. The dashboard reads device settings without changing them.
 
-Low-pressure inputs **P1–P4** use **millibar (mbar)** in readings, charts and
+Low-pressure inputs **P1–P4 and P8 (AI08)** use **millibar (mbar)** in readings, charts and
 recording summaries; high-pressure inputs **P5–P7** use **PSI**. Calibration
 settings retain their original units and are converted when readings are produced.
+P4 also shows estimated nitrogen velocity using TC-0 and the signed pressure path
+`6 mbar + AI10 - AI08 + AI12`. All contributing inputs must be calibrated and
+valid. See [the Pitot calculation and channel mapping](firmware/README.md#nitrogen-pitot-velocity).
 
 `system_config.json` stores the DRO reference, graphic travel span, pressure
 calibration, thermocouple names and other machine settings. The graphic travel

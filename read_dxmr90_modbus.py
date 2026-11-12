@@ -24,13 +24,12 @@ from typing import Sequence
 DEFAULT_HOST = "192.168.0.1"
 DEFAULT_PORT = 502
 DEFAULT_UNIT_ID = 1
-SICK_PROCESS_BASE_REGISTERS = (1002, 2002)
+SICK_PROCESS_BASE_REGISTERS = (1002, 2002, 3002)
 SICK_PROCESS_WORD_COUNT = 16
 # Banner IO-Link Master Data Reference 229732, Rev B, pp.4–6:
 # https://info.bannerengineering.com/cs/groups/public/documents/literature/229732.pdf
-# 43001 = port 3 connected/data-valid status; 43002–43017 = process input.
-# Like the existing 41002/42002 windows, our client omits the leading 4.
-SICK_PORT3_STATUS_REGISTER = 3001
+# 41002/42002/43002 start the three identical process-input windows.
+# Our client omits the leading 4.
 SICK_PORT3_FIELDS = ("port3_mass_flow_g_min", "port3_flow_valid", "port3_status", "port3_error")
 SICK_PROCESS_NAMES = ("mass_flow_kg_h", "flow_velocity_m_s", "volume_m3",
                       "volumetric_flow_m3_h", "mass_kg", "energy_kwh", "temperature_c", "pressure_bar")
@@ -228,7 +227,7 @@ def read_direct_sick_values(
     client: ModbusTcpClient,
     word_order: str,
 ) -> dict[str, float | int | bool | str | None]:
-    """Keep the original pair sum separate from the optional third flow sensor."""
+    """Read all three identical process profiles; retain the original pair sum."""
 
     heartbeat = client.read_holding_registers(HEARTBEAT.register, 1)[0]
     ports: list[dict[str, float]] = []
@@ -239,7 +238,7 @@ def read_direct_sick_values(
         )
         ports.append(decode_sick_process(words, word_order))
 
-    port1, port2 = ports
+    port1, port2, port3 = ports
     p1_bar = port1["pressure_bar"]
     p2_bar = port2["pressure_bar"]
     p1_mass_g_min = port1["mass_flow_kg_h"] * 1000.0 / 60.0
@@ -261,27 +260,12 @@ def read_direct_sick_values(
         "port1_temperature_c": port1["temperature_c"],
         "port2_temperature_c": port2["temperature_c"],
         "total_volumetric_flow_l_min": p1_volume_l_min + p2_volume_l_min,
-        "port3_mass_flow_g_min": None,
-        "port3_flow_valid": False,
+        "port3_mass_flow_g_min": port3["mass_flow_kg_h"] * 1000.0 / 60.0,
+        # Retain existing recording fields; no port-specific status gate.
+        "port3_flow_valid": math.isfinite(port3["mass_flow_kg_h"]),
         "port3_status": None,
         "port3_error": None,
     }
-    # Read last: failure of this optional sensor must not discard the pair.
-    # Status and data come from one block; a disconnected port can contain zeros.
-    try:
-        block = client.read_holding_registers(SICK_PORT3_STATUS_REGISTER, 1 + SICK_PROCESS_WORD_COUNT)
-        if len(block) != 1 + SICK_PROCESS_WORD_COUNT:
-            raise ValueError("Port 3 requires status plus 16 process registers")
-        values["port3_status"] = status = block[0]
-        if (status & 3) != 3:
-            raise ValueError("Port 3 disconnected or process data invalid")
-        flow = decode_sick_process(block[1:], word_order)["mass_flow_kg_h"] * 1000.0 / 60.0
-        if not math.isfinite(flow):
-            raise ValueError("Port 3 mass flow is not finite")
-        values["port3_mass_flow_g_min"] = flow
-        values["port3_flow_valid"] = True
-    except (OSError, ModbusError, ValueError) as exc:
-        values["port3_error"] = str(exc)
     return values
 
 

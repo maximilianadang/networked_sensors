@@ -5,7 +5,7 @@
 // to the host. One channel per due slice bounds ADC work to about 210 us at16MHz.
 class PressureAdc {
  public:
-  static constexpr byte CHANNELS = 7;
+  static constexpr byte CHANNELS = 8;
   void begin(const byte (&pins)[CHANNELS]) {
     channels = pins;
     for (byte i = 0; i < CHANNELS; ++i) pinMode(channels[i], INPUT);

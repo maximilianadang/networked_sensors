@@ -140,16 +140,19 @@ export function createToolbarComponent({
 // ============================================================================
 // PANEL: Air:Powder Ratio — mass-flow calculation.
 export function calculateAirPowderRatio(sample, powderFlowRateGPerS) {
-  const airFlowGPerMin = finiteSampleNumber(sample, "open_line_air_flow_g_min");
+  const pairFlowGPerMin = finiteSampleNumber(sample, "dxmr90_total_mass_flow_g_min");
+  const thirdFlowGPerMin = finiteSampleNumber(sample, "dxmr90_port3_mass_flow_g_min");
   const powderFlowGPerS = Number(powderFlowRateGPerS);
   if (
-    airFlowGPerMin === null ||
+    sample?.dxmr90_connected !== true || sample.dxmr90_transport_error ||
+    pairFlowGPerMin === null || thirdFlowGPerMin === null ||
     !Number.isFinite(powderFlowGPerS) ||
     powderFlowGPerS <= 0
   ) {
     return null;
   }
-  return airFlowGPerMin / (powderFlowGPerS * 60);
+  // The pair field already sums SICK 1 + 2. Convert powder g/s to g/min.
+  return (pairFlowGPerMin + thirdFlowGPerMin) / (powderFlowGPerS * 60);
 }
 
 export function renderMetrics(sample, powderFlowRateGPerS = null) {
@@ -233,7 +236,9 @@ export function createControllinoMeasurementsComponent({descriptors = [], getHis
     values.className = "metric-values pressure-values";
     values.dataset.pressureGroup = group;
     values.hidden = true;
-    values.style.gridTemplateColumns = `repeat(${descriptors.filter(item => item.group === group).length}, minmax(0, 1fr))`;
+    if (group !== "low") {
+      values.style.gridTemplateColumns = `repeat(${descriptors.filter(item => item.group === group).length}, minmax(0, 1fr))`;
+    }
     card.appendChild(values);
     return {group, label, legacyLabel, legacyValues, values};
   });
@@ -251,8 +256,27 @@ export function createControllinoMeasurementsComponent({descriptors = [], getHis
     unit.textContent = descriptor.unit;
     channel.appendChild(unit);
     row.append(channel, value);
+    let velocity = null;
+    if (descriptor.id === 4) {
+      row.className = "pitot-reading";
+      const reading = document.createElement("span");
+      reading.className = "pitot-velocity";
+      const velocityLabel = document.createElement("span");
+      velocityLabel.className = "channel";
+      velocityLabel.textContent = "Velocity";
+      const velocityUnit = document.createElement("span");
+      velocityUnit.className = "unit";
+      velocityUnit.textContent = "m/s";
+      velocityLabel.appendChild(velocityUnit);
+      velocity = document.createElement("span");
+      velocity.className = "value";
+      velocity.textContent = "--";
+      reading.append(velocityLabel, velocity);
+      reading.title = "Estimated nitrogen velocity · P4 differential · TC-0 temperature · total pressure: 6 mbar + AI10 − AI08 + AI12 · low-speed approximation";
+      row.appendChild(reading);
+    }
     cards.find(card => card.group === descriptor.group).values.appendChild(row);
-    return {descriptor, row, value, ready: !pressureConfigurationStatus(descriptor),
+    return {descriptor, row, value, velocity, ready: !pressureConfigurationStatus(descriptor),
       color: colors[index % colors.length]};
   });
   let controllino = false;
@@ -324,10 +348,14 @@ export function createControllinoMeasurementsComponent({descriptors = [], getHis
       for (const chart of charts) updateChart(chart);
     }
     if (!controllino) return;
-    for (const {descriptor, row, value} of rows) {
+    for (const {descriptor, row, value, velocity} of rows) {
       const reading = controllinoPressureReading(sample, descriptor);
       setText(value, reading.value === null ? "--"
-        : reading.value.toFixed(1));
+        : reading.value.toFixed(descriptor.unit === "mbar" ? 2 : 1));
+      if (velocity) {
+        const speed = finiteSampleNumber(sample, "pitot_velocity_m_s");
+        setText(velocity, speed === null ? "--" : speed.toFixed(2));
+      }
       const raw = [reading.adc === null ? "" : `${reading.adc.toFixed(0)} counts`,
         reading.voltage === null ? "" : `${reading.voltage.toFixed(3)} V`].filter(Boolean);
       row.title = `${descriptor.label} · ${descriptor.terminal} · ${reading.status}${raw.length
@@ -362,6 +390,7 @@ export const UI_CONFIG = Object.freeze({
     sickPressure: 3,
     massFlow: 2,
     airPowderRatio: 2,
+    pistonPosition: 1,
     heartbeat: 0
   }),
   massFlowComparison: Object.freeze([
@@ -557,6 +586,7 @@ export function stepperInterlockPresentation(latest) {
 }
 
 export function createStepperComponent({getLatest, applySample, limits}) {
+  const positionDigits = UI_CONFIG.metricPrecision.pistonPosition;
   const els = elements([
     "emergencyStop", "emergencyReset", "emergencyState", "stepperForm",
     "stepperDistanceField", "stepperDistance", "stepperSpeed", "stepperSpeedLabel",
@@ -619,7 +649,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
   els.brushlessPulseWidth.min = "1000";
   els.brushlessPulseWidth.max = "2000";
   els.brushlessPulseWidth.step = "1";
-  setText(els.stepperDroMinLabel, `Bottom ${droVisualMinMm.toFixed(2)} mm`);
+  setText(els.stepperDroMinLabel, `Bottom ${droVisualMinMm.toFixed(positionDigits)} mm`);
   setText(els.stepperDroMaxLabel, "Top 0 mm");
   const modeInputs = [els.stepperModeLocal, els.stepperModeWeb];
 
@@ -842,7 +872,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
         zeroSet
           ? "DRO piston position unavailable."
           : `DRO position ${
-            Number.isFinite(rawPositionMm) ? rawPositionMm.toFixed(2) : "unavailable"
+            Number.isFinite(rawPositionMm) ? rawPositionMm.toFixed(positionDigits) : "unavailable"
           } millimeters. Piston position unavailable.`,
       );
       return;
@@ -865,7 +895,7 @@ export function createStepperComponent({getLatest, applySample, limits}) {
 
     els.stepperPistonVisual.setAttribute(
       "aria-label",
-      `DRO piston position ${positionMm.toFixed(2)} millimeters relative to the D8 top zero; positive is upward and negative is downward${
+      `DRO piston position ${positionMm.toFixed(positionDigits)} millimeters relative to the D8 top zero; positive is upward and negative is downward${
         fresh ? "" : "; sensor data stale and graphic frozen"
       }${outOfRange ? "; outside the displayed stroke" : ""}.`,
     );
@@ -979,8 +1009,8 @@ export function createStepperComponent({getLatest, applySample, limits}) {
       Number.isFinite(droVelocityMmS);
     setText(els.stepperDroPosition, droHasSample
       ? droZeroSet && droZeroedPosition !== null
-        ? `${droZeroedPosition.toFixed(2)} mm`
-        : `${numberValue(latest, "stepper_dro_position_mm", 2)} mm`
+        ? `${droZeroedPosition.toFixed(positionDigits)} mm`
+        : `${numberValue(latest, "stepper_dro_position_mm", positionDigits)} mm`
       : "--");
     if (stepperDroVelocity) {
       setText(

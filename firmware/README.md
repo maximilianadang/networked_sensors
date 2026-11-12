@@ -1,4 +1,4 @@
-# Controllino IO (firmware 1.6.0)
+# Controllino IO (firmware 1.6.1)
 
 All three motor builds use the LinACE encoder and expanded IO by default.
 USB and Ethernet share the same V1 motor commands and compact JSON telemetry.
@@ -72,7 +72,8 @@ environment. Motor variants do not select ESP32—the expanded IO is shared by a
 three current builds. A disabled ESP32 has no top status pill.
 
 Low-pressure inputs P1–P4 are AI10–AI13; high-pressure inputs P5–P7 are
-AI0–AI2. In Controllino mode these replace the dashboard's ESP32 and SICK
+AI0–AI2. Firmware 1.6.1 appends P8 on AI08 (Arduino A8), a fifth
+low-pressure input, without renumbering existing channels. In Controllino mode these replace the dashboard's ESP32 and SICK
 pressure measurements respectively. Flow measurements keep their existing
 sources. Open-flow calculations use the three logical valve states; the SICK
 total remains gated by physical R5 (now logical solenoid 3). Channel labels,
@@ -210,7 +211,7 @@ their original bounded duration and do not receive automatic renewal.
 
 The dashboard reads `pressure_inputs` from `system_config.json`. Missing
 entries use the shared defaults; no channel has an assumed pressure range.
-Each entry is keyed by the stable P1–P7 ID and accepts `label`,
+Each entry is keyed by the stable P1–P8 ID and accepts `label`,
 `volts_per_count` and `calibration`.
 
 - `calibration: null` leaves pressure blank; raw voltage and ADC counts remain
@@ -219,58 +220,94 @@ Each entry is keyed by the stable P1–P7 ID and accepts `label`,
   `pressure_max`, `unit` and `reference` from the sensor's specifications.
 - Calibration units may be `Pa`, `kPa`, `MPa`, `hPa`, `mbar`, `bar` or `psi`
   (case-sensitive). The host converts pressure values and summary means to
-  **mbar** for low-pressure P1–P4 and **PSI** for high-pressure P5–P7.
+  **mbar** for low-pressure P1–P4 and P8 and **PSI** for high-pressure P5–P7.
   Configuration and recording metadata retain the original calibration units,
   endpoints and gauge/absolute reference. Unit conversion does not change that
   reference. Unsupported units are rejected.
 - Standard-input voltage scaling is nominal for a 24 V-powered controller:
   `5 * 6.14 / 1024` V/count ([manufacturer](https://www.controllino.com/inputs/)).
   Confirm the reference voltage/divider before calibrating pressure.
-- Bench voltage calibration (2026-10-23): P6 (AI1) uses `0.800 / 24` V/count
-  from a measured 0.798–0.801 V; P7 (AI2) uses `0.803 / 24` V/count from a
-  measured 0.803 V. Both channels reported 24 ADC counts at calibration.
-- AI12/AI13 cannot report pressure until their `volts_per_count` is verified
-  and sensor calibration supplied; a 0–10 V input rating alone does not establish
-  ADC scaling. Their raw counts remain recorded.
 
 Restart the dashboard after changing calibration. Invalid or stale samples
 are blank in live charts; raw evidence remains available. `merged_samples.csv`
 contains converted values and validity; `stepper_raw.csv` contains raw telemetry.
 Recording metadata freezes the configuration used for the run. New pressure
-summaries include all seven channels and never substitute old ESP32 values.
+summaries include all eight channels and never substitute old ESP32 values.
 
-P1 uses a provisional bench calibration from 2026-10-23: the released baseline
-was 0 ADC counts, and the captured 24-count pulse peak corresponded to the
-operator's 19.25 mbar reference peak. This gives `19.25 / 24` mbar/count
-(about 0.8021 mbar/count). Its existing `volts_per_count` is retained. Keeping
-the existing 0–5 V validity range gives an extrapolated `pressure_max` of
-133.76764386536374 mbar; this is not a verified sensor full-scale rating.
-Additional held reference pressures are needed to validate the fit's accuracy.
+The saved machine configuration currently uses:
 
-Low-pressure P2–P4 still have 0–5 V, 0–100 PSI configured (reference unspecified)
-and need their own reference checks. High-pressure P5–P7 use McMaster 2957N36's
-supplier-listed nominal 0–5 V output and 0–75 PSI absolute range. Sensor pressure
-ranges do not establish the controller's ADC voltage scale. AI12/AI13 pressure
-stays unavailable while their separate `volts_per_count` setting is null.
+| Channel | Terminal | Sensor output | Pressure range | V/count |
+|---|---|---|---|---|
+| P1 | AI10 | 0–10 V | 0–25 mbar | 0.03 |
+| P2 | AI11 | 0–10 V | 0–250 mbar | 0.03 |
+| P3 | AI12 | 0–10 V | 0–25 mbar | 0.0098 |
+| P4 | AI13 | 0–10 V | 0–25 mbar | 0.0098 |
+| P5–P7 | AI0–AI2 | 0–5 V | 0–200 PSI absolute | 0.03 |
+| P8 | AI08 | 0–10 V | 0–25 mbar | 0.03 |
+
+P8 is configured in advance for the planned AI08 sensor. Its pressure range
+matches P3; its voltage conversion follows the standard input used by AI10.
+Sensor pressure ranges do not establish the controller's ADC voltage scale.
+
+## Nitrogen Pitot velocity
+
+P4 (AI13) measures total-minus-static pressure. Its dashboard reading includes
+an adjacent estimated velocity in m/s. TC-0 supplies gas temperature in Celsius;
+the calculation converts this to Kelvin and uses nitrogen's specific gas
+constant, 296.8 J/(kg K). The pressure path is:
+
+- Total absolute pressure, mbar: `6 + P1 (AI10) - P8 (AI08) + P3 (AI12)`.
+- Static absolute pressure, Pa: `100 * (total_mbar - P4)`.
+- Density, kg/m³: `static_pa / (296.8 * (TC0_c + 273.15))`.
+- Estimated velocity, m/s: `sqrt(2 * 100 * P4 / density)`.
+
+The 6 mbar value is an assumed absolute reference. This is the low-speed,
+approximately incompressible Pitot relation. Appreciable compressibility requires
+a different velocity model. Displayed velocity has two decimal places; this does
+not establish measurement accuracy.
+
+All four pressures must be calibrated and valid under the existing pressure
+freshness rules, and TC-0 must be ready on a fresh, error-free ED-593 source.
+Missing inputs, negative Pitot differential, nonpositive static pressure or
+nonphysical temperature leave velocity blank. Zero Pitot differential gives
+zero velocity. No missing pressure is silently substituted with zero.
+
+AI08 is acquired as the eighth ADC channel, with the same standard-input voltage
+scale convention as AI10/AI11. Its sensor pressure calibration belongs in
+`system_config.json` under `pressure_inputs.8`: 0–10 V maps to 0–25 mbar,
+matching P3. AI08 retains the standard-input 0.03 V/count conversion; P3 uses
+its separate dedicated-input conversion. An analog zero cannot prove that a sensor is connected.
+The host also accepts older seven-channel firmware, leaving P8 unavailable.
+Merged recordings and CSV exports include `pitot_total_pressure_pa`,
+`pitot_static_pressure_pa`, `pitot_density_kg_m3` and `pitot_velocity_m_s`, including
+blank columns before inputs become available. Raw pressure ADCs and TC-0 remain
+available separately.
 
 ## Mass flow
 
 The third identical SICK flow sensor uses DXMR90 IO-Link port 3 in direct mode.
 The first mass-flow trace remains the sum of ports 1 and 2; it excludes port 3
 and is independent of valve state. Port 3 is the second, independent trace.
-Its connection and process-data-valid flags must both be set, and missing,
-invalid or stale readings stay blank. A port 3 read error does not discard
-successful readings from ports 1 and 2. Republished mode has no assigned
-port 3 register and leaves this channel unavailable.
+All three ports use the same process-input reader and decoder, without a
+separate per-port connection/status gate. A read failure on any port reports a
+DXMR90 transport error; the next successful poll restores all three readings.
+Republished mode has no assigned port 3 register and leaves this channel
+unavailable.
 
-In Controllino mode, that third sensor also supplies Open-Line Air Flow and the
-air-to-powder mass ratio, without gating on a valve or controller connection.
+In Controllino mode, that third sensor supplies Open-Line Air Flow, without
+gating on a valve or controller connection.
 The shared `open_line_air_flow_g_min` field is blank unless DXMR90 is fresh,
-transport has no error and port 3 process data is valid. A measured zero stays
+transport has no error and the measured value is finite. A measured zero stays
 zero. Its `open_line_air_flow_source` is `dxmr90_port3`; legacy mode instead uses
 `esp32_open_channels` and retains the existing valve-gated ESP32 flow, provided
-the ESP32 source is healthy. The ratio divides this air flow in g/min by the
-specified powder flow in g/s multiplied by 60; missing air flow stays blank.
+the ESP32 source is healthy.
+
+The air-to-powder mass ratio uses the sum of all three SICK sensors: ports 1 + 2
+plus port 3, in g/min, divided by the entered powder flow in g/s multiplied by
+60. This converts both flows to the same units. The ratio stays blank unless
+DXMR90 is fresh and error-free, both flow terms are available, and the entered
+powder rate is positive. It uses requested powder flow rather than measured
+powder delivery.
 
 Recordings include both canonical fields from startup. The summary/export metric
 `open_line_air_flow_g_per_min_active` uses the same measurement and the existing
@@ -281,13 +318,17 @@ blank; legacy mode retains them. Raw sensor fields remain diagnostic evidence.
 `merged_samples.csv` and `dxmr90_raw.csv` include the separate
 `dxmr90_port3_mass_flow_g_min`, `dxmr90_port3_flow_valid`,
 `dxmr90_port3_status` and `dxmr90_port3_error` fields from recording startup.
+The last three fields are retained for recording compatibility: `flow_valid`
+indicates a finite decoded flow; `status` and `error` are unset in direct mode.
+Transport errors are reported through the shared DXMR90 transport-error field.
 This keeps the channel when the sensor connects after recording begins.
 Cached raw values remain diagnostic evidence; chart freshness also requires
 a live DXMR90 source without a transport error.
 
-The port 3 status/process block follows [Banner data reference 229732](https://info.bannerengineering.com/cs/groups/public/documents/literature/229732.pdf),
-registers 43001–43017 (the reader omits the leading 4). All three sensors use
-the shared 32-byte SICK FTMg process-data decoder; no master settings are written.
+The process-input windows follow [Banner data reference 229732](https://info.bannerengineering.com/cs/groups/public/documents/literature/229732.pdf),
+registers 41002–41017, 42002–42017 and 43002–43017 (the reader omits the leading
+4). All three sensors use the shared 32-byte SICK FTMg process-data decoder;
+no master settings are written.
 
 ## Encoder and validation
 
@@ -297,6 +338,14 @@ configured as inputs without pull-ups. The encoder requires a 4.5–5.5 V supply
 at the readhead; its signal outputs are 3.3 V TTL compatible. Set a new top zero after installation;
 the old DRO zero is retained under its old encoder identity and cannot apply
 to LinACE. Machine travel and direction still require installation checks.
+
+The configured encoder is `CHE12PWA450E05BA00`: its accuracy code E specifies
+±100 µm (±0.1 mm), while the 450 mm PWM version resolves 10 µm (0.01 mm).
+See the local [LinACE datasheet](../devices/LinACE/CHD01_07.pdf), PWM interface
+specifications and part-number table. The operator's piston position is rounded
+to 0.1 mm; raw diagnostics, acquisition and recordings retain 0.01 mm readings.
+Resolution is distinct from absolute accuracy and does not establish acquisition
+accuracy in this installation.
 
 Read-only `dpwm`, `dstat` and `dedge` diagnostics expose the instantaneous
 PWM/Status input levels and total observed PWM edges. The dashboard preserves
@@ -324,3 +373,29 @@ Firmware 1.5.10 adds LinACE `dt`, the acquisition timestamp of the reported
 position in controller milliseconds (unsigned 32-bit, wraps at rollover).
 The dashboard derives velocity from acquisition intervals when present, retaining
 the arrival-time fallback for older firmware. Wiring and PWM capture are unchanged.
+
+### Capture latency investigation
+
+Inspection of the compiled CubeMars firmware identified improvements to evaluate
+on hardware; these optimizations have not been implemented:
+
+- `StepperPwm::start()` calculates its timer period with interrupts disabled.
+  `onStep()` repeats that calculation inside the ISR when speed changes. The
+  compiled speed-change path calls two 32-bit software division routines; their
+  instruction counts alone exceed 70 µs at 16 MHz. Precompute timer settings
+  before entering these sections. This division is not repeated at steady speed.
+- `LinaceReader::onClock()` updates diagnostics before reading Timer5. In the
+  inspected build, `millis()` also executes before reading the PWM pin level.
+  Read the timer and input level first and reduce interrupt callback overhead.
+- Timer3 overflow interrupts occur every step period, although their handler
+  only acts when finishing a move. Investigate arming them only for completion,
+  preserving pulse counts and the final output edge.
+- USB status streams alongside Ethernet, generating UART transmit interrupts.
+  Consider optional streaming without breaking USB control or discovery.
+
+These are identified delay paths, not measurements of their contribution to
+position jitter. Compare stationary and moving raw readings before and after
+changes, including operation with network/serial traffic and CAN activity.
+No exposed MAXI Automation terminal or X1/X2 pin provides a free dedicated ICP
+input: PD4/ICP1, PL0/ICP4 and PL1/ICP5 are not exposed; PE7/ICP3 is wired to
+internal overload detection, and Timer3 drives STEP.

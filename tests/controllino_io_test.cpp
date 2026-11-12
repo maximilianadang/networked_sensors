@@ -210,31 +210,31 @@ static void testStepperPwm() {
 }
 
 static void testAdc() {
-  const byte pins[7] = {64, 65, 68, 69, 54, 55, 56};
+  const byte pins[8] = {64, 65, 68, 69, 54, 55, 56, 62};
   PressureAdc adc; adc.begin(pins); adcReads.clear();
   Print initial; adc.writeStatus(initial, 0);
-  assert(initial.text == ",\"adc\":[0,0,0,0,0,0,0],\"adcage\":-1,\"adcseq\":0");
+  assert(initial.text == ",\"adc\":[0,0,0,0,0,0,0,0],\"adcage\":-1,\"adcseq\":0");
   adc.poll(9); assert(adcReads.empty());
-  for (uint32_t i = 1; i <= 6; ++i) { adc.poll(i * 10); adc.poll(i * 10); }
-  assert(adcReads.size() == 12);
-  Print partial; adc.writeStatus(partial, 60); assert(partial.text == initial.text);
-  adc.poll(70);
-  assert(adcReads == std::vector<int>({64,64,65,65,68,68,69,69,54,54,55,55,56,56}));
-  Print complete; adc.writeStatus(complete, 75);
-  assert(complete.text == ",\"adc\":[64,65,68,69,54,55,56],\"adcage\":65,\"adcseq\":1");
+  for (uint32_t i = 1; i <= 7; ++i) { adc.poll(i * 10); adc.poll(i * 10); }
+  assert(adcReads.size() == 14);
+  Print partial; adc.writeStatus(partial, 70); assert(partial.text == initial.text);
+  adc.poll(80);
+  assert(adcReads == std::vector<int>({64,64,65,65,68,68,69,69,54,54,55,55,56,56,62,62}));
+  Print complete; adc.writeStatus(complete, 85);
+  assert(complete.text == ",\"adc\":[64,65,68,69,54,55,56,62],\"adcage\":75,\"adcseq\":1");
   adcGeneration = 100;
-  for (uint32_t i = 8; i <= 13; ++i) adc.poll(i * 10);
+  for (uint32_t i = 9; i <= 15; ++i) adc.poll(i * 10);
   Print concurrent; bool once = false;
-  concurrent.beforePrint = [&] { if (!once) { once = true; adc.poll(140); } };
-  adc.writeStatus(concurrent, 135);
-  assert(concurrent.text == ",\"adc\":[64,65,68,69,54,55,56],\"adcage\":125,\"adcseq\":1");
-  Print next; adc.writeStatus(next, 145);
-  assert(next.text == ",\"adc\":[164,165,168,169,154,155,156],\"adcage\":65,\"adcseq\":2");
+  concurrent.beforePrint = [&] { if (!once) { once = true; adc.poll(160); } };
+  adc.writeStatus(concurrent, 155);
+  assert(concurrent.text == ",\"adc\":[64,65,68,69,54,55,56,62],\"adcage\":145,\"adcseq\":1");
+  Print next; adc.writeStatus(next, 165);
+  assert(next.text == ",\"adc\":[164,165,168,169,154,155,156,162],\"adcage\":75,\"adcseq\":2");
   // Unsigned millis rollover continues scheduled acquisition and age arithmetic.
   PressureAdc roll; roll.begin(pins);
-  for (uint32_t i = 0; i < 7; ++i) roll.poll(uint32_t(0xffffffd0UL + i * 10));
-  Print rolled; roll.writeStatus(rolled, 20);
-  assert(rolled.text.find("\"adcage\":68,\"adcseq\":1") != std::string::npos);
+  for (uint32_t i = 0; i < 8; ++i) roll.poll(uint32_t(0xffffffd0UL + i * 10));
+  Print rolled; rolled.text.clear(); roll.writeStatus(rolled, 30);
+  assert(rolled.text.find("\"adcage\":78,\"adcseq\":1") != std::string::npos);
 }
 
 static void testRelays() {

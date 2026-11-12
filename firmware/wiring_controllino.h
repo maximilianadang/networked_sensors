@@ -28,8 +28,9 @@ constexpr byte PIN_DRO_CLOCK = 21; // X1 SCL / chip pin 43 / PD0 (reserved for D
 constexpr byte PIN_DRO_DATA = 6;   // Digital 4 / chip pin 15 / PH3
 constexpr byte PIN_DRO_STATUS = 42; // X2 Digital 12 / PL7 (Arduino 42, not 12)
 constexpr byte PIN_DRO_SECONDARY = DRO_IS_LINACE ? PIN_DRO_STATUS : PIN_DRO_DATA;
-// P1..P7: screw AI10, AI11, AI12, AI13, AI0, AI1, AI2. AI12/13 are A14/15.
-constexpr byte PRESSURE_PINS[] = {A10, A11, A14, A15, A0, A1, A2};
+// P1..P8: screw AI10, AI11, AI12, AI13, AI0, AI1, AI2, AI08.
+// Append AI08 to preserve existing channel IDs; AI12/13 are Arduino A14/15.
+constexpr byte PRESSURE_PINS[] = {A10, A11, A14, A15, A0, A1, A2, A8};
 // Operator convention: Forward/up is positive; Reverse/down is negative.
 constexpr byte PIN_LIMIT_NEG = A12; // DI0: bottom / Reverse / negative pulses
 constexpr byte PIN_LIMIT_POS = A13; // DI1: top / Forward / positive pulses
@@ -43,7 +44,7 @@ constexpr byte DIR_POSITIVE = HIGH, DIR_NEGATIVE = LOW;  // electrical mapping, 
 // Board/core owns W5100 CS and SPI configuration.
 constexpr int CONTROLLINO_PINS[] = {PIN_STEP, PIN_DIR, PIN_ENABLE, PIN_AUX,
     PIN_DRO_CLOCK, PIN_DRO_SECONDARY, PIN_SOLENOID4, PIN_SOLENOID5, PIN_SOLENOID6,
-    A10, A11, A14, A15, A0, A1, A2, PIN_LIMIT_POS, PIN_LIMIT_NEG};
+    A10, A11, A14, A15, A0, A1, A2, A8, PIN_LIMIT_POS, PIN_LIMIT_NEG};
 constexpr int ETHERNET_PINS[] = {PIN_SPI_SS_ETHERNET_LIB, MISO, MOSI, SCK, SS, PIN_RTC_CS};
 static_assert(distinctPins(CONTROLLINO_PINS) &&
               avoidsPins(CONTROLLINO_PINS, ETHERNET_PINS),

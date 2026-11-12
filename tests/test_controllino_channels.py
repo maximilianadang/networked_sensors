@@ -54,6 +54,19 @@ class ControllinoChannelTests(unittest.TestCase):
         startup = self.controller.decode_status_line(json.dumps({**payload, "adcage": -1, "adcseq": 0}))
         self.assertIsNone(startup["stepper_pressure1_adc"])
 
+    def test_eighth_channel_appends_ai08_and_old_firmware_leaves_it_missing(self):
+        old = self.controller.decode_status_line(json.dumps(self.controller.payload))
+        self.assertEqual(old["stepper_pressure7_adc"], 550)
+        self.assertIsNone(old["stepper_pressure8_adc"])
+        extended = {**self.controller.payload, "adc": [250, 300, 350, 400, 450, 500, 550, 600]}
+        new = self.controller.decode_status_line(json.dumps(extended))
+        self.assertEqual(new["stepper_pressure7_adc"], 550)
+        self.assertEqual(new["stepper_pressure8_adc"], 600)
+        startup = self.controller.decode_status_line(json.dumps({**extended, "adcseq": 0, "adcage": -1}))
+        self.assertIsNone(startup["stepper_pressure8_adc"])
+        with self.assertRaises(ValueError):
+            self.controller.decode_status_line(json.dumps({**extended, "adc": [0] * 9}))
+
     def test_calibration_history_and_recording_use_the_same_values(self):
         expected_mbar = 344.7378646584181  # 5 PSI.
         self.fixture.config_path.write_text(json.dumps({

@@ -136,3 +136,16 @@ nodes.get("stepperModeWeb").checked = true; nodes.get("stepperModeLocal").checke
 nodes.get("stepperModeWeb").listeners.change[0](); await flush();
 check(nodes.get("stepperModeWeb").checked && nodes.get("stepperCommandFeedback").hidden,
       "A confirmed response selects the actual mode quietly");
+
+// Operator position reflects the specified accuracy; raw evidence stays finer.
+sample = {...baseline, stepper_dro_capable: true, stepper_dro_valid_frame_count: 1,
+  stepper_dro_fresh: true, stepper_dro_zero_set: true,
+  stepper_dro_position_mm: 123.45, stepper_dro_zeroed_position_mm: -12.34};
+component.render(sample);
+check(nodes.get("stepperDroPosition").textContent === "-12.3 mm",
+      "Piston position must display tenths of a millimeter");
+check(nodes.get("stepperDroRawPosition").textContent === "123.45 mm",
+      "Raw diagnostic position retains encoder resolution");
+sample = {...sample, stepper_dro_zero_set: false}; component.render(sample);
+check(nodes.get("stepperDroPosition").textContent === "123.5 mm",
+      "Unzeroed operator position uses the same precision");

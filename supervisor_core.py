@@ -2804,7 +2804,7 @@ class ControllinoProtocol:
         pressure = any(key in payload for key in ("adc", "adcage", "adcseq"))
         if pressure:
             adc, age, sequence = (payload.get(key) for key in ("adc", "adcage", "adcseq"))
-            if (not isinstance(adc, list) or len(adc) != len(PRESSURE_INPUTS)
+            if (not isinstance(adc, list) or len(adc) not in (7, len(PRESSURE_INPUTS))
                     or any(type(value) is not int or not 0 <= value <= 1023 for value in adc)
                     or type(age) is not int or not -1 <= age <= 0x7FFFFFFF
                     or type(sequence) is not int or not 0 <= sequence <= 0xFFFFFFFF
@@ -2871,7 +2871,7 @@ class ControllinoProtocol:
             values[f"stepper_solenoid{number}_capable"] = key in payload
             values[f"stepper_solenoid{number}_on"] = bool(payload[key]) if key in payload else None
         values.update({f"stepper_pressure{n['id']}_adc": payload["adc"][i]
-                       if pressure and payload["adcseq"] else None
+                       if pressure and payload["adcseq"] and i < len(payload["adc"]) else None
                        for i, n in enumerate(PRESSURE_INPUTS)})
         values.update({
             "stepper_can_motor_capable": can_motor,

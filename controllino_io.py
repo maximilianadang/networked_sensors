@@ -22,10 +22,10 @@ PRESSURE_TO_PSI = {"Pa": 1e-5 * PSI_PER_BAR, "kPa": .01 * PSI_PER_BAR,
 PRESSURE_INPUTS = tuple(
     {
         "id": index, "terminal": terminal, "arduino_pin": pin,
-        "group": "low" if index <= 4 else "high",
-        "group_label": "Low pressure" if index <= 4 else "High pressure",
-        "group_index": index if index <= 4 else index - 4,
-        "unit": "mbar" if index <= 4 else "psi",
+        "group": "low" if index <= 4 or index == 8 else "high",
+        "group_label": "Low pressure" if index <= 4 or index == 8 else "High pressure",
+        "group_index": 5 if index == 8 else index if index <= 4 else index - 4,
+        "unit": "mbar" if index <= 4 or index == 8 else "psi",
         "input_range_v": (0, 10) if index in (3, 4) else None,
         "supply_v": 5 if index in (5, 6, 7) else None,
         "supply_known": index in (5, 6, 7),
@@ -33,7 +33,7 @@ PRESSURE_INPUTS = tuple(
     }
     for index, (terminal, pin) in enumerate(
         (("AI10", "A10"), ("AI11", "A11"), ("AI12", "A14"),
-         ("AI13", "A15"), ("AI0", "A0"), ("AI1", "A1"), ("AI2", "A2")), 1
+         ("AI13", "A15"), ("AI0", "A0"), ("AI1", "A1"), ("AI2", "A2"), ("AI08", "A8")), 1
     )
 )
 CONTROLLINO_RELAYS = (
@@ -75,7 +75,7 @@ def validate_pressure_config(values: object = None) -> dict[str, dict]:
     if values is None:
         return deepcopy(DEFAULT_PRESSURE_CONFIG)
     if not isinstance(values, dict) or set(values) - set(DEFAULT_PRESSURE_CONFIG):
-        raise ValueError("pressure_inputs must be an object keyed by channel IDs '1' through '7'")
+        raise ValueError("pressure_inputs must be an object keyed by channel IDs '1' through '8'")
     result = deepcopy(DEFAULT_PRESSURE_CONFIG)
     calibration_keys = {"voltage_min", "voltage_max", "pressure_min", "pressure_max", "unit", "reference"}
     for descriptor in PRESSURE_INPUTS:
@@ -168,3 +168,42 @@ def transform_pressure_sample(sample: dict, config: Mapping[str, Mapping], *, st
                 low, high = _pressure_endpoints(calibration, channel["unit"])
                 sample[prefix + "value"] = low + fraction * (high - low)
         sample[prefix + "valid"] = bool(valid)
+
+
+PITOT_FIELDS = ("pitot_total_pressure_pa", "pitot_static_pressure_pa",
+                "pitot_density_kg_m3", "pitot_velocity_m_s")
+NITROGEN_GAS_CONSTANT = 296.8  # J/(kg K)
+
+
+def transform_pitot_sample(sample: dict) -> None:
+    """Estimate outlet velocity from P4, TC-0 and the signed pressure path.
+
+    Total pressure = 6 mbar absolute + AI10 - AI08 + AI12.
+    P4 (AI13) is total-minus-static pressure. The velocity estimate assumes
+    low-speed, approximately incompressible nitrogen flow.
+    """
+    sample.update(dict.fromkeys(PITOT_FIELDS))
+    pressures = []
+    for channel in (1, 8, 3, 4):
+        prefix = f"stepper_pressure{channel}_"
+        value = sample.get(prefix + "value")
+        if sample.get(prefix + "valid") is not True or not _finite(value):
+            return
+        pressures.append(value)
+    temperature = sample.get("ed593_tc0_temperature_c")
+    if (sample.get("ed593_connected") is not True or sample.get("ed593_transport_error")
+            or sample.get("ed593_tc0_ready") is not True or not _finite(temperature)
+            or temperature <= -273.15):
+        return
+    inlet, reverse, outlet, differential = pressures
+    total = 100 * (6 + inlet - reverse + outlet)
+    static = total - 100 * differential
+    if differential < 0 or not _finite(total) or not _finite(static) or static <= 0:
+        return
+    density = static / (NITROGEN_GAS_CONSTANT * (temperature + 273.15))
+    if not _finite(density) or density <= 0:
+        return
+    velocity = math.sqrt(2 * (100 * differential) / density)
+    if not _finite(velocity):
+        return
+    sample.update(zip(PITOT_FIELDS, (total, static, density, velocity)))

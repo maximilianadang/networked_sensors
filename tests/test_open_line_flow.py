@@ -68,16 +68,20 @@ class OpenLineFlowTests(unittest.TestCase):
 
     def test_missing_invalid_and_failed_third_never_fall_back_to_other_flow(self):
         original = dict(self.dxmr90.values)
-        for change in ({"dxmr90_port3_flow_valid": False}, {"dxmr90_port3_flow_valid": None},
-                       {"dxmr90_port3_error": "Port 3 unavailable"},
-                       *({"dxmr90_port3_mass_flow_g_min": value}
-                         for value in (None, True, "12", math.nan, math.inf))):
+        for change in ({"dxmr90_port3_mass_flow_g_min": value}
+                       for value in (None, True, "12", math.nan, math.inf)):
             with self.subTest(change=change):
                 self.dxmr90.values = dict(original, **change)
                 row = self.sample()
                 self.assertIsNone(row["open_line_air_flow_g_min"])
                 self.assertEqual(row["open_line_air_flow_source"], "dxmr90_port3")
                 self.assertEqual(row["dxmr90_total_mass_flow_g_min"], 30)
+
+    def test_third_has_no_extra_port_status_gate(self):
+        self.dxmr90.values.update(dxmr90_port3_flow_valid=False,
+                                 dxmr90_port3_error="Legacy diagnostic",
+                                 dxmr90_port3_status=0)
+        self.assertEqual(self.sample()["open_line_air_flow_g_min"], 12)
 
     def test_cached_third_is_blank_when_master_is_stale_or_has_transport_error(self):
         self.assertEqual(self.sample()["open_line_air_flow_g_min"], 12)
@@ -113,10 +117,10 @@ class OpenLineFlowTests(unittest.TestCase):
         self.dxmr90.values["dxmr90_port3_mass_flow_g_min"] = None
         self.dxmr90.values["dxmr90_port3_flow_valid"] = False
         recorder = self.recorder(self.sample())
-        for elapsed, value, valid in ((.1, 20, True), (.2, 900, False),
+        for elapsed, value, healthy in ((.1, 20, True), (.2, 900, False),
                                        (.3, 40, True), (.4, 0, True), (.5, 100, True)):
-            self.dxmr90.values.update(dxmr90_port3_mass_flow_g_min=value,
-                                     dxmr90_port3_flow_valid=valid)
+            self.dxmr90.values["dxmr90_port3_mass_flow_g_min"] = value
+            self.dxmr90.last_error = None if healthy else "Read timeout"
             recorder.record_sample(self.sample(elapsed), self.merger.fresh_readings())
         metrics = recorder.finish()["metrics"]
         self.assertEqual(metrics["open_line_air_flow_g_per_min_active"], 30)

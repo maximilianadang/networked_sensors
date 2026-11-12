@@ -20,11 +20,11 @@ from typing import Any, Callable, Iterator, Mapping
 try:
     from ..recorder import FlowRunRecorder, list_recordings, resolve_artifact
     from .. import supervisor_core as core
-    from ..controllino_io import pressure_descriptors, transform_pressure_sample
+    from ..controllino_io import pressure_descriptors, transform_pressure_sample, transform_pitot_sample
 except ImportError:  # pragma: no cover - direct dashboard.py execution
     from recorder import FlowRunRecorder, list_recordings, resolve_artifact
     import supervisor_core as core
-    from controllino_io import pressure_descriptors, transform_pressure_sample
+    from controllino_io import pressure_descriptors, transform_pressure_sample, transform_pitot_sample
 
 from .system_config import SystemConfig
 from .experiment import ActuatorAction, ExperimentRunner, MoveStepperAction, RequestedStateAction, StepperModeAction, source_adapter_name
@@ -123,9 +123,6 @@ class SourceMerger:
         value = sample.get("dxmr90_port3_mass_flow_g_min" if controllino else "esp32_open_flow_gmin")
         healthy = (sample.get(f"{source}_connected") is True
                    and not sample.get(f"{source}_transport_error"))
-        if controllino:
-            healthy = (healthy and sample.get("dxmr90_port3_flow_valid") is True
-                       and not sample.get("dxmr90_port3_error"))
         sample["open_line_air_flow_source"] = "dxmr90_port3" if controllino else "esp32_open_channels"
         sample["open_line_air_flow_g_min"] = (
             value if healthy and type(value) in (int, float) and math.isfinite(value) else None)
@@ -376,6 +373,7 @@ class DashboardRuntime:
         timestamp = self.start_time + timedelta(seconds=elapsed_s)
         self.latest = self.merger.poll(elapsed_s, timestamp)
         transform_pressure_sample(self.latest, self.system_config.pressure_inputs)
+        transform_pitot_sample(self.latest)
         self._apply_stepper_dro_zero_locked(self.latest)
         self._apply_stepper_dro_velocity_locked(self.latest, elapsed_s)
         stepper = self.devices.sources.get("stepper")
