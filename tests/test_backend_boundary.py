@@ -590,6 +590,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(default['state'], 'ready')
         self.assertEqual(default['name'], 'record_motor_solenoids.csv')
         self.assertEqual(len(default['program']), 17)
+        self.assertEqual(len(default['fail_safe_program']), 4)
         self.assertTrue(any(row['device'] == 'stepper' and row['set_point'] == 'move' for row in default['program']))
         self.assertIsNone(default['started_s'])
         self.assertEqual(request("POST", "/api/experiment/load", {"csv": "invalid"})[0], 400)
@@ -609,6 +610,8 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(request("GET", "/api/experiment/temperatures.csv"), (200, temperature_example))
         narrow_example = (Path(__file__).resolve().parents[1] / "examples" / "record_motor_solenoids.csv").read_bytes()
         self.assertEqual(request("GET", "/api/experiment/record-motor-solenoids.csv"), (200, narrow_example))
+        fail_safe_example = (Path(__file__).resolve().parents[1] / "examples" / "record_motor_solenoids_fail_safe.csv").read_bytes()
+        self.assertEqual(request("GET", "/api/experiment/record-motor-solenoids-fail-safe.csv"), (200, fail_safe_example))
         status, data = request("POST", "/api/experiment/load", {"csv": example, "name": "example.csv"})
         self.assertEqual(status, 200)
         program_id = json.loads(data)["experiment"]["program_id"]

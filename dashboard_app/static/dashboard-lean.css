@@ -18,13 +18,21 @@
   --chart-bg: #ffffff;
   --chart-grid: #d8dee6;
   --chart-label: #596574;
-  --chart-blue: #1769aa;
-  --chart-green: #177a45;
-  --chart-amber: #a35d00;
-  --chart-red: #bd3541;
-  --chart-cyan: #087f8c;
-  --chart-violet: #7040b8;
+  /* High-chroma sRGB colors keep canvas curves and legend labels consistent. */
+  --chart-blue: #086cfc;
+  --chart-green: #2a8708;
+  --chart-amber: #996d08;
+  --chart-red: #e70f3e;
+  --chart-cyan: #0a8287;
+  --chart-violet: #c00fdf;
   --chart-gray: #586474;
+  /* 60-degree OKLCH hue spacing; maximize chroma within sRGB and readable contrast. */
+  --pressure-1: var(--chart-red);
+  --pressure-2: var(--chart-amber);
+  --pressure-3: var(--chart-green);
+  --pressure-4: var(--chart-cyan);
+  --pressure-5: var(--chart-blue);
+  --pressure-6: var(--chart-violet);
   --shadow: rgba(15, 23, 42, 0.10);
 }
 
@@ -237,9 +245,15 @@ button.emergency-reset { min-height: 26px; padding: 2px 6px; }
 .pressure-values { gap: 4px; }
 .pressure-values .channel { display: flex; align-items: baseline; gap: 2px; }
 .pressure-values .unit { font-size: inherit; }
-.pressure-values[data-pressure-group="low"] { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 8px; }
-/* Keep P4 and its derived velocity together after the other pressure channels. */
-.pressure-values .pitot-reading { grid-column: span 2; order: 1; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 8px; }
+.pressure-values[data-pressure-group="low"] { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 8px; grid-template-areas: "a b" "ar br" "c c" "pitot pitot"; }
+/* Opposite measurements of each boundary share a column. */
+.pressure-values[data-pressure-group="low"] > [data-pressure-index="1"] { grid-area: a; }
+.pressure-values[data-pressure-group="low"] > [data-pressure-index="5"] { grid-area: ar; }
+.pressure-values[data-pressure-group="low"] > [data-pressure-index="2"] { grid-area: b; }
+.pressure-values[data-pressure-group="low"] > [data-pressure-index="6"] { grid-area: br; }
+.pressure-values[data-pressure-group="low"] > [data-pressure-index="3"] { grid-area: c; }
+.pressure-values[data-pressure-group="low"] > [data-pressure-index="4"] { grid-area: pitot; }
+.pressure-values .pitot-reading { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 8px; }
 .pressure-values .pitot-reading > .channel { grid-column: 1; grid-row: 1; }
 .pressure-values .pitot-reading > .value { grid-column: 1; grid-row: 2; }
 .pressure-values .pitot-velocity { display: grid; grid-column: 2; grid-row: 1 / 3; min-width: 0; }
@@ -249,7 +263,7 @@ button.emergency-reset { min-height: 26px; padding: 2px 6px; }
   .metric-grid:has(.pressure-values[data-pressure-group="low"]:not([hidden])) {
     grid-template-columns: minmax(0, 2fr) repeat(5, minmax(0, 1fr));
   }
-  .pressure-values[data-pressure-group="low"] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .pressure-values[data-pressure-group="low"] { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-areas: "a b c ." "ar br pitot pitot"; }
 }
 
 /* SHARED PANELS: Pressure (bar), ESP32 Mass Flow (g/min), SICK Mass Flow (g/min).
@@ -708,6 +722,9 @@ canvas { display: block; width: 100%; height: 240px; background: var(--chart-bg)
 .experiment-controls > label { flex: 1 1 260px; min-width: 0; }
 .experiment-tools > summary { cursor: pointer; }
 .experiment-tools > label, .experiment-tools > .form-actions { margin-top: 8px; }
+.experiment-editors { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 12px; margin-top: 8px; }
+.experiment-editors label { display: grid; gap: 6px; min-width: 0; }
+.experiment-editors textarea { box-sizing: border-box; width: 100%; }
 #experimentChecks:empty { display: none; }
 .experiment-table-wrap { overflow-x: auto; }
 .experiment-table-wrap table { width: 100%; border-collapse: collapse; text-align: left; }
@@ -715,9 +732,9 @@ canvas { display: block; width: 100%; height: 240px; background: var(--chart-bg)
 .experiment-table-wrap th, .experiment-table-wrap td {
   padding: 6px 8px; border: 1px solid var(--line); white-space: nowrap;
 }
-.experiment-table-wrap tr[data-status="waiting"] { background: #fff3d6; }
-.experiment-table-wrap tr[data-status="passed"] { background: #dff6e8; }
-.experiment-table-wrap tr[data-status="failed"] { background: #ffe4e4; }
+.experiment-table-wrap [data-status="waiting"] { background: #fff3d6; }
+.experiment-table-wrap [data-status="passed"] { background: #dff6e8; }
+.experiment-table-wrap [data-status="failed"] { background: #ffe4e4; }
 #experimentChecks { margin: 0; padding-left: 20px; }
 #experimentChecks li[data-ok="false"] { color: #a12d32; }
 #experimentChecks li[data-ok="true"] { color: #1f7a4c; }

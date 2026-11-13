@@ -227,8 +227,8 @@ export function createControllinoMeasurementsComponent({descriptors = [], getHis
   const high = document.getElementById("sickPressureMetric");
   // An already-open page can briefly have older HTML while assets refresh.
   if (!low || !high || !descriptors.length) return {render() {}, draw: () => drawAllCharts(getHistory()), series: (id = "pressureChart") => UI_CONFIG.charts[id]};
-  const colors = ["--chart-blue", "--chart-green", "--chart-amber", "--chart-red",
-    "--chart-cyan", "--chart-violet", "--chart-gray"];
+  // Six equally spaced OKLCH hues; high-pressure curves use every other hue.
+  const colors = Array.from({length: 6}, (_, i) => `--pressure-${i + 1}`);
   const cards = Object.entries({low, high}).map(([group, card]) => {
     const label = card.querySelector("label");
     const legacyLabel = Array.from(label.childNodes);
@@ -243,12 +243,14 @@ export function createControllinoMeasurementsComponent({descriptors = [], getHis
     card.appendChild(values);
     return {group, label, legacyLabel, legacyValues, values};
   });
-  const rows = descriptors.map((descriptor, index) => {
+  const channelLabel = descriptor => `${descriptor.group === "low" ? "LP" : "HP"}${descriptor.group_index}`;
+  const rows = descriptors.map(descriptor => {
     const row = document.createElement("div");
     row.dataset.pressureId = String(descriptor.id);
+    row.dataset.pressureIndex = String(descriptor.group_index);
     const channel = document.createElement("span");
     channel.className = "channel";
-    channel.textContent = `P${descriptor.id}`;
+    channel.textContent = channelLabel(descriptor);
     const value = document.createElement("span");
     value.className = "value";
     value.textContent = "--";
@@ -278,7 +280,7 @@ export function createControllinoMeasurementsComponent({descriptors = [], getHis
     }
     cards.find(card => card.group === descriptor.group).values.appendChild(row);
     return {descriptor, row, value, velocity, ready: !pressureConfigurationStatus(descriptor),
-      color: colors[index % colors.length]};
+      color: colors[(descriptor.group_index - 1) * (descriptor.group === "high" ? 2 : 1) % colors.length]};
   });
   let controllino = false;
   const plotGrid = document.querySelector(".plot-grid");
@@ -1920,6 +1922,7 @@ export const API = Object.freeze({
   experimentLoad: "/api/experiment/load",
   experimentStart: "/api/experiment/start",
   experimentExample: "/api/experiment/record-motor-solenoids.csv",
+  experimentFailSafeExample: "/api/experiment/record-motor-solenoids-fail-safe.csv",
   solenoidToggle: index => `/api/solenoid/toggle?n=${index}`,
   stepperMove: "/api/stepper/move",
   stepperStop: "/api/stepper/stop",
@@ -1991,7 +1994,7 @@ export function downloadLatestExport() {
 // Experiment Start is separate from the toolbar's recording Start.
 export function createExperimentComponent() {
   const el = elements([
-    "experimentStatus", "experimentFile", "experimentCsv", "experimentExample",
+    "experimentStatus", "experimentFile", "experimentCsv", "experimentFailSafeFile", "experimentFailSafeCsv", "experimentExample",
     "experimentLoad", "experimentStart", "experimentPreview", "experimentFeedback",
     "experimentChecks"
   ]);
@@ -1999,31 +2002,53 @@ export function createExperimentComponent() {
   let name = "experiment.csv";
   let dirty = false;
   let pending = false;
+  const editors = [
+    {file: el.experimentFile, csv: el.experimentCsv, label: "Main sequence"},
+    {file: el.experimentFailSafeFile, csv: el.experimentFailSafeCsv, label: "Fail safe"}
+  ];
+  const acceptsBothCsvInputs = state => state?.csv_input_fields?.includes("fail_safe_csv") === true;
+  const restartMessage = "Restart dashboard.py in your terminal, then reload this page: the running backend does not support separate main and fail-safe CSV inputs.";
 
   function updateControls() {
     const running = snapshot?.state === "running";
-    el.experimentFile.disabled = pending || running;
-    el.experimentCsv.disabled = pending || running;
+    const incompatible = snapshot && !acceptsBothCsvInputs(snapshot);
+    for (const editor of editors) {
+      editor.file.disabled = pending || running;
+      editor.csv.disabled = pending || running;
+    }
     el.experimentExample.disabled = pending || running;
-    el.experimentLoad.disabled = pending || running || !el.experimentCsv.value.trim();
-    el.experimentStart.disabled = pending || running || dirty || !snapshot?.program?.length;
+    el.experimentLoad.disabled = pending || running || incompatible || !el.experimentCsv.value.trim();
+    el.experimentStart.disabled = pending || running || incompatible || dirty || !snapshot?.program?.length;
   }
 
   function render(incoming) {
     if (!incoming || (snapshot && incoming.revision < snapshot.revision)) return;
     const changedProgram = !snapshot || incoming.program_id !== snapshot.program_id;
     snapshot = incoming;
+    const sections = [{id: "main", title: "Main sequence", rows: snapshot.program}];
+    if (snapshot.fail_safe_program?.length) {
+      sections.push({id: "fail_safe", title: "Fail safe", rows: snapshot.fail_safe_program});
+    }
     if (changedProgram && !dirty) {
       name = snapshot.name || name;
-      el.experimentCsv.value = snapshot.program.length
-        ? [snapshot.columns.join(","), ...snapshot.program.map(row =>
-            snapshot.columns.map(column => row[column]).join(","))].join("\n") + "\n"
-        : "";
+      function csvContents(rows) {
+        if (!rows?.length) return "";
+        const columns = snapshot.columns.filter(column =>
+          ["action", "source", "device", "max_age_ms", "health", "timeout_s", "set_point"].includes(column)
+          || rows.some(row => row[column] !== "" && row[column] != null));
+        const cell = value => /[",\r\n]/.test(String(value))
+          ? `"${String(value).replaceAll('"', '""')}"` : String(value);
+        return [columns.join(","), ...rows.map(row =>
+          columns.map(column => cell(row[column] ?? "")).join(","))].join("\n") + "\n";
+      }
+      el.experimentCsv.value = csvContents(snapshot.program);
+      el.experimentFailSafeCsv.value = csvContents(snapshot.fail_safe_program);
     }
     updateControls();
+    const activeProgram = snapshot.sequence === "fail_safe" ? snapshot.fail_safe_program : snapshot.program;
     const labels = {
       empty: "No spreadsheet loaded", ready: "Ready",
-      running: `${snapshot.program[snapshot.current_row - 1]?.action === "wait" ? "Waiting at" : "Checking"} row ${snapshot.current_row}`,
+      running: `${snapshot.sequence === "fail_safe" ? "Fail safe · " : ""}${activeProgram[snapshot.current_row - 1]?.action === "wait" ? "Waiting at" : "Checking"} row ${snapshot.current_row}`,
       completed: "Completed", failed: "Failed"
     };
     setText(el.experimentStatus, labels[snapshot.state] || snapshot.state);
@@ -2031,25 +2056,43 @@ export function createExperimentComponent() {
     const body = el.experimentPreview.querySelector("tbody");
     head.replaceChildren();
     body.replaceChildren();
+    const groupHeader = document.createElement("tr");
     const header = document.createElement("tr");
-    for (const column of ["Row", ...snapshot.columns, "Result"]) {
-      const cell = document.createElement("th");
-      cell.scope = "col";
-      cell.textContent = column;
-      header.appendChild(cell);
+    for (const section of sections) {
+      section.columns = snapshot.columns.filter(column => ["action", "source", "device"].includes(column)
+        || section.rows.some(action => action[column] !== "" && action[column] != null));
+      const group = document.createElement("th");
+      group.scope = "colgroup";
+      group.colSpan = section.columns.length + 2;
+      group.textContent = section.title;
+      groupHeader.appendChild(group);
+      for (const column of ["Row", ...section.columns, "Result"]) {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = column;
+        header.appendChild(cell);
+      }
     }
+    head.appendChild(groupHeader);
     head.appendChild(header);
-    snapshot.program.forEach((action, index) => {
-      const result = snapshot.results[index]?.status || "pending";
+    const rowCount = Math.max(...sections.map(section => section.rows.length));
+    for (let index = 0; index < rowCount; index++) {
       const row = document.createElement("tr");
-      row.dataset.status = result;
-      for (const value of [index + 1, ...snapshot.columns.map(column => action[column]), result]) {
-        const cell = document.createElement("td");
-        cell.textContent = String(value);
-        row.appendChild(cell);
+      for (const section of sections) {
+        const action = section.rows[index];
+        const result = snapshot.results.find(result => (result.sequence || "main") === section.id
+          && result.row === index + 1)?.status || "pending";
+        const values = action ? [index + 1, ...section.columns.map(column => action[column] ?? ""), result]
+          : Array(section.columns.length + 2).fill("");
+        for (const value of values) {
+          const cell = document.createElement("td");
+          cell.dataset.status = action ? result : "";
+          cell.textContent = String(value);
+          row.appendChild(cell);
+        }
       }
       body.appendChild(row);
-    });
+    }
     const latestResult = snapshot.results.at(-1);
     let message = snapshot.name ? `${snapshot.name}: ${labels[snapshot.state]}.` : "Load a spreadsheet to begin.";
     if (snapshot.state === "running") message += " Waiting for all requirements to pass.";
@@ -2058,27 +2101,41 @@ export function createExperimentComponent() {
     if (snapshot.state === "running" && latestResult?.request_pending) message += latestResult.command_sent_s == null
       ? " Preparing or sending command." : " Waiting for controller feedback.";
     if (snapshot.state === "failed") {
-      message += ` Row ${latestResult.row}: ${latestResult.reason}.`;
-      if (latestResult.monitor_row) message += ` Persistent DRO check from row ${latestResult.monitor_row} failed.`;
-      if (latestResult.error) message += ` ${latestResult.error}`;
+      const failure = snapshot.failure || latestResult;
+      message += ` Main row ${failure.row}: ${failure.reason}.`;
+      if (failure.monitor_row) message += ` Persistent ${failure.monitor_device || "DRO"} check from row ${failure.monitor_row} failed.`;
+      if (failure.error) message += ` ${failure.error}`;
+      if (snapshot.sequence === "fail_safe") message += " Fail-safe sequence finished.";
       if (latestResult.stop_pending) message += " Stop request pending.";
       if (latestResult.request_error) message += ` Command outcome: ${latestResult.request_error}`;
       if (latestResult.stop_error) message += ` Stop request failed: ${latestResult.stop_error}`;
     }
-    setText(el.experimentFeedback, message);
+    setText(el.experimentFeedback, acceptsBothCsvInputs(snapshot) ? message : restartMessage);
     el.experimentChecks.replaceChildren();
     const displayedChecks = Object.entries(latestResult?.checks || {}).map(([name, check]) => [name, name, check]);
+    if (snapshot.failure) {
+      const failureChecks = snapshot.failure.monitor_checks || snapshot.failure.checks || {};
+      for (const [name, check] of Object.entries(failureChecks)) {
+        if (!check.ok) displayedChecks.push([`Main failure / ${name}`, name, check, true]);
+      }
+    }
+    for (const result of snapshot.results.filter(result => result.sequence === "fail_safe" && result.status === "failed")) {
+      if (result === latestResult) continue;
+      for (const [name, check] of Object.entries(result.checks || {})) {
+        if (!check.ok) displayedChecks.push([`Fail safe row ${result.row} / ${name}`, name, check, true]);
+      }
+    }
     for (const monitor of Object.values(snapshot.monitors || {})) {
       if (monitor.active) {
         for (const [name, check] of Object.entries(monitor.checks || {})) {
-          displayedChecks.push([`DRO monitor (row ${monitor.row}) / ${name}`, name, check]);
+          displayedChecks.push([`${monitor.action?.device || "DRO"} monitor (row ${monitor.row}) / ${name}`, name, check]);
         }
       }
     }
-    for (const [displayName, checkName, check] of displayedChecks) {
+    for (const [displayName, checkName, check, failed] of displayedChecks) {
       const item = document.createElement("li");
       item.dataset.ok = String(check.ok);
-      const outcome = check.ok ? "Pass" : snapshot.state === "failed" ? "Fail" : "Waiting";
+      const outcome = check.ok ? "Pass" : (failed || snapshot.state === "failed") ? "Fail" : "Waiting";
       const evidence = checkName === "freshness"
         ? `${check.age_ms ?? "unknown"} ms age; maximum ${check.max_age_ms} ms`
         : checkName === "health"
@@ -2089,6 +2146,8 @@ export function createExperimentComponent() {
             ? `${check.observed ?? "unknown"} °C; allowed ${check.min_c}–${check.max_c} °C; enabled ${check.enabled ?? "unknown"}; fault ${check.fault ?? "unknown"}`
           : checkName === "position"
             ? `${check.observed ?? "unknown"} mm (raw DRO position); allowed ${check.min_mm}–${check.max_mm} mm`
+          : checkName === "pressure"
+            ? `${check.terminal}: ${check.observed ?? "unknown"} ${check.unit}; allowed ${check.minimum}–${check.maximum} ${check.unit}`
           : checkName === "move"
             ? `command ${check.command_id ?? "unknown"}; expected ${check.expected_command_id}; state ${check.state ?? "unknown"}; remaining ${check.remaining_mm ?? "unknown"} mm`
           : checkName === "command_accepted"
@@ -2101,6 +2160,18 @@ export function createExperimentComponent() {
               .filter(([field]) => field !== "ok")
               .map(([field, value]) => `${field}: ${value ?? "unknown"}`).join(", ");
       item.textContent = `${displayName}: ${outcome} · ${evidence}`;
+      el.experimentChecks.appendChild(item);
+    }
+    for (const result of snapshot.results.filter(result => result.sequence === "fail_safe" && result.status === "failed")) {
+      const item = document.createElement("li");
+      item.dataset.ok = "false";
+      item.textContent = `Fail safe row ${result.row}: ${result.reason}${result.error ? ` · ${result.error}` : ""}`;
+      el.experimentChecks.appendChild(item);
+    }
+    for (const result of snapshot.results.filter(result => result.request_error)) {
+      const item = document.createElement("li");
+      item.dataset.ok = "false";
+      item.textContent = `${result.sequence === "fail_safe" ? "Fail safe" : "Main"} row ${result.row}: command outcome · ${result.request_error}`;
       el.experimentChecks.appendChild(item);
     }
     for (const [device, request] of Object.entries(latestResult?.request?.targets || {})) {
@@ -2119,26 +2190,35 @@ export function createExperimentComponent() {
     finally { pending = false; updateControls(); }
   }
 
-  el.experimentCsv.addEventListener("input", () => { dirty = true; updateControls(); });
-  el.experimentFile.addEventListener("change", () => void perform(async () => {
-    const file = el.experimentFile.files[0];
-    if (!file) return;
-    if (file.size > 256 * 1024) throw new Error("Spreadsheet exceeds 256 KiB");
-    name = file.name;
-    el.experimentCsv.value = await file.text();
-    dirty = true;
-    setText(el.experimentFeedback, `${name} selected. Load the spreadsheet to preview it.`);
-  }));
+  for (const editor of editors) {
+    editor.csv.addEventListener("input", () => { dirty = true; updateControls(); });
+    editor.file.addEventListener("change", () => void perform(async () => {
+      const file = editor.file.files[0];
+      if (!file) return;
+      if (file.size > 256 * 1024) throw new Error("Spreadsheet exceeds 256 KiB");
+      const contents = await file.text();
+      if (editor === editors[0]) name = file.name;
+      editor.csv.value = contents;
+      dirty = true;
+      setText(el.experimentFeedback, `${editor.label}: ${file.name} selected. Load the spreadsheet to preview both sequences.`);
+    }));
+  }
   el.experimentExample.addEventListener("click", () => void perform(async () => {
-    const response = await fetch(API.experimentExample);
-    if (!response.ok) throw new Error("Could not read the experiment example");
-    el.experimentCsv.value = await response.text();
+    const responses = await Promise.all([fetch(API.experimentExample), fetch(API.experimentFailSafeExample)]);
+    if (responses.some(response => !response.ok)) throw new Error("Could not read the experiment example");
+    const contents = await Promise.all(responses.map(response => response.text()));
+    editors.forEach((editor, index) => { editor.csv.value = contents[index]; });
     name = "record_motor_solenoids.csv";
     dirty = true;
     setText(el.experimentFeedback, "Example selected. Load the spreadsheet to preview it.");
   }));
   el.experimentLoad.addEventListener("click", () => void perform(async () => {
-    const payload = await postJson(API.experimentLoad, {csv: el.experimentCsv.value, name});
+    if (!acceptsBothCsvInputs(snapshot)) throw new Error(restartMessage);
+    dirty = true;
+    const payload = await postJson(API.experimentLoad, {
+      csv: el.experimentCsv.value, fail_safe_csv: el.experimentFailSafeCsv.value, name
+    });
+    if (!acceptsBothCsvInputs(payload.experiment)) throw new Error(restartMessage);
     if (snapshot && payload.experiment.program_id < snapshot.program_id) {
       throw new Error("The spreadsheet was replaced; review and load your CSV again.");
     }

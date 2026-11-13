@@ -27,10 +27,11 @@ except ImportError:  # pragma: no cover - direct dashboard.py execution
     from controllino_io import pressure_descriptors, transform_pressure_sample, transform_pitot_sample
 
 from .system_config import SystemConfig
-from .experiment import ActuatorAction, ExperimentRunner, MoveStepperAction, RequestedStateAction, StepperModeAction, source_adapter_name
+from .experiment import ActuatorAction, ExperimentRunner, MoveStepperAction, RequestedStateAction, StepperModeAction, StepperHaltAction, source_adapter_name
 
 
 DEFAULT_EXPERIMENT_PATH = Path(__file__).resolve().parents[1] / "examples" / "record_motor_solenoids.csv"
+DEFAULT_FAIL_SAFE_PATH = DEFAULT_EXPERIMENT_PATH.with_name("record_motor_solenoids_fail_safe.csv")
 
 DEFAULT_STALE_AFTER_S = 5.0
 DEFAULT_HISTORY_LIMIT = 600
@@ -322,7 +323,8 @@ class DashboardRuntime:
         self.experiment = ExperimentRunner(
             request_state=self._submit_experiment_command, abort_state=self._submit_experiment_stop,
         )
-        self.experiment.load(DEFAULT_EXPERIMENT_PATH.read_text(), DEFAULT_EXPERIMENT_PATH.name, 0.0)
+        self.experiment.load(DEFAULT_EXPERIMENT_PATH.read_text(), DEFAULT_EXPERIMENT_PATH.name, 0.0,
+                             fail_safe_csv=DEFAULT_FAIL_SAFE_PATH.read_text())
         with self._condition:
             self._poll_locked(0.0)
 
@@ -342,7 +344,7 @@ class DashboardRuntime:
             self._release_cubemars()
         self._experiment_cancel.set()
         with self._condition:
-            self.experiment.fail("runtime_stopped", time.monotonic() - self.monotonic0)
+            self.experiment.fail("runtime_stopped", time.monotonic() - self.monotonic0, run_fail_safe=False)
             self._condition.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
@@ -663,7 +665,7 @@ class DashboardRuntime:
     def _experiment_now_s(self) -> float:
         return time.monotonic() - self.monotonic0
 
-    def _submit_experiment_command(self, action: RequestedStateAction | MoveStepperAction | StepperModeAction | ActuatorAction) -> object:
+    def _submit_experiment_command(self, action: RequestedStateAction | MoveStepperAction | StepperModeAction | StepperHaltAction | ActuatorAction) -> object:
         if isinstance(action, RequestedStateAction):
             # Recording is local application state, with no device transport.
             self._request_experiment_state(action)
@@ -702,7 +704,7 @@ class DashboardRuntime:
         if any(not future.done() for future in self._experiment_futures):
             raise RuntimeError("An experiment command or stop is still in flight; wait for its outcome")
 
-    def _request_experiment_state(self, action: RequestedStateAction | MoveStepperAction | StepperModeAction | ActuatorAction, sample: Mapping[str, object] | None = None) -> object:
+    def _request_experiment_state(self, action: RequestedStateAction | MoveStepperAction | StepperModeAction | StepperHaltAction | ActuatorAction, sample: Mapping[str, object] | None = None) -> object:
         sample = dict(self.latest or {}) if sample is None else sample
         if self._experiment_cancel.is_set():
             raise RuntimeError("Experiment command cancelled before dispatch")
@@ -765,6 +767,9 @@ class DashboardRuntime:
                 "web_position": action.firmware_mode == "web_position",
             })
             return
+        if isinstance(action, StepperHaltAction):
+            self.devices.stop(self.devices.status(sample))
+            return
         if isinstance(action, MoveStepperAction):
             values = self._validated_move_values({
                 "distance_mm": action.distance_mm, "speed_mm_s": action.speed_mm_s,
@@ -798,7 +803,8 @@ class DashboardRuntime:
         with self._condition:
             self.experiment.on_io_event(time.monotonic() - self.monotonic0)
             self._require_experiment_io_idle()
-            self.experiment.load(values.get("csv"), name.strip(), time.monotonic() - self.monotonic0)
+            self.experiment.load(values.get("csv"), name.strip(), time.monotonic() - self.monotonic0,
+                                 fail_safe_csv=values.get("fail_safe_csv"))
             self._experiment_cancel.clear()
             self.sequence += 1
             self._condition.notify_all()
@@ -809,13 +815,15 @@ class DashboardRuntime:
             self.experiment.on_io_event(time.monotonic() - self.monotonic0)
             self._require_experiment_io_idle()
             # Settings may have changed since loading; check before any row runs.
-            for row, action in enumerate(self.experiment.program, 1):
-                if isinstance(action, MoveStepperAction):
-                    try:
-                        core.validate_stepper_move(action.distance_mm, action.speed_mm_s,
-                                                   mode=self.devices.sources["stepper"].mode)
-                    except ValueError as exc:
-                        raise ValueError(f"Row {row}: {exc}") from exc
+            for sequence, program in (("Main sequence", self.experiment.program),
+                                      ("Fail safe", self.experiment.fail_safe_program)):
+                for row, action in enumerate(program, 1):
+                    if isinstance(action, MoveStepperAction):
+                        try:
+                            core.validate_stepper_move(action.distance_mm, action.speed_mm_s,
+                                                       mode=self.devices.sources["stepper"].mode)
+                        except ValueError as exc:
+                            raise ValueError(f"{sequence} row {row}: {exc}") from exc
             self.experiment.start(time.monotonic() - self.monotonic0, values.get("program_id"))
             self._experiment_cancel.clear()
             self.sequence += 1
@@ -1021,7 +1029,7 @@ class DashboardRuntime:
         return {**values, "distance_mm": travel_mm, "speed_mm_s": speed}
 
     def stop_stepper(self) -> dict[str, object]:
-        self._disarm_cubemars()
+        """Halt the piston independently of the CAN motor's target and lease."""
         return self._stepper_command(self.devices.stop)
 
     def emergency_stop_stepper(self) -> dict[str, object]:

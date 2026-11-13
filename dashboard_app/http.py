@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .runtime import DashboardRuntime, DEFAULT_EXPERIMENT_PATH
+from .runtime import DashboardRuntime, DEFAULT_EXPERIMENT_PATH, DEFAULT_FAIL_SAFE_PATH
 
 
 DASHBOARD_ASSET_DIR = Path(__file__).with_name("static")
@@ -24,6 +24,7 @@ EXPERIMENT_EXAMPLES = {
     "/api/experiment/dro-monitor.csv": "dro_monitor.csv",
     "/api/experiment/cubemars.csv": "cubemars.csv",
     "/api/experiment/record-motor-solenoids.csv": "record_motor_solenoids.csv",
+    "/api/experiment/record-motor-solenoids-fail-safe.csv": DEFAULT_FAIL_SAFE_PATH.name,
 }
 DASHBOARD_ASSET_TYPES = {
     "/assets/dashboard-lean.css": "text/css; charset=utf-8",

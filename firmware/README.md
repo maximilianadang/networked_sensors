@@ -1,4 +1,4 @@
-# Controllino IO (firmware 1.6.3)
+# Controllino IO (firmware 1.6.4)
 
 All three motor builds use the LinACE encoder and expanded IO by default.
 USB and Ethernet share the same V1 motor commands and compact JSON telemetry.
@@ -127,9 +127,15 @@ manufacturer's velocity command range: ±100,000 ERPM, converted to ±793 whole
 output RPM for the AK80-6 (126 ERPM per output RPM). The host and interface use
 that protocol range directly. It is not a verified mechanical speed capability.
 
-For a dashboard-owned manual run, Stop updates the existing target to zero
-using the same 80 RPM/s ramp. The firmware retains the run/lease while ramping,
-then releases torque when the ramped setpoint reaches zero; this does not assert
+The piston Stop command (`V1 X`) halts only the stepper. Starting with firmware
+1.6.4, it leaves the CAN motor's target and lease unchanged; the backend also
+continues renewing that lease. To stop the CAN motor, request zero RPM separately.
+Software E-stop (`V1 E1`) still stops the stepper, releases CAN torque immediately
+and turns off the solenoids.
+
+For a dashboard-owned manual run, the CAN panel's Stop updates the existing
+target to zero using the same 80 RPM/s ramp. The firmware retains the run/lease
+while ramping, then releases torque when the ramped setpoint reaches zero; this does not assert
 that measured shaft speed has reached zero. The backend continues lease renewals
 through deceleration. `V1 U0,<ramp>,<token>` reuses the existing speed update;
 `cstop=1` advertises support. Legacy firmware, unowned runs and a Stop during an
@@ -140,12 +146,16 @@ behavior is unchanged.
 
 The full sequence in `examples/record_motor_solenoids.csv` uses a CAN speed row
 with blank `duration_s` to start a leased run using the same ramp and renewal
-path as the dashboard. An explicit `rpm=0` row is required before program end;
+path as the dashboard. Its separate response is stored in
+`examples/record_motor_solenoids_fail_safe.csv`; both are loaded by default.
+An explicit `rpm=0` row is required before program end;
 it ramps down and waits for the controller to report inactive. Its `timeout_s`
 and freshness/health conditions cover stop acceptance; after acceptance the
 row waits for ramp completion without a completion deadline. Reported motor
-stop faults still fail the row. Failed experiments stop renewing their motor
-lease, leaving firmware lease expiry as the stop mechanism.
+stop faults still fail the row. A CSV fail-safe section retains renewal while
+its ordered response runs, allowing an explicit zero-RPM row to ramp down.
+Without a fail-safe section, or after it finishes, failed experiments retire
+their motor lease; firmware lease expiry remains the fallback stop mechanism.
 
 `action=wait,duration_s=5` holds the current outputs for five seconds. All other
 cells in a wait row are blank, including `timeout_s`: this is a successful dwell,

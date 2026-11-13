@@ -2206,7 +2206,7 @@ class UsbStepperSource:
         values = self._require_connected()
         if not values.get("stepper_command_capable"):
             raise RuntimeError("Yún firmware does not support web Stop")
-        if values.get("stepper_control_mode") != "web_position":
+        if values.get("stepper_control_mode") != "web_position" and self.mode != "controllino":
             raise RuntimeError("web Stop is available only in Web Position mode")
         self._write_command(b"V1 X\n", "Stop")
         return self.status()

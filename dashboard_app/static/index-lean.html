@@ -247,7 +247,8 @@
     <summary class="source-drawer-summary"><span>Experiment spreadsheet</span><span id="experimentStatus" role="status" aria-live="polite">No spreadsheet loaded</span></summary>
     <div class="source-body experiment-body">
       <div class="experiment-controls">
-        <label>CSV file<input id="experimentFile" type="file" accept=".csv,text/csv"></label>
+        <label>Main sequence CSV<input id="experimentFile" type="file" accept=".csv,text/csv"></label>
+        <label>Fail-safe CSV<input id="experimentFailSafeFile" type="file" accept=".csv,text/csv"></label>
         <button id="experimentLoad" type="button">Load spreadsheet</button>
         <button id="experimentStart" class="primary" type="button" disabled>Start experiment</button>
         <a href="/api/experiment/reference.md" download="experiment_csv_reference.md">Bench CSV reference</a>
@@ -259,12 +260,16 @@
       <ul id="experimentChecks" aria-label="Current telemetry check results"></ul>
       <details class="experiment-tools">
         <summary>Edit CSV</summary>
-        <label>CSV contents<textarea id="experimentCsv" rows="3" spellcheck="false"></textarea></label>
+        <div class="experiment-editors">
+          <label>Main sequence<textarea id="experimentCsv" rows="6" spellcheck="false"></textarea></label>
+          <label>Fail safe<textarea id="experimentFailSafeCsv" rows="6" spellcheck="false"></textarea></label>
+        </div>
       </details>
       <details class="experiment-tools">
         <summary>Example</summary>
         <div class="form-actions">
-          <a href="/api/experiment/record-motor-solenoids.csv" download="record_motor_solenoids.csv">Download recording + 250 RPM motor + solenoids + stepper</a>
+          <a href="/api/experiment/record-motor-solenoids.csv" download="record_motor_solenoids.csv">Download main sequence</a>
+          <a href="/api/experiment/record-motor-solenoids-fail-safe.csv" download="record_motor_solenoids_fail_safe.csv">Download fail safe</a>
           <button id="experimentExample" type="button">Use example</button>
         </div>
       </details>

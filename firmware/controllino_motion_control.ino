@@ -217,9 +217,6 @@ void processCommand(char *line, byte source) {
     solenoids.allOff(); halt(ESTOPPED, "emergency_stop"); return;
   }
   if (!strcmp(line, "V1 X")) {
-#if CONTROLLINO_AUX_KIND == AUX_BACKEND_CUBEMARS
-    cubeMars.release("operator_stop", false);
-#endif
     halt(ABORTED, "operator_stop"); return;
   }
   // Torque release is available to either transport, even while faulted/E-stopped.

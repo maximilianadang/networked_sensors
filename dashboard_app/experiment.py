@@ -31,15 +31,21 @@ BASE_CSV_COLUMNS = (
 )
 MOVE_COLUMNS = ("speed_mm_s", "duration_s", "direction")
 DEVICE_COLUMNS = ("device", "pulse_us", "rpm")
-READING_COLUMNS = ("min_c", "max_c", "min_mm", "max_mm")
+PRESSURE_COLUMNS = ("min_mbar", "max_mbar", "min_psi", "max_psi")
+READING_COLUMNS = ("min_c", "max_c", "min_mm", "max_mm", *PRESSURE_COLUMNS)
 CSV_COLUMNS = (
     "action", "source", "device", "max_age_ms", "health", "timeout_s",
     "set_point", "min_mm", "max_mm", "min_c", "max_c",
     "speed_mm_s", "duration_s", "direction", "pulse_us", "rpm",
+    *PRESSURE_COLUMNS,
 )
+CSV_INPUT_FIELDS = ("csv", "fail_safe_csv")
+FAIL_SAFE_PREFIX = "fail_safe_"
 MAX_CSV_BYTES = 256 * 1024
 MAX_ROWS = 1000
 STEPPER_MODES = {"positional": "web_position", "directional": "local_velocity"}
+PRESSURE_DEVICES = {name: channel for channel in core.PRESSURE_INPUTS
+                    for name in (f"pressure{channel['id']}", channel["terminal"])}
 
 # Each device names the booleans that establish its readiness/capability.
 # These are telemetry checks, not physical-state or interlock checks.
@@ -60,6 +66,8 @@ DEVICE_REQUIREMENTS = {
         **{f"solenoid{r['index'] + 1}": (f"stepper_solenoid{r['index'] + 1}_capable",)
            for r in core.CONTROLLINO_RELAYS},
         **{f"pressure{p['id']}": (f"stepper_pressure{p['id']}_valid",)
+           for p in core.PRESSURE_INPUTS},
+        **{p["terminal"]: (f"stepper_pressure{p['id']}_valid",)
            for p in core.PRESSURE_INPUTS},
     },
 }
@@ -136,9 +144,14 @@ def device_check(sample: Mapping[str, object], source: str, device: str,
 
 
 def dro_freshness_check(sample: Mapping[str, object], max_age_ms: float) -> dict[str, object]:
+    return measurement_freshness_check(sample, "stepper_dro_sample_age_ms", max_age_ms)
+
+
+def measurement_freshness_check(sample: Mapping[str, object], age_field: str,
+                                max_age_ms: float) -> dict[str, object]:
     evidence = {}
-    age = sample.get("stepper_dro_sample_age_ms")
-    evidence["stepper_dro_sample_age_ms"] = age
+    age = sample.get(age_field)
+    evidence[age_field] = age
     source_age = sample.get("stepper_age_ms")
     # Firmware da is the age at status acquisition; cached source age must
     # continue aging that measurement even if no new status arrives.
@@ -157,6 +170,8 @@ def reading_checks(sample: Mapping[str, object], source: str, device: str,
     checks = source_checks(sample, source, max_age_ms, health)
     if source == "controllino" and device == "dro" and max_age_ms is not None:
         checks["dro_freshness"] = dro_freshness_check(sample, max_age_ms)
+    if source == "controllino" and device in PRESSURE_DEVICES and max_age_ms is not None:
+        checks["pressure_freshness"] = measurement_freshness_check(sample, "stepper_pressure_sample_age_ms", max_age_ms)
     return checks
 
 
@@ -285,6 +300,25 @@ class MoveStepperAction:
 
 
 @dataclass(frozen=True)
+class StepperHaltAction:
+    max_age_ms: float
+    health: str
+    timeout_s: float
+    source: str = "controllino"
+    set_point: str = "halt"
+
+    def as_dict(self) -> dict[str, object]:
+        return {**dict.fromkeys(CSV_COLUMNS, ""), "action": "requested_state",
+                "source": self.source, "device": "stepper", "set_point": self.set_point,
+                "max_age_ms": self.max_age_ms, "health": self.health, "timeout_s": self.timeout_s}
+
+    def evaluate(self, sample: Mapping[str, object]) -> dict[str, object]:
+        return {**source_checks(sample, self.source, self.max_age_ms, self.health),
+                "requested_state": {"ok": sample.get("stepper_moving") is False,
+                                    "requested": "halt", "observed": sample.get("stepper_moving")}}
+
+
+@dataclass(frozen=True)
 class ActuatorAction:
     source: str
     device: str
@@ -368,7 +402,7 @@ class TemperatureReadingAction:
             "action": "reading_state", "source": self.source, "device": self.device,
             "max_age_ms": self.max_age_ms if self.max_age_ms is not None else "", "health": self.health,
             "timeout_s": self.timeout_s, "min_c": self.min_c, "max_c": self.max_c,
-            "set_point": "check", "pulse_us": "", "rpm": "", **dict.fromkeys((*MOVE_COLUMNS, "min_mm", "max_mm"), ""),
+            "set_point": "check", "pulse_us": "", "rpm": "", **dict.fromkeys((*MOVE_COLUMNS, "min_mm", "max_mm", *PRESSURE_COLUMNS), ""),
         }
 
     def evaluate(self, sample: Mapping[str, object]) -> dict[str, object]:
@@ -430,6 +464,55 @@ class DisableDroCheckAction:
 
 
 @dataclass(frozen=True)
+class PressureReadingAction:
+    device: str
+    minimum: float
+    maximum: float
+    max_age_ms: float | None
+    health: str
+    timeout_s: float
+    set_point: str = "check"
+    source: str = "controllino"
+
+    @property
+    def monitor_key(self) -> str:
+        return f"controllino/pressure{PRESSURE_DEVICES[self.device]['id']}"
+
+    def as_dict(self) -> dict[str, object]:
+        unit = PRESSURE_DEVICES[self.device]["unit"]
+        return {**dict.fromkeys(CSV_COLUMNS, ""), "action": "reading_state",
+                "source": self.source, "device": self.device, "set_point": self.set_point,
+                "max_age_ms": self.max_age_ms if self.max_age_ms is not None else "",
+                "health": self.health, "timeout_s": self.timeout_s,
+                f"min_{unit}": self.minimum, f"max_{unit}": self.maximum}
+
+    def evaluate(self, sample: Mapping[str, object], *, persistent: bool = False) -> dict[str, object]:
+        channel = PRESSURE_DEVICES[self.device]
+        value = sample.get(f"stepper_pressure{channel['id']}_reading")
+        finite = type(value) in (int, float) and math.isfinite(value)
+        return {**reading_checks(sample, self.source, self.device,
+                                 None if persistent else self.max_age_ms, self.health),
+                "pressure": {"ok": finite and self.minimum <= value <= self.maximum,
+                             "observed": value, "minimum": self.minimum, "maximum": self.maximum,
+                             "unit": channel["unit"], "terminal": channel["terminal"]}}
+
+
+@dataclass(frozen=True)
+class DisablePressureCheckAction:
+    device: str
+    timeout_s: float
+    source: str = "controllino"
+
+    @property
+    def monitor_key(self) -> str:
+        return f"controllino/pressure{PRESSURE_DEVICES[self.device]['id']}"
+
+    def as_dict(self) -> dict[str, object]:
+        return {**dict.fromkeys(CSV_COLUMNS, ""), "action": "reading_state", "source": self.source,
+                "device": self.device, "set_point": "off", "timeout_s": self.timeout_s}
+
+
+@dataclass(frozen=True)
 class WaitAction:
     duration_s: float
     source: str = ""
@@ -438,10 +521,76 @@ class WaitAction:
         return {**dict.fromkeys(CSV_COLUMNS, ""), "action": "wait", "duration_s": self.duration_s}
 
 
-ExperimentAction = TelemetryHealthAction | RequestedStateAction | MoveStepperAction | StepperModeAction | ActuatorAction | TemperatureReadingAction | DroReadingAction | DisableDroCheckAction | WaitAction
+ExperimentAction = TelemetryHealthAction | RequestedStateAction | MoveStepperAction | StepperModeAction | StepperHaltAction | ActuatorAction | TemperatureReadingAction | DroReadingAction | PressureReadingAction | DisableDroCheckAction | DisablePressureCheckAction | WaitAction
+COMMAND_ACTIONS = (RequestedStateAction, MoveStepperAction, StepperModeAction, StepperHaltAction, ActuatorAction)
+PERSISTENT_READINGS = (DroReadingAction, PressureReadingAction)
+DISABLE_READINGS = (DisableDroCheckAction, DisablePressureCheckAction)
+
+
+def monitor_key(action: ExperimentAction) -> str:
+    return action.monitor_key if isinstance(action, (PressureReadingAction, DisablePressureCheckAction)) else "controllino/dro"
+
+
+@dataclass(frozen=True)
+class ExperimentSheet:
+    main: tuple[ExperimentAction, ...]
+    fail_safe: tuple[ExperimentAction, ...] = ()
+
+
+def _parse_sections(main_csv: str, fail_safe_csv: str) -> ExperimentSheet:
+    sequences = []
+    for label, contents in (("Main sequence", main_csv), ("Fail safe", fail_safe_csv)):
+        try:
+            sequences.append(_parse_sequence(contents, allow_empty=label == "Fail safe")
+                             if contents.strip() or label == "Main sequence" else ())
+        except ValueError as exc:
+            raise ValueError(f"{label}: {exc}") from exc
+    if sum(len(sequence) for sequence in sequences) > MAX_ROWS:
+        raise ValueError("Spreadsheet exceeds 1000 action rows across both sections")
+    return ExperimentSheet(*sequences)
+
+
+def parse_worksheet(csv_text: object, fail_safe_csv: object = None) -> ExperimentSheet:
+    """Validate separate CSV fields, also accepting the earlier combined format."""
+    if not isinstance(csv_text, str):
+        raise ValueError("csv must be spreadsheet text exported as CSV")
+    if fail_safe_csv is not None and not isinstance(fail_safe_csv, str):
+        raise ValueError("fail_safe_csv must be spreadsheet text exported as CSV")
+    if len(csv_text.encode("utf-8")) + len((fail_safe_csv or "").encode("utf-8")) > MAX_CSV_BYTES:
+        raise ValueError("Spreadsheet exceeds 256 KiB across both sections")
+    try:
+        reader = csv.reader(StringIO(csv_text.lstrip("\ufeff")), strict=True)
+        header = [cell.strip() for cell in next(reader, [])]
+        if not any(column.startswith(FAIL_SAFE_PREFIX) for column in header):
+            return _parse_sections(csv_text, fail_safe_csv or "")
+        if fail_safe_csv and fail_safe_csv.strip():
+            raise ValueError("The main CSV already contains fail-safe columns; use a main-only CSV or clear the separate fail-safe field")
+        split = next(index for index, column in enumerate(header) if column.startswith(FAIL_SAFE_PREFIX))
+        groups = (header[:split], [column.removeprefix(FAIL_SAFE_PREFIX) for column in header[split:]])
+        if any(not column.startswith(FAIL_SAFE_PREFIX) for column in header[split:]):
+            raise ValueError("Fail-safe columns must follow the main sequence and start with fail_safe_")
+        outputs = [StringIO(), StringIO()]
+        writers = [csv.writer(output) for output in outputs]
+        for writer, columns in zip(writers, groups):
+            writer.writerow(columns)
+        for row, cells in enumerate(reader, 1):
+            if not cells or all(not cell.strip() for cell in cells):
+                continue
+            if len(cells) != len(header):
+                raise ValueError(f"Row {row}: expected {len(header)} cells")
+            writers[0].writerow(cells[:split])
+            writers[1].writerow(cells[split:])
+        return _parse_sections(*(output.getvalue() for output in outputs))
+    except csv.Error as exc:
+        raise ValueError(f"Invalid CSV: {exc}") from exc
 
 
 def parse_program(csv_text: object) -> tuple[ExperimentAction, ...]:
+    """Return main actions, also linting the optional fail-safe section."""
+    return parse_worksheet(csv_text).main
+
+
+def _parse_sequence(csv_text: object, *, allow_empty: bool = False) -> tuple[ExperimentAction, ...]:
     """Reject ambiguous or unsupported worksheets before anything starts."""
     if not isinstance(csv_text, str):
         raise ValueError("csv must be spreadsheet text exported as CSV")
@@ -506,13 +655,15 @@ def parse_program(csv_text: object) -> tuple[ExperimentAction, ...]:
                 set_point = values.get("set_point", "") or "check"
                 if set_point not in ("check", "on", "off"):
                     raise ValueError(f"Row {row}: reading_state set_point must be check, on, or off")
-                if set_point != "check" and (source, device) != ("controllino", "dro"):
-                    raise ValueError(f"Row {row}: persistent reading is supported only for controllino/dro")
+                pressure = PRESSURE_DEVICES.get(device) if source == "controllino" else None
+                if set_point != "check" and (source, device) != ("controllino", "dro") and pressure is None:
+                    raise ValueError(f"Row {row}: persistent reading supports Controllino DRO and pressure inputs")
                 if set_point == "off":
                     if any(values.get(column, "") for column in CSV_COLUMNS
                            if column not in ("action", "source", "device", "set_point", "timeout_s")):
                         raise ValueError(f"Row {row}: off requires blank check/request columns")
-                    actions.append(DisableDroCheckAction(timeout_s))
+                    actions.append(DisablePressureCheckAction(device, timeout_s) if pressure
+                                   else DisableDroCheckAction(timeout_s))
                     continue
                 if values["health"] not in ("", "ok") or any(values.get(column, "") for column in ("pulse_us", *MOVE_COLUMNS)):
                     raise ValueError(f"Row {row}: reading_state allows health blank or ok and requires blank pulse/motion columns")
@@ -522,8 +673,10 @@ def parse_program(csv_text: object) -> tuple[ExperimentAction, ...]:
                     bounds = ("min_c", "max_c")
                 elif source == "controllino" and device == "dro":
                     bounds = ("min_mm", "max_mm")
+                elif pressure:
+                    bounds = (f"min_{pressure['unit']}", f"max_{pressure['unit']}")
                 else:
-                    raise ValueError(f"Row {row}: reading_state supports ed593/tc0 through tc7 or controllino/dro")
+                    raise ValueError(f"Row {row}: reading_state supports ED593 thermocouples or Controllino DRO/pressure inputs")
                 if any(values.get(column, "") for column in READING_COLUMNS if column not in bounds):
                     raise ValueError(f"Row {row}: reading columns do not apply to {device}")
                 try:
@@ -534,6 +687,8 @@ def parse_program(csv_text: object) -> tuple[ExperimentAction, ...]:
                     raise ValueError(f"Row {row}: {' and '.join(bounds)} must be finite with minimum <= maximum")
                 if source == "ed593":
                     actions.append(TemperatureReadingAction(device, lower, upper, age, values["health"], timeout_s))
+                elif pressure:
+                    actions.append(PressureReadingAction(device, lower, upper, age, values["health"], timeout_s, set_point))
                 else:
                     actions.append(DroReadingAction(device, age, values["health"], timeout_s, lower, upper, set_point=set_point))
                 continue
@@ -541,7 +696,7 @@ def parse_program(csv_text: object) -> tuple[ExperimentAction, ...]:
                 raise ValueError(f"Row {row}: reading columns are only applicable to reading_state")
             if (values["action"] == "requested_state" and values.get("device", "")
                     and not (values["source"] == "controllino"
-                             and values.get("set_point") in (*STEPPER_MODES, "move"))):
+                             and values.get("set_point") in (*STEPPER_MODES, "move", "halt"))):
                 devices = tuple(part.strip() for part in values["device"].split(";"))
                 if any(not part for part in devices) or len(devices) != len(set(devices)):
                     raise ValueError(f"Row {row}: device targets must be nonempty and unique")
@@ -584,6 +739,15 @@ def parse_program(csv_text: object) -> tuple[ExperimentAction, ...]:
             if values.get("pulse_us", ""):
                 raise ValueError(f"Row {row}: pulse_us is only applicable to actuator requests")
             if values["action"] == "requested_state":
+                if values["source"] == "controllino" and values.get("set_point") == "halt":
+                    if values.get("device") != "stepper" or values["health"] != "ok":
+                        raise ValueError(f"Row {row}: halt requires device=stepper and health=ok")
+                    if any(values.get(column, "") for column in MOVE_COLUMNS):
+                        raise ValueError(f"Row {row}: halt requires blank motion columns")
+                    actions.append(StepperHaltAction(
+                        _number(values["max_age_ms"], "max_age_ms", row, positive=False),
+                        values["health"], timeout_s))
+                    continue
                 if values["source"] == "controllino" and values.get("set_point") in STEPPER_MODES:
                     if values.get("device", "") not in ("", "stepper"):
                         raise ValueError(f"Row {row}: mode change targets device=stepper")
@@ -655,9 +819,9 @@ def parse_program(csv_text: object) -> tuple[ExperimentAction, ...]:
             ))
     except csv.Error as exc:
         raise ValueError(f"Invalid CSV: {exc}") from exc
-    if not actions:
+    if not actions and not allow_empty:
         raise ValueError("Spreadsheet must contain at least one action row")
-    active = False
+    active = set()
     leased_motor = False
     for row, action in enumerate(actions, 1):
         if isinstance(action, ActuatorAction) and action.device == "can_motor":
@@ -667,16 +831,18 @@ def parse_program(csv_text: object) -> tuple[ExperimentAction, ...]:
                 leased_motor = True
             elif leased_motor:
                 raise ValueError(f"Row {row}: stop the leased CAN motor before a timed run")
-        if isinstance(action, DroReadingAction) and action.set_point == "on":
-            if active:
-                raise ValueError(f"Row {row}: DRO check already enabled; disable it before replacing it")
-            active = True
-        elif isinstance(action, DisableDroCheckAction):
-            if not active:
-                raise ValueError(f"Row {row}: no persistent DRO check to disable")
-            active = False
+        if isinstance(action, PERSISTENT_READINGS) and action.set_point == "on":
+            key = monitor_key(action)
+            if key in active:
+                raise ValueError(f"Row {row}: {action.device} check already enabled; disable it before replacing it")
+            active.add(key)
+        elif isinstance(action, DISABLE_READINGS):
+            key = monitor_key(action)
+            if key not in active:
+                raise ValueError(f"Row {row}: no persistent {action.device} check to disable")
+            active.remove(key)
     if active:
-        raise ValueError("An on DRO check requires an explicit off row before experiment end")
+        raise ValueError("An on reading check requires an explicit off row before experiment end")
     if leased_motor:
         raise ValueError("A CAN motor row with blank duration_s requires an explicit rpm=0 stop row")
     return tuple(actions)
@@ -685,9 +851,12 @@ def parse_program(csv_text: object) -> tuple[ExperimentAction, ...]:
 class ExperimentRunner:
     """A sequential state machine with explicit Start and telemetry events."""
 
-    def __init__(self, request_state: Callable[[RequestedStateAction | MoveStepperAction | StepperModeAction | ActuatorAction], object] | None = None,
+    def __init__(self, request_state: Callable[[ExperimentAction], object] | None = None,
                  abort_state: Callable[[MoveStepperAction], object] | None = None) -> None:
         self.program: tuple[ExperimentAction, ...] = ()
+        self.fail_safe_program: tuple[ExperimentAction, ...] = ()
+        self.sequence = "main"
+        self.failure: dict[str, object] | None = None
         self.request_state = request_state
         self.abort_state = abort_state
         self.name = ""
@@ -701,21 +870,27 @@ class ExperimentRunner:
         self.results: list[dict[str, object]] = []
         self.events: list[dict[str, object]] = []
         self.monitors: dict[str, dict[str, object]] = {}
-        self._monitor_action: DroReadingAction | None = None
+        self._monitor_actions: dict[str, DroReadingAction | PressureReadingAction] = {}
         self._last_sample: dict[str, object] = {}
         self._last_sample_s: float | None = None
         self._pending_request: Future | None = None
         self._pending_stop: Future | None = None
+        self._retired_requests: list[tuple[Future, dict[str, object]]] = []
+
+    @property
+    def active_program(self) -> tuple[ExperimentAction, ...]:
+        return self.fail_safe_program if self.sequence == "fail_safe" else self.program
 
     def _event(self, event: str, now_s: float, **details: object) -> None:
         self.revision += 1
-        self.events.append({"event": event, "elapsed_s": now_s, **details})
+        self.events.append({"event": event, "elapsed_s": now_s, "sequence": self.sequence, **details})
 
-    def load(self, csv_text: object, name: str, now_s: float) -> None:
+    def load(self, csv_text: object, name: str, now_s: float, *, fail_safe_csv: object = None) -> None:
         if self.state == "running":
             raise RuntimeError("The experiment is running; wait for it to finish before loading")
-        program = parse_program(csv_text)
-        self.program = program
+        worksheet = parse_worksheet(csv_text, fail_safe_csv)
+        self.program, self.fail_safe_program = worksheet.main, worksheet.fail_safe
+        self.sequence, self.failure = "main", None
         self.name = name
         self.program_id += 1
         self.state = "ready"
@@ -724,11 +899,12 @@ class ExperimentRunner:
         self.results = []
         self.events = []
         self.monitors = {}
-        self._monitor_action = None
+        self._monitor_actions = {}
         self._last_sample = {}
         self._last_sample_s = None
         self._pending_request = None
         self._pending_stop = None
+        self._retired_requests = []
         self._event("loaded", now_s)
 
     def start(self, now_s: float, program_id: object = None) -> None:
@@ -739,28 +915,30 @@ class ExperimentRunner:
         if program_id is not None and (type(program_id) is not int or program_id != self.program_id):
             raise RuntimeError("The loaded spreadsheet has changed; review it before starting")
         self.state = "running"
+        self.sequence, self.failure = "main", None
         self.current_index = 0
         self.started_s = now_s
         self.finished_s = None
         self.results = []
         self.events = []
         self.monitors = {}
-        self._monitor_action = None
+        self._monitor_actions = {}
         self._last_sample = {}
         self._last_sample_s = None
         self._pending_request = None
         self._pending_stop = None
+        self._retired_requests = []
         self._event("start", now_s, action="start")
         self._begin_row(now_s)
 
     def _begin_row(self, now_s: float) -> None:
         self.row_started_s = now_s
         self.results.append({
-            "row": self.current_index + 1, "status": "waiting", "checks": {},
+            "row": self.current_index + 1, "sequence": self.sequence, "status": "waiting", "checks": {},
         })
         self._event("row_started", now_s, row=self.current_index + 1,
-                    action=self.program[self.current_index].as_dict()["action"],
-                    source=self.program[self.current_index].source)
+                    action=self.active_program[self.current_index].as_dict()["action"],
+                    source=self.active_program[self.current_index].source)
 
     def _accept_request(self, action: ExperimentAction, request: object, now_s: float) -> None:
         result = self.results[-1]
@@ -808,9 +986,13 @@ class ExperimentRunner:
             except Exception as exc:
                 result["stop_error"] = str(exc)
             self._event("stop_completed", now_s, row=self.current_index + 1)
-        if self.state != "running" and self._pending_request is not None and self._pending_request.done():
-            future, self._pending_request = self._pending_request, None
-            result = self.results[-1]
+        if self.state != "running" and self._pending_request is not None:
+            self._retired_requests.append((self._pending_request, self.results[-1]))
+            self._pending_request = None
+        for future, result in list(self._retired_requests):
+            if not future.done():
+                continue
+            self._retired_requests.remove((future, result))
             result["request_pending"] = False
             if future.cancelled():
                 result["request_cancelled"] = True
@@ -822,7 +1004,7 @@ class ExperimentRunner:
                     result["request_finished_after_failure"] = True
                 except Exception as exc:
                     result["request_error"] = str(exc)
-            self._event("command_completed_after_failure", now_s, row=self.current_index + 1)
+            self._event("command_completed_after_failure", now_s, row=result["row"], sequence=result["sequence"])
 
     def on_sample(self, sample: Mapping[str, object], now_s: float,
                   actual_states: Mapping[str, object] | None = None) -> None:
@@ -835,17 +1017,17 @@ class ExperimentRunner:
         # Row deadlines still reject late completion evidence.
         if self.tick(now_s):
             return
-        action = self.program[self.current_index]
+        action = self.active_program[self.current_index]
         result = self.results[-1]
         if isinstance(action, WaitAction):
             return  # Timer ticks advance a dwell; telemetry and monitors remain independent.
-        if isinstance(action, DisableDroCheckAction):
-            self._monitor_action = None
-            self.monitors["controllino/dro"].update(active=False, disabled_row=self.current_index + 1,
-                                               disabled_s=now_s)
-            self._event("monitor_disabled", now_s, row=self.current_index + 1, device="dro")
-            checks = {"monitor_disabled": {"ok": True, "observed": {"device": "dro", "active": False}}}
-        elif isinstance(action, (RequestedStateAction, MoveStepperAction, StepperModeAction, ActuatorAction)):
+        if isinstance(action, DISABLE_READINGS):
+            key = monitor_key(action)
+            self._monitor_actions.pop(key, None)
+            self.monitors.setdefault(key, {}).update(active=False, disabled_row=self.current_index + 1, disabled_s=now_s)
+            self._event("monitor_disabled", now_s, row=self.current_index + 1, device=action.device)
+            checks = {"monitor_disabled": {"ok": True, "observed": {"device": action.device, "active": False}}}
+        elif isinstance(action, COMMAND_ACTIONS):
             if self._pending_request is not None:
                 future = self._pending_request
                 if not future.done():
@@ -858,12 +1040,16 @@ class ExperimentRunner:
                     self.fail("request_failed", now_s)
                 return  # Actual-state confirmation needs a subsequent sample.
             if not result.get("requested"):
-                if isinstance(action, (MoveStepperAction, StepperModeAction, ActuatorAction)):
+                if isinstance(action, (MoveStepperAction, StepperModeAction, StepperHaltAction, ActuatorAction)):
                     checks = source_checks(sample, action.source, action.max_age_ms, action.health)
                     if result["checks"] != checks:
                         result["checks"] = checks
                         self.revision += 1
                     if not all(check["ok"] for check in checks.values()):
+                        if self.sequence == "fail_safe":
+                            # Do not strand every later shutdown action behind
+                            # a pre-dispatch requirement that already fails.
+                            self.fail("command_requirements_failed", now_s)
                         return
                 if self.request_state is None:
                     self.fail("requested_state_unavailable", now_s)
@@ -916,7 +1102,7 @@ class ExperimentRunner:
                     self._event("motion_started", now_s, row=self.current_index + 1,
                                 command_id=move["expected_command_id"])
                     checks = action.evaluate(sample, move["expected_command_id"], started=True)
-            elif isinstance(action, (StepperModeAction, ActuatorAction)):
+            elif isinstance(action, (StepperModeAction, StepperHaltAction, ActuatorAction)):
                 ramped_stop = bool(result.get("request", {}).get("ramped_stop"))
                 stop_started = result.get("stop_started", False)
                 checks = action.evaluate(sample)
@@ -964,7 +1150,7 @@ class ExperimentRunner:
                 checks = action.evaluate(actual_states or {})
         else:
             checks = action.evaluate(sample)
-        if isinstance(action, (TemperatureReadingAction, DroReadingAction)) and not all(check["ok"] for check in checks.values()):
+        if isinstance(action, (TemperatureReadingAction, *PERSISTENT_READINGS)) and not all(check["ok"] for check in checks.values()):
             result["checks"] = checks
             self.fail("reading_check_failed", now_s)
             return
@@ -973,28 +1159,32 @@ class ExperimentRunner:
             self.revision += 1
         if not all(check["ok"] for check in checks.values()):
             return
-        if isinstance(action, DroReadingAction) and action.set_point == "on":
-            self._monitor_action = action
-            self.monitors["controllino/dro"] = {
+        if isinstance(action, PERSISTENT_READINGS) and action.set_point == "on":
+            key = monitor_key(action)
+            self._monitor_actions[key] = action
+            self.monitors[key] = {
                 "active": True, "row": self.current_index + 1, "action": action.as_dict(),
                 "checks": action.evaluate(sample, persistent=True), "checked_s": now_s,
                 "phase": "persistent",
             }
-            self._event("monitor_enabled", now_s, row=self.current_index + 1, device="dro")
+            self._event("monitor_enabled", now_s, row=self.current_index + 1, device=action.device)
         self._pass_row(now_s, checks)
 
     def _pass_row(self, now_s: float, checks: Mapping[str, object]) -> None:
-        action = self.program[self.current_index]
+        action = self.active_program[self.current_index]
         result = self.results[-1]
         result.update(status="passed", finished_s=now_s, checks=deepcopy(dict(checks)))
         self._event("row_passed", now_s, row=self.current_index + 1,
                     source=action.source, checks=deepcopy(checks))
+        self._advance_row(now_s)
+
+    def _advance_row(self, now_s: float) -> None:
         self.current_index += 1
-        if self.current_index == len(self.program):
-            self.state = "completed"
+        if self.current_index == len(self.active_program):
+            self.state = "failed" if self.sequence == "fail_safe" else "completed"
             self.finished_s = now_s
             self.row_started_s = None
-            self._event("completed", now_s)
+            self._event("fail_safe_completed" if self.sequence == "fail_safe" else "completed", now_s)
         else:
             # Each subsequent row consumes a subsequent telemetry event.
             self._begin_row(now_s)
@@ -1004,19 +1194,20 @@ class ExperimentRunner:
         self.on_io_event(now_s)
         if self.state != "running":
             return False
-        if self._monitor_action is not None:
+        for key, monitor_action in self._monitor_actions.items():
             sample = dict(self._last_sample)
-            checks = self._monitor_action.evaluate(sample, persistent=True)
-            monitor = self.monitors["controllino/dro"]
+            checks = monitor_action.evaluate(sample, persistent=True)
+            monitor = self.monitors[key]
             if monitor["checks"] != checks:
                 monitor.update(checks=deepcopy(checks), checked_s=now_s)
                 self.revision += 1
             if not all(check["ok"] for check in checks.values()):
                 self.results[-1].update(monitor_row=monitor["row"],
+                                        monitor_device=monitor_action.device,
                                         monitor_checks=deepcopy(checks))
                 self.fail("persistent_reading_check_failed", now_s)
                 return True
-        action = self.program[self.current_index]
+        action = self.active_program[self.current_index]
         assert self.row_started_s is not None
         if isinstance(action, WaitAction):
             elapsed = max(0.0, now_s - self.row_started_s)
@@ -1037,13 +1228,36 @@ class ExperimentRunner:
         self.fail("timeout", now_s)
         return True
 
-    def fail(self, reason: str, now_s: float) -> None:
+    def fail(self, reason: str, now_s: float, *, run_fail_safe: bool = True) -> None:
         if self.state != "running":
             return
         self.results[-1].update(status="failed", reason=reason, finished_s=now_s)
+        if run_fail_safe and (self.fail_safe_program or self.sequence == "fail_safe"):
+            result = self.results[-1]
+            self._event("row_failed", now_s, row=self.current_index + 1, reason=reason,
+                        checks=deepcopy(result["checks"]))
+            if self._pending_request is not None:
+                self._pending_request.cancel()
+                self._retired_requests.append((self._pending_request, result))
+                self._pending_request = None
+            self._monitor_actions.clear()
+            for monitor in self.monitors.values():
+                if monitor["active"]:
+                    monitor.update(active=False, disabled_s=now_s, disabled_reason="sequence_failed")
+            if self.sequence == "main":
+                self.failure = result
+                self.sequence = "fail_safe"
+                self.current_index = 0
+                self._event("fail_safe_started", now_s)
+                self._begin_row(now_s)
+            else:
+                # A fail-safe failure is recorded, never recursively re-entered.
+                self._advance_row(now_s)
+            self.on_io_event(now_s)
+            return
         self.state = "failed"
         self.finished_s = now_s
-        action = self.program[self.current_index]
+        action = self.active_program[self.current_index]
         if self._pending_request is not None:
             self._pending_request.cancel()  # Only cancels work that has not begun.
         if (isinstance(action, MoveStepperAction) and self.results[-1].get("request_attempted")
@@ -1062,7 +1276,7 @@ class ExperimentRunner:
                     checks=deepcopy(self.results[-1]["checks"]))
 
     def _row_deadline_s(self) -> float | None:
-        action = self.program[self.current_index] if self.state == "running" else None
+        action = self.active_program[self.current_index] if self.state == "running" else None
         if action is None or self.row_started_s is None:
             return None
         result = self.results[-1]
@@ -1070,7 +1284,7 @@ class ExperimentRunner:
             return self.row_started_s + action.duration_s
         if result.get("motion_started") or result.get("stop_started"):
             return None
-        if isinstance(action, (RequestedStateAction, MoveStepperAction, StepperModeAction, ActuatorAction)):
+        if isinstance(action, COMMAND_ACTIONS):
             sent_s = result.get("command_sent_s")
             return sent_s + action.timeout_s if sent_s is not None else None
         return self.row_started_s + action.timeout_s
@@ -1083,7 +1297,11 @@ class ExperimentRunner:
             "program_id": self.program_id,
             "name": self.name,
             "columns": list(CSV_COLUMNS),
+            "csv_input_fields": list(CSV_INPUT_FIELDS),
             "program": [action.as_dict() for action in self.program],
+            "fail_safe_program": [action.as_dict() for action in self.fail_safe_program],
+            "sequence": self.sequence,
+            "failure": self.failure,
             "current_row": self.current_index + 1 if self.state == "running" else None,
             "started_s": self.started_s,
             "finished_s": self.finished_s,

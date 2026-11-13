@@ -44,7 +44,19 @@ class PressureTests(unittest.TestCase):
         self.assertEqual([(c["index"], c["relay"], c["pin"], c["wire_id"]) for c in CONTROLLINO_RELAYS],
                          [(0, "R3", 25, 5), (1, "R4", 26, 6), (2, "R5", 27, 4)])
         self.assertIsInstance(pressure_fields(), tuple)
-        self.assertEqual(len(set(pressure_fields())), 45)
+        self.assertEqual(len(set(pressure_fields())), 54)
+
+    def test_calibrated_reading_remains_available_without_dashboard_health_gate(self):
+        config = validate_pressure_config({"1": {"volts_per_count": .01, "calibration": calibration()}})
+        values = sample(stepper_connected=False, stepper_transport_error='connection reset',
+                        stepper_age_ms=9000, stepper_pressure_sample_age_ms=9000)
+        transform_pressure_sample(values, config)
+        self.assertIsNone(values['stepper_pressure1_value'])
+        self.assertFalse(values['stepper_pressure1_valid'])
+        self.assertAlmostEqual(values['stepper_pressure1_reading'], 4 * MBAR_PER_PSI)
+        values.update(stepper_pressure_sequence=0, stepper_pressure_sample_age_ms=-1)
+        transform_pressure_sample(values, config)
+        self.assertIsNone(values['stepper_pressure1_reading'])
 
     def test_uncalibrated_fresh_raw_is_valid_but_never_a_pressure(self):
         config, values = validate_pressure_config(), sample()

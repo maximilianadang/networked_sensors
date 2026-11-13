@@ -115,7 +115,7 @@ def validate_pressure_config(values: object = None) -> dict[str, dict]:
 
 def pressure_fields() -> tuple[str, ...]:
     return tuple(f"stepper_pressure{channel['id']}_{suffix}"
-                 for channel in PRESSURE_INPUTS for suffix in ("adc", "adc_oversampled", "voltage_v", "value", "valid"))
+                 for channel in PRESSURE_INPUTS for suffix in ("adc", "adc_oversampled", "voltage_v", "reading", "value", "valid"))
 
 
 def pressure_descriptors(config: Mapping[str, Mapping]) -> list[dict]:
@@ -160,17 +160,27 @@ def transform_pressure_sample(sample: dict, config: Mapping[str, Mapping], *, st
         used_adc = adc if oversampled is None else oversampled
         voltage = used_adc * scale if raw_valid and scale is not None else None
         sample[prefix + "voltage_v"] = voltage
+        # Preserve the calibrated measurement independently of dashboard freshness.
+        # Spreadsheet reading rows choose their own freshness/health requirements.
+        sample[prefix + "reading"] = None
         sample[prefix + "value"] = None
         valid = fresh and raw_valid
         calibration = settings["calibration"]
         if calibration is not None:
-            valid = (valid and voltage is not None
-                     and calibration["voltage_min"] <= voltage <= calibration["voltage_max"])
-            if valid:
+            calibrated = (raw_valid and voltage is not None
+                          and calibration["voltage_min"] <= voltage <= calibration["voltage_max"])
+            valid = valid and calibrated
+            if calibrated:
                 fraction = ((voltage - calibration["voltage_min"])
                             / (calibration["voltage_max"] - calibration["voltage_min"]))
                 low, high = _pressure_endpoints(calibration, channel["unit"])
-                sample[prefix + "value"] = low + fraction * (high - low)
+                measurement = low + fraction * (high - low)
+                # Firmware uses sequence zero before its first ADC scan. Older
+                # recorded samples can omit the counter entirely.
+                if sample.get("stepper_pressure_sequence") != 0:
+                    sample[prefix + "reading"] = measurement
+                if valid:
+                    sample[prefix + "value"] = measurement
         sample[prefix + "valid"] = bool(valid)
 
 

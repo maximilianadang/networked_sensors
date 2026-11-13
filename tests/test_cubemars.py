@@ -363,6 +363,31 @@ class CubemarsTests(unittest.TestCase):
         runtime.set_cubemars_motor({'action': 'start', 'token': 123, 'rpm': 10, 'ramp_rpm_s': 3})
         return runtime
 
+    def test_stepper_halt_preserves_can_run_until_separate_zero_rpm_request(self):
+        runtime = self.start_owned_manual()
+        self.stepper.payload['cstop'] = 1
+        self.stepper.refresh()
+        runtime.move_stepper(dict(distance_mm=1, speed_mm_s=1, direction='forward'))
+        self.assertTrue(self.current()['stepper_moving'])
+        before = len(self.stepper.commands)
+
+        result = runtime.stop_stepper()
+
+        self.assertEqual(self.stepper.commands[before:], [b'V1 X\n'])
+        self.assertFalse(result['stepper']['stepper_moving'])
+        self.assertTrue(result['stepper']['stepper_can_motor_active'])
+        self.assertEqual(result['stepper']['stepper_can_motor_target_rpm'], 10)
+        self.assertEqual(runtime._cubemars_token, 123)
+        runtime._renew_cubemars_lease()
+        self.assertEqual(self.stepper.commands[-1], b'V1 K123\n')
+
+        runtime.set_cubemars_motor({'action': 'update', 'token': 123, 'rpm': 0, 'ramp_rpm_s': 3})
+        self.assertEqual(self.stepper.commands[-1], b'V1 U0,3,123\n')
+        self.assertEqual(self.current()['stepper_can_motor_target_rpm'], 0)
+        self.assertFalse(self.current()['stepper_moving'])
+        runtime._renew_cubemars_lease()
+        self.assertEqual(self.stepper.commands[-1], b'V1 K123\n')
+
     def test_backend_renews_without_browser_requests_or_sensor_merge_lock(self):
         runtime = self.start_owned_manual()
         for _ in range(4):

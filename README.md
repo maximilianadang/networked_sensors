@@ -234,7 +234,7 @@ Rows execute in spreadsheet order while sensor acquisition continues.
 | `action` | Purpose |
 | --- | --- |
 | `telemetry_health` | Check source freshness, transport health and selected device readiness |
-| `reading_state` | Compare a DRO or thermocouple value with explicit bounds |
+| `reading_state` | Compare a DRO, thermocouple or pressure value with explicit bounds |
 | `requested_state` | Change recording, an output, controller mode or piston motion |
 | `wait` | Hold the current states for `duration_s`; other cells remain blank |
 
@@ -247,10 +247,55 @@ bounds command feedback. A confirmed stepper move then waits for firmware pulse
 completion without a motion-completion deadline. Read-only check timeouts start
 at row entry. See the other [CSV examples](examples/) for checks and monitors.
 
-Outputs retain their state between rows, so include explicit closing/stopping
-rows. A failed row halts the sequence; later cleanup rows do not execute.
-Firmware interlocks and CAN lease protections still apply. Completed experiments
-can be started again with **Start experiment**.
+Use the separate **Main sequence CSV** and **Fail-safe CSV** file selectors, or
+expand **Edit CSV** to edit the two text fields. Each uses the same ordinary
+column names and runs its own rows from top to bottom. Editing or importing one
+keeps the other intact. **Load spreadsheet** validates both together before
+Start becomes available. Their previews remain side by side. Leave the
+fail-safe field blank to run without a spreadsheet fail-safe response.
+
+The loaded table shows the last successfully validated procedure, not unsaved
+edits. After changing either text field, click **Load spreadsheet**, check that
+the table reflects your changes, then click **Start experiment**. If loading
+reports an error, neither sequence is replaced. Every CSV row must have the same
+number of cells as its header; adding pressure bounds requires adding their
+header names and blank cells to rows that do not use them. When replacing a
+procedure by copy/paste, replace the entire field, including its header.
+
+After updating dashboard code, stop and relaunch `dashboard.py` in its terminal,
+then refresh the browser. Refreshing alone does not update the Python backend;
+the interface blocks loading if it detects a backend without two-field support.
+
+A failed main row or enabled reading monitor enters the fail-safe section once,
+skipping the remaining main rows. Fail-safe rows continue after a row fails or
+times out, and each error remains visible. The final experiment result remains
+failed. Fail safe is skipped on successful runs. Without that section, a failure
+retains the existing queue-stop behavior.
+
+The default procedure uses [record_motor_solenoids.csv](examples/record_motor_solenoids.csv)
+for the main sequence and [record_motor_solenoids_fail_safe.csv](examples/record_motor_solenoids_fail_safe.csv)
+for the response. The fail-safe rows close all three solenoids, halt the stepper,
+ramp the CAN motor to zero, and stop recording, in that order. Independent
+stepper halt requires firmware **1.6.4**. Pressure checks use `device=AI10` (or
+another pressure terminal), `min_mbar`/`max_mbar` for low pressure, or
+`min_psi`/`max_psi` for high pressure. Use `set_point=on` to monitor through later
+rows and an explicit `off` row to disable the monitor on the successful path.
+No operating pressure threshold is supplied by default.
+
+For example, an AI10 guard with `min_mbar=0`, `max_mbar=20` and `set_point=on`
+checks immediately, then remains active during later actions and waits until an
+explicit `off` row. A reading outside **0–20 mbar** or an unusable measurement
+enters fail safe immediately; exactly **20 mbar passes** because bounds are
+inclusive. Its `timeout_s` applies to the initial enable row, not the monitor's
+lifetime, and does not give an out-of-bounds value a grace period. Blank
+`max_age_ms` and `health` make this a value-only check. This pressure guard and
+valve-only response use existing firmware telemetry/commands; the 1.6.4 requirement
+above concerns independent stepper halt. See the [motor-free pressure-guard
+example](examples/README.md#motor-free-pressure-guard-example) for both CSVs.
+
+Outputs retain their state between rows, so keep explicit closing/stopping rows
+in the main sequence too. Firmware interlocks and CAN lease protections still
+apply. Completed or failed experiments can be started again with **Start experiment**.
 
 ## Thermocouples and saved settings
 
@@ -269,6 +314,12 @@ settings retain their original units and are converted when readings are produce
 P4 also shows estimated nitrogen velocity using TC-0 and the signed pressure path
 `6 mbar + AI10 - AI08 + AI12`. All contributing inputs must be calibrated and
 valid. See [the Pitot calculation and channel mapping](firmware/README.md#nitrogen-pitot-velocity).
+
+The visible pressure labels are **LP1–LP6** and **HP1–HP3**. Low-pressure
+terminal order is AI10, AI11, AI12, AI13, AI08, AI09; high-pressure order is
+AI0, AI1, AI2. LP1/LP5 and LP2/LP6 measure opposing directions across shared
+boundaries and are vertically aligned. Existing configuration IDs and recorded
+data keys retain their original numbering (P1–P4, P8/P9 and P5–P7).
 
 High-pressure oversampling is enabled by default in firmware 1.6.3 for P5–P7.
 Set `PRESSURE_OVERSAMPLING` to `true` or `false` in

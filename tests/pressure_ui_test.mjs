@@ -24,7 +24,7 @@ globalThis.document = {getElementById: id => nodes[id], createElement: () => new
   createTextNode: text => ({textContent: text}), querySelector: selector => selector === ".plot-grid" ? grid : null};
 const {createControllinoMeasurementsComponent, calculateAirPowderRatio} = await import("../dashboard_app/static/app-lean.js");
 const descriptors = Array.from({length: 9}, (_, i) => ({id: i+1,
-  group: i < 4 || i >= 7 ? "low" : "high", group_label: "Pressure",
+  group: i < 4 || i >= 7 ? "low" : "high", group_index: i < 4 ? i+1 : i >= 7 ? i-2 : i-3, group_label: "Pressure",
   unit: i < 4 || i >= 7 ? "mbar" : "psi", calibrated: true, volts_per_count: .01,
   adc_key: `stepper_pressure${i+1}_adc`,
   value_key: `p${i+1}`, valid_key: `v${i+1}`}));
@@ -34,6 +34,14 @@ const sample = {stepper_mode: "controllino", stepper_connected: true, stepper_pr
   pitot_velocity_m_s: 12.345};
 for (let i = 1; i <= 9; i++) Object.assign(sample, {[`p${i}`]: 1.234, [`v${i}`]: true});
 component.render(sample);
+for (const id of ["espFlowChart", "sickFlowChart"]) {
+  const series = component.series(id);
+  check(new Set(series.map(item => item.color)).size === series.length, "Curves within a plot need distinct colors");
+  check(series.every(item => !item.dash), "Pressure curves must remain solid");
+}
+
+check(low.children[4].children[0].textContent === "LP5" && low.children[5].children[0].textContent === "LP6", "Low pressure numbering must be continuous");
+check(high.children[0].children[0].textContent === "HP1", "High pressure labels must be distinct");
 check(low.children.length === 6 && high.children.length === 3, "AI08 and AI09 belong with low pressures");
 check(low.children[0].children[1].textContent === "1.23", "mbar must retain two decimals");
 check(high.children[0].children[1].textContent === "1.2", "psi precision must remain unchanged");
