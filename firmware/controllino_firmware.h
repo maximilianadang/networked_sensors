@@ -2,7 +2,10 @@
 
 // One auxiliary backend per build. Keep the previous 0/1 build flag compatible.
 // The dashboard discovers the selected capability through telemetry.
-constexpr char FIRMWARE_VERSION[] = "1.6.1";
+constexpr char FIRMWARE_VERSION[] = "1.6.3";
+// Pressure P5–P7 only: 16 conversions, decimated to quarter-count resolution.
+// Change true/false here, then recompile and flash.
+constexpr bool PRESSURE_OVERSAMPLING = true;
 #define DRO_BACKEND_ABSOLUTE 0
 #define DRO_BACKEND_LINACE 1
 #ifndef CONTROLLINO_DRO_KIND

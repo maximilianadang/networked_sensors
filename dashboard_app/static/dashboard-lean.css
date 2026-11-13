@@ -249,7 +249,7 @@ button.emergency-reset { min-height: 26px; padding: 2px 6px; }
   .metric-grid:has(.pressure-values[data-pressure-group="low"]:not([hidden])) {
     grid-template-columns: minmax(0, 2fr) repeat(5, minmax(0, 1fr));
   }
-  .pressure-values[data-pressure-group="low"] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .pressure-values[data-pressure-group="low"] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
 /* SHARED PANELS: Pressure (bar), ESP32 Mass Flow (g/min), SICK Mass Flow (g/min).

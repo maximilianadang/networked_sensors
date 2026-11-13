@@ -19,7 +19,7 @@ def sample(**changes):
     result = {"stepper_pressure_capable": True, "stepper_connected": True,
               "stepper_transport_error": None, "stepper_pressure_sample_age_ms": 20,
               "stepper_age_ms": 30, "stepper_pressure_sequence": 1}
-    result.update({f"stepper_pressure{i}_adc": 200 for i in range(1, 9)})
+    result.update({f"stepper_pressure{i}_adc": 200 for i in range(1, 10)})
     result.update(changes)
     return result
 
@@ -35,21 +35,21 @@ class PressureTests(unittest.TestCase):
     def test_channel_identity_and_default_unknowns(self):
         self.assertEqual([(c["terminal"], c["arduino_pin"]) for c in PRESSURE_INPUTS],
                          [("AI10", "A10"), ("AI11", "A11"), ("AI12", "A14"),
-                          ("AI13", "A15"), ("AI0", "A0"), ("AI1", "A1"), ("AI2", "A2"), ("AI08", "A8")])
+                          ("AI13", "A15"), ("AI0", "A0"), ("AI1", "A1"), ("AI2", "A2"), ("AI08", "A8"), ("AI09", "A9")])
         self.assertEqual([c["id"] for c in PRESSURE_INPUTS if c["supply_known"]], [5, 6, 7])
         self.assertEqual([(c["group"], c["group_index"]) for c in PRESSURE_INPUTS],
                          [("low", 1), ("low", 2), ("low", 3), ("low", 4),
-                          ("high", 1), ("high", 2), ("high", 3), ("low", 5)])
+                          ("high", 1), ("high", 2), ("high", 3), ("low", 5), ("low", 6)])
         self.assertEqual(SOLENOID_COUNT, 3)
         self.assertEqual([(c["index"], c["relay"], c["pin"], c["wire_id"]) for c in CONTROLLINO_RELAYS],
                          [(0, "R3", 25, 5), (1, "R4", 26, 6), (2, "R5", 27, 4)])
         self.assertIsInstance(pressure_fields(), tuple)
-        self.assertEqual(len(set(pressure_fields())), 32)
+        self.assertEqual(len(set(pressure_fields())), 45)
 
     def test_uncalibrated_fresh_raw_is_valid_but_never_a_pressure(self):
         config, values = validate_pressure_config(), sample()
         transform_pressure_sample(values, config)
-        for index in range(1, 9):
+        for index in range(1, 10):
             self.assertTrue(values[f"stepper_pressure{index}_valid"])
             self.assertIsNone(values[f"stepper_pressure{index}_value"])
         self.assertEqual(values["stepper_pressure1_voltage_v"], 200 * STANDARD_VOLTS_PER_COUNT)
@@ -58,16 +58,32 @@ class PressureTests(unittest.TestCase):
         descriptors = pressure_descriptors(config)
         self.assertEqual([c["label"] for c in descriptors],
                          [f"Low pressure {i}" for i in range(1, 5)]
-                         + [f"High pressure {i}" for i in range(1, 4)] + ["Low pressure 5"])
+                         + [f"High pressure {i}" for i in range(1, 4)] + ["Low pressure 5", "Low pressure 6"])
         self.assertEqual([c["group_label"] for c in descriptors],
-                         ["Low pressure"] * 4 + ["High pressure"] * 3 + ["Low pressure"])
+                         ["Low pressure"] * 4 + ["High pressure"] * 3 + ["Low pressure"] * 2)
         self.assertEqual((descriptors[0]["unit"], descriptors[0]["data_key"]),
                          ("mbar", "stepper_pressure1_value"))
         self.assertEqual((descriptors[2]["unit"], descriptors[2]["data_key"]),
                          ("mbar", "stepper_pressure3_value"))
-        self.assertEqual([c["unit"] for c in descriptors], ["mbar"] * 4 + ["psi"] * 3 + ["mbar"])
+        self.assertEqual([c["unit"] for c in descriptors], ["mbar"] * 4 + ["psi"] * 3 + ["mbar"] * 2)
         self.assertTrue(all(c["data_key"] == c["value_key"] for c in descriptors))
         self.assertFalse(any(c["calibrated"] for c in descriptors))
+
+    def test_oversampled_fraction_survives_voltage_and_pressure_conversion(self):
+        config = validate_pressure_config({"5": {"volts_per_count": .8 / 24,
+            "calibration": calibration(voltage_min=.5, voltage_max=4.5,
+                                       pressure_min=0, pressure_max=200)}})
+        values = sample(stepper_pressure5_adc=25, stepper_pressure5_adc_oversampled=24.25)
+        transform_pressure_sample(values, config)
+        self.assertEqual(values["stepper_pressure5_adc"], 25)
+        self.assertAlmostEqual(values["stepper_pressure5_voltage_v"], 24.25 * .8 / 24)
+        self.assertAlmostEqual(values["stepper_pressure5_value"], 50 * (24.25 * .8 / 24 - .5))
+        for bad in (-.25, 1023.25, True, "24.25", float("nan")):
+            with self.subTest(bad=bad):
+                values["stepper_pressure5_adc_oversampled"] = bad
+                transform_pressure_sample(values, config)
+                self.assertFalse(values["stepper_pressure5_valid"])
+                self.assertIsNone(values["stepper_pressure5_value"])
 
     def test_linear_conversion_inclusive_endpoints_and_no_extrapolation(self):
         config = validate_pressure_config({"1": {"label": "Inlet", "volts_per_count": .01,
@@ -98,8 +114,8 @@ class PressureTests(unittest.TestCase):
 
     def test_equivalent_input_units_publish_group_units_without_rewriting_calibration(self):
         # Each source range describes the same -1..3 bar physical pressure.
-        for channel_id in range(1, 9):
-            output_unit, output_per_bar = ("mbar", 1000) if channel_id <= 4 or channel_id == 8 else ("psi", 14.503773773020923)
+        for channel_id in range(1, 10):
+            output_unit, output_per_bar = ("mbar", 1000) if channel_id <= 4 or channel_id >= 8 else ("psi", 14.503773773020923)
             prefix = f"stepper_pressure{channel_id}_"
             for unit, units_per_bar in (("Pa", 100000), ("kPa", 100), ("MPa", .1),
                                         ("hPa", 1000), ("mbar", 1000), ("bar", 1),
@@ -164,7 +180,7 @@ class PressureTests(unittest.TestCase):
             self.assertTrue(values["stepper_pressure2_valid"])
 
     def test_configuration_rejects_nonfinite_ambiguous_or_reversed_values(self):
-        invalid = [[], {"9": {}}, {1: {}}, {"1": {"volts_per_count": 0}},
+        invalid = [[], {"10": {}}, {1: {}}, {"1": {"volts_per_count": 0}},
                    {"1": {"volts_per_count": True}}, {"1": {"label": " "}},
                    {"1": {"unknown": 1}}, {"1": {"calibration": {}}}]
         for scale in (float("nan"), float("inf"), -1, 10**1000, 1e308):
@@ -195,7 +211,7 @@ class SystemConfigMigrationTests(unittest.TestCase):
             config = SystemConfig(path)
             self.assertEqual(config.stepper_dro_kind, "absolute_dro")
             self.assertEqual(config.stepper_dro_zero_raw_mm, 135.46)
-            self.assertEqual(len(config.snapshot()["pressure_inputs"]), 8)
+            self.assertEqual(len(config.snapshot()["pressure_inputs"]), 9)
             self.assertEqual(path.read_text(), original)
             config.set_stepper_dro_zero_raw_mm(20.12, kind="linace")
             reloaded = SystemConfig(path)

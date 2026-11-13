@@ -2,12 +2,13 @@
 #include <Arduino.h>
 
 // Raw acquisition only. Channel gains and sensor pressure calibration belong
-// to the host. One channel per due slice bounds ADC work to about 210 us at16MHz.
+// to the host. One channel per 10 ms slice, with at most 17 conversions.
+// Interrupts remain enabled during acquisition.
 class PressureAdc {
  public:
-  static constexpr byte CHANNELS = 8;
-  void begin(const byte (&pins)[CHANNELS]) {
-    channels = pins;
+  static constexpr byte CHANNELS = 9;
+  void begin(const byte (&pins)[CHANNELS], uint16_t oversamplingMask = 0) {
+    channels = pins; oversampling = oversamplingMask & ((1U << CHANNELS) - 1U);
     for (byte i = 0; i < CHANNELS; ++i) pinMode(channels[i], INPUT);
   }
   void poll(uint32_t nowMs) {
@@ -15,17 +16,29 @@ class PressureAdc {
     lastSliceMs = nowMs;
     if (!index) scanStartedMs = nowMs;
     analogRead(channels[index]); // Discard first conversion after switching MUX.
-    pending[index] = analogRead(channels[index]);
+    const byte count = oversampling & (1U << index) ? 16 : 1;
+    uint16_t sum = 0;
+    for (byte i = 0; i < count; ++i) {
+      pending[index] = analogRead(channels[index]);
+      sum += pending[index];
+    }
+    // 16 conversions yield two additional effective bits with suitable noise.
+    // Keep the last original conversion separately for raw diagnostics.
+    pendingQuarter[index] = count == 16 ? (sum + 2U) >> 2 : sum * 4U;
     if (++index != CHANNELS) return;
-    for (byte i = 0; i < CHANNELS; ++i) values[i] = pending[i];
+    for (byte i = 0; i < CHANNELS; ++i) {
+      values[i] = pending[i]; quarter[i] = pendingQuarter[i];
+    }
     oldestSampleMs = scanStartedMs; index = 0;
     if (++sequence == 0) ++sequence;
   }
   void writeStatus(Print &out, uint32_t nowMs) const {
     // Publish complete scans only; age conservatively measures their oldest
     // channel acquisition. Snapshot before ServicedPrint can advance the scan.
-    uint16_t snapshot[CHANNELS];
-    for (byte i = 0; i < CHANNELS; ++i) snapshot[i] = values[i];
+    uint16_t snapshot[CHANNELS], quarterSnapshot[CHANNELS];
+    for (byte i = 0; i < CHANNELS; ++i) {
+      snapshot[i] = values[i]; quarterSnapshot[i] = quarter[i];
+    }
     const uint32_t seq = sequence, age = nowMs - oldestSampleMs;
     out.print(F(",\"adc\":["));
     for (byte i = 0; i < CHANNELS; ++i) {
@@ -34,11 +47,21 @@ class PressureAdc {
     }
     out.print(F("],\"adcage\":")); out.print(seq ? long(min(age, 0x7fffffffUL)) : -1L);
     out.print(F(",\"adcseq\":")); out.print(seq);
+    if (oversampling) {
+      out.print(F(",\"adcos\":")); out.print(oversampling);
+      out.print(F(",\"adcq\":["));
+      for (byte i = 0; i < CHANNELS; ++i) {
+        if (i) out.print(',');
+        out.print(quarterSnapshot[i]);
+      }
+      out.print(']');
+    }
   }
 
  private:
   const byte *channels = nullptr;
   byte index = 0;
   uint16_t pending[CHANNELS] = {}, values[CHANNELS] = {};
+  uint16_t pendingQuarter[CHANNELS] = {}, quarter[CHANNELS] = {}, oversampling = 0;
   uint32_t lastSliceMs = 0, scanStartedMs = 0, oldestSampleMs = 0, sequence = 0;
 };

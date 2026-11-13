@@ -62,7 +62,7 @@ direct access to both sensor subnets.
 
 | Source | Default address | Role |
 | --- | --- | --- |
-| Controllino MAXI | `10.77.0.10:80` (TCP) | Piston/stepper, LinACE DRO, travel limits, AK80-6 CAN motor, three solenoids and eight pressure inputs (AI08 requires firmware 1.6.1) |
+| Controllino MAXI | `10.77.0.10:80` (TCP) | Piston/stepper, LinACE DRO, travel limits, AK80-6 CAN motor, three solenoids and nine pressure inputs (AI08 requires firmware 1.6.1; AI09 requires 1.6.2) |
 | DXMR90 | `192.168.0.1:502` (Modbus TCP) | Three SICK flow sensors |
 | ED-593 | `10.77.0.11:9500` (DCON ASCII) | Thermocouple inputs TC0–TC7 |
 
@@ -263,12 +263,17 @@ To add a probe, enable its input and select its matching thermocouple type on
 the ED-593, then restart the dashboard. Temperatures and faults keep updating
 between discoveries. The dashboard reads device settings without changing them.
 
-Low-pressure inputs **P1–P4 and P8 (AI08)** use **millibar (mbar)** in readings, charts and
+Low-pressure inputs **P1–P4, P8 (AI08) and P9 (AI09)** use **millibar (mbar)** in readings, charts and
 recording summaries; high-pressure inputs **P5–P7** use **PSI**. Calibration
 settings retain their original units and are converted when readings are produced.
 P4 also shows estimated nitrogen velocity using TC-0 and the signed pressure path
 `6 mbar + AI10 - AI08 + AI12`. All contributing inputs must be calibrated and
 valid. See [the Pitot calculation and channel mapping](firmware/README.md#nitrogen-pitot-velocity).
+
+High-pressure oversampling is enabled by default in firmware 1.6.3 for P5–P7.
+Set `PRESSURE_OVERSAMPLING` to `true` or `false` in
+`firmware/controllino_firmware.h`, then recompile and flash to change it.
+See [oversampling and recording details](firmware/README.md#optional-high-pressure-oversampling).
 
 `system_config.json` stores the DRO reference, graphic travel span, pressure
 calibration, thermocouple names and other machine settings. The graphic travel
@@ -286,6 +291,22 @@ use `--system-config PATH` to select another configuration.
   telemetry. Check the Controllino connection and installed firmware.
 - **A thermocouple is missing or faulted:** inspect its enabled state and diagnostic
   fault in **Source details**; verify the probe wiring and device configuration.
+
+To upload over USB without Jupyter, stop the dashboard, keep motor supplies off,
+and make the equipment safe for the controller to reset. From the repository
+root, list the connected ports and upload the current CubeMars variant:
+
+```bash
+python3 tools/firmware_upload.py --list-ports
+python3 tools/firmware_upload.py --target controllino-ak80-6 --port auto --safety-confirmed
+```
+
+If automatic board matching fails, replace `auto` with the USB port shown in the
+list. The helper compiles, uploads and verifies, then prints **Uploaded and
+verified**; failures print an error and return a nonzero exit status. To build
+without a connected controller, replace `--safety-confirmed` with `--compile-only`.
+The same helper powers the optional notebook. Installed board packages and
+libraries allow this workflow to run offline.
 
 Further detail:
 

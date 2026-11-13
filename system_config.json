@@ -57,11 +57,11 @@
         "pressure_min": 0,
         "reference": "absolute",
         "unit": "psi",
-        "voltage_max": 5,
-        "voltage_min": 0
+        "voltage_max": 4.573126456509074,
+        "voltage_min": 0.5075264565090742
       },
       "label": "High pressure 1",
-      "volts_per_count": 0.03
+      "volts_per_count": 0.03333333333333333
     },
     "6": {
       "calibration": {
@@ -69,11 +69,11 @@
         "pressure_min": 0,
         "reference": "absolute",
         "unit": "psi",
-        "voltage_max": 5,
-        "voltage_min": 0
+        "voltage_max": 4.576793123175741,
+        "voltage_min": 0.511193123175741
       },
       "label": "High pressure 2",
-      "volts_per_count": 0.03
+      "volts_per_count": 0.03333333333333333
     },
     "7": {
       "calibration": {
@@ -81,11 +81,11 @@
         "pressure_min": 0,
         "reference": "absolute",
         "unit": "psi",
-        "voltage_max": 5,
-        "voltage_min": 0
+        "voltage_max": 4.579486664842407,
+        "voltage_min": 0.5138866648424074
       },
       "label": "High pressure 3",
-      "volts_per_count": 0.03
+      "volts_per_count": 0.03345833333333333
     },
     "8": {
       "calibration": {
@@ -97,6 +97,18 @@
         "voltage_min": 0
       },
       "label": "Reverse outlet differential (AI08)",
+      "volts_per_count": 0.03
+    },
+    "9": {
+      "calibration": {
+        "pressure_max": 250,
+        "pressure_min": 0,
+        "reference": "unspecified",
+        "unit": "mbar",
+        "voltage_max": 10,
+        "voltage_min": 0
+      },
+      "label": "Low pressure 6 (AI09)",
       "volts_per_count": 0.03
     }
   },

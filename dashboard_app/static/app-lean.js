@@ -212,6 +212,7 @@ export function controllinoPressureReading(sample, descriptor) {
     value: valid ? value : null,
     valid,
     adc: finiteSampleNumber(sample, descriptor.adc_key),
+    oversampledAdc: finiteSampleNumber(sample, `${descriptor.adc_key}_oversampled`),
     voltage: finiteSampleNumber(sample, descriptor.voltage_key),
     status: configurationStatus || (sample?.stepper_connected !== true ? "Controller unavailable"
       : sample?.stepper_pressure_capable !== true ? "Not reported by firmware"
@@ -357,6 +358,7 @@ export function createControllinoMeasurementsComponent({descriptors = [], getHis
         setText(velocity, speed === null ? "--" : speed.toFixed(2));
       }
       const raw = [reading.adc === null ? "" : `${reading.adc.toFixed(0)} counts`,
+        reading.oversampledAdc === null ? "" : `${reading.oversampledAdc.toFixed(2)} counts (16× oversampling)`,
         reading.voltage === null ? "" : `${reading.voltage.toFixed(3)} V`].filter(Boolean);
       row.title = `${descriptor.label} · ${descriptor.terminal} · ${reading.status}${raw.length
         ? ` · ${reading.valid ? "Raw" : "Last raw"}: ${raw.join(" · ")}` : ""}`;

@@ -23,19 +23,23 @@ for (const id of ["pressureChart", "espFlowChart", "sickFlowChart"]) {
 globalThis.document = {getElementById: id => nodes[id], createElement: () => new Element(),
   createTextNode: text => ({textContent: text}), querySelector: selector => selector === ".plot-grid" ? grid : null};
 const {createControllinoMeasurementsComponent, calculateAirPowderRatio} = await import("../dashboard_app/static/app-lean.js");
-const descriptors = Array.from({length: 8}, (_, i) => ({id: i+1,
-  group: i < 4 || i === 7 ? "low" : "high", group_label: "Pressure",
-  unit: i < 4 || i === 7 ? "mbar" : "psi", calibrated: true, volts_per_count: .01,
+const descriptors = Array.from({length: 9}, (_, i) => ({id: i+1,
+  group: i < 4 || i >= 7 ? "low" : "high", group_label: "Pressure",
+  unit: i < 4 || i >= 7 ? "mbar" : "psi", calibrated: true, volts_per_count: .01,
+  adc_key: `stepper_pressure${i+1}_adc`,
   value_key: `p${i+1}`, valid_key: `v${i+1}`}));
 const component = createControllinoMeasurementsComponent({descriptors, getHistory: () => []});
 const low = nodes.espPressureMetric.children[0], high = nodes.sickPressureMetric.children[0];
 const sample = {stepper_mode: "controllino", stepper_connected: true, stepper_pressure_capable: true,
   pitot_velocity_m_s: 12.345};
-for (let i = 1; i <= 8; i++) Object.assign(sample, {[`p${i}`]: 1.234, [`v${i}`]: true});
+for (let i = 1; i <= 9; i++) Object.assign(sample, {[`p${i}`]: 1.234, [`v${i}`]: true});
 component.render(sample);
-check(low.children.length === 5 && high.children.length === 3, "AI08 belongs with low pressures");
+check(low.children.length === 6 && high.children.length === 3, "AI08 and AI09 belong with low pressures");
 check(low.children[0].children[1].textContent === "1.23", "mbar must retain two decimals");
 check(high.children[0].children[1].textContent === "1.2", "psi precision must remain unchanged");
+component.render({...sample, stepper_pressure5_adc: 25, stepper_pressure5_adc_oversampled: 24.25});
+check(high.children[0].title.includes("25 counts") && high.children[0].title.includes("24.25 counts (16× oversampling)"),
+  "Diagnostics must preserve the raw and oversampled readings separately");
 const p4 = low.children[3];
 check(p4.children[2].children[1].textContent === "12.35", "Velocity must appear beside P4");
 check(low.children.filter(row => row.children.length === 3).length === 1, "Only P4 has velocity");

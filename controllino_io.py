@@ -22,10 +22,10 @@ PRESSURE_TO_PSI = {"Pa": 1e-5 * PSI_PER_BAR, "kPa": .01 * PSI_PER_BAR,
 PRESSURE_INPUTS = tuple(
     {
         "id": index, "terminal": terminal, "arduino_pin": pin,
-        "group": "low" if index <= 4 or index == 8 else "high",
-        "group_label": "Low pressure" if index <= 4 or index == 8 else "High pressure",
-        "group_index": 5 if index == 8 else index if index <= 4 else index - 4,
-        "unit": "mbar" if index <= 4 or index == 8 else "psi",
+        "group": "low" if index <= 4 or index >= 8 else "high",
+        "group_label": "Low pressure" if index <= 4 or index >= 8 else "High pressure",
+        "group_index": index - 3 if index >= 8 else index if index <= 4 else index - 4,
+        "unit": "mbar" if index <= 4 or index >= 8 else "psi",
         "input_range_v": (0, 10) if index in (3, 4) else None,
         "supply_v": 5 if index in (5, 6, 7) else None,
         "supply_known": index in (5, 6, 7),
@@ -33,7 +33,7 @@ PRESSURE_INPUTS = tuple(
     }
     for index, (terminal, pin) in enumerate(
         (("AI10", "A10"), ("AI11", "A11"), ("AI12", "A14"),
-         ("AI13", "A15"), ("AI0", "A0"), ("AI1", "A1"), ("AI2", "A2"), ("AI08", "A8")), 1
+         ("AI13", "A15"), ("AI0", "A0"), ("AI1", "A1"), ("AI2", "A2"), ("AI08", "A8"), ("AI09", "A9")), 1
     )
 )
 CONTROLLINO_RELAYS = (
@@ -75,7 +75,7 @@ def validate_pressure_config(values: object = None) -> dict[str, dict]:
     if values is None:
         return deepcopy(DEFAULT_PRESSURE_CONFIG)
     if not isinstance(values, dict) or set(values) - set(DEFAULT_PRESSURE_CONFIG):
-        raise ValueError("pressure_inputs must be an object keyed by channel IDs '1' through '8'")
+        raise ValueError("pressure_inputs must be an object keyed by channel IDs '1' through '9'")
     result = deepcopy(DEFAULT_PRESSURE_CONFIG)
     calibration_keys = {"voltage_min", "voltage_max", "pressure_min", "pressure_max", "unit", "reference"}
     for descriptor in PRESSURE_INPUTS:
@@ -115,7 +115,7 @@ def validate_pressure_config(values: object = None) -> dict[str, dict]:
 
 def pressure_fields() -> tuple[str, ...]:
     return tuple(f"stepper_pressure{channel['id']}_{suffix}"
-                 for channel in PRESSURE_INPUTS for suffix in ("adc", "voltage_v", "value", "valid"))
+                 for channel in PRESSURE_INPUTS for suffix in ("adc", "adc_oversampled", "voltage_v", "value", "valid"))
 
 
 def pressure_descriptors(config: Mapping[str, Mapping]) -> list[dict]:
@@ -154,7 +154,11 @@ def transform_pressure_sample(sample: dict, config: Mapping[str, Mapping], *, st
         adc = sample.get(prefix + "adc")
         raw_valid = type(adc) is int and 0 <= adc <= 1023
         scale = settings["volts_per_count"]
-        voltage = adc * scale if raw_valid and scale is not None else None
+        oversampled = sample.get(prefix + "adc_oversampled")
+        if oversampled is not None:
+            raw_valid = raw_valid and _finite(oversampled) and 0 <= oversampled <= 1023
+        used_adc = adc if oversampled is None else oversampled
+        voltage = used_adc * scale if raw_valid and scale is not None else None
         sample[prefix + "voltage_v"] = voltage
         sample[prefix + "value"] = None
         valid = fresh and raw_valid

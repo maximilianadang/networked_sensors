@@ -43,7 +43,7 @@ class ControllinoRecordingTests(unittest.TestCase):
             "esp32_f1_gmin": 20, "esp32_f2_gmin": 30, "esp32_f3_gmin": 40,
             "esp32_f_combined_gmin": 90,
         }
-        row.update({f"stepper_pressure{i}_adc": 250 for i in range(1, 9)})
+        row.update({f"stepper_pressure{i}_adc": 250 for i in range(1, 10)})
         row.update(changes)
         transform_pressure_sample(row, self.config)
         return row
@@ -68,7 +68,7 @@ class ControllinoRecordingTests(unittest.TestCase):
         self.assertIsNone(metrics["pressure_combined_bar_first1s"])
         channels = metrics["controllino_pressure_first1s"]
         self.assertEqual([c["terminal"] for c in channels],
-                         ["AI10", "AI11", "AI12", "AI13", "AI0", "AI1", "AI2", "AI08"])
+                         ["AI10", "AI11", "AI12", "AI13", "AI0", "AI1", "AI2", "AI08", "AI09"])
         self.assertEqual(channels[0], dict(id=1, label="Chamber pressure", terminal="AI10",
                                           group="low", group_index=1, group_label="Low pressure",
                                           unit="mbar", reference="gauge", calibrated=True,
@@ -149,19 +149,19 @@ class ControllinoRecordingTests(unittest.TestCase):
         self.assertNotIn("controllino_pressure_first1s", metrics)
         self.assertIn("# pressure_1_bar:,902.000", recorder.paths.export_csv.read_text())
 
-    def test_all_eight_calibrated_channels_record_group_units_and_keep_their_references(self):
+    def test_all_nine_calibrated_channels_record_group_units_and_keep_their_references(self):
         self.config = validate_pressure_config({str(i): {
             "label": f"P{i}", "volts_per_count": .01,
             "calibration": calibration("psi", "absolute", i, i + 100),
-        } for i in range(1, 9)})
+        } for i in range(1, 10)})
         channels = self.recorder(self.sample()).summary()["metrics"]["controllino_pressure_first1s"]
-        for c, source_psi in zip(channels, range(51, 59)):
+        for c, source_psi in zip(channels, range(51, 60)):
             expected = source_psi * MBAR_PER_PSI if c["group"] == "low" else source_psi
             self.assertEqual(c["mean"], round(expected, 6))
         self.assertEqual([(c["group"], c["group_index"]) for c in channels],
                          [("low", 1), ("low", 2), ("low", 3), ("low", 4),
-                          ("high", 1), ("high", 2), ("high", 3), ("low", 5)])
-        self.assertEqual([c["unit"] for c in channels], ["mbar"] * 4 + ["psi"] * 3 + ["mbar"])
+                          ("high", 1), ("high", 2), ("high", 3), ("low", 5), ("low", 6)])
+        self.assertEqual([c["unit"] for c in channels], ["mbar"] * 4 + ["psi"] * 3 + ["mbar"] * 2)
         self.assertTrue(all(c["reference"] == "absolute" for c in channels))
 
 

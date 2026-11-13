@@ -1,0 +1,111 @@
+{
+  "geometry": {
+    "powder_mass_per_stepper_travel_g_per_mm": 2.4
+  },
+  "pressure_inputs": {
+    "1": {
+      "calibration": {
+        "pressure_max": 133.76764386536374,
+        "pressure_min": 0,
+        "reference": "unspecified",
+        "unit": "mbar",
+        "voltage_max": 5,
+        "voltage_min": 0
+      },
+      "label": "Low pressure 1",
+      "volts_per_count": 0.02998046875
+    },
+    "2": {
+      "calibration": {
+        "pressure_max": 100,
+        "pressure_min": 0,
+        "reference": "unspecified",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      },
+      "label": "Low pressure 2",
+      "volts_per_count": 0.02998046875
+    },
+    "3": {
+      "calibration": {
+        "pressure_max": 100,
+        "pressure_min": 0,
+        "reference": "unspecified",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      },
+      "label": "Low pressure 3",
+      "volts_per_count": 0.02998046875
+    },
+    "4": {
+      "calibration": {
+        "pressure_max": 100,
+        "pressure_min": 0,
+        "reference": "unspecified",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      },
+      "label": "Low pressure 4",
+      "volts_per_count": 0.02998046875
+    },
+    "5": {
+      "calibration": {
+        "pressure_max": 75,
+        "pressure_min": 0,
+        "reference": "absolute",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      },
+      "label": "High pressure 1",
+      "volts_per_count": 0.02998046875
+    },
+    "6": {
+      "calibration": {
+        "pressure_max": 75,
+        "pressure_min": 0,
+        "reference": "absolute",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      },
+      "label": "High pressure 2",
+      "volts_per_count": 0.03333333333333333
+    },
+    "7": {
+      "calibration": {
+        "pressure_max": 75,
+        "pressure_min": 0,
+        "reference": "absolute",
+        "unit": "psi",
+        "voltage_max": 5,
+        "voltage_min": 0
+      },
+      "label": "High pressure 3",
+      "volts_per_count": 0.03345833333333333
+    }
+  },
+  "servo": {
+    "displacement_deg": 180,
+    "off_pulse_us": 2500
+  },
+  "stepper": {
+    "dro_home": 289.32,
+    "dro_kind": "linace",
+    "max_travel_mm": 277.0
+  },
+  "thermocouples": {
+    "tc0": "Stepper",
+    "tc1": "",
+    "tc2": "",
+    "tc3": "",
+    "tc4": "",
+    "tc5": "",
+    "tc6": "",
+    "tc7": ""
+  },
+  "version": 1
+}

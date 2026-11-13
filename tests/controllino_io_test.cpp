@@ -18,7 +18,9 @@ static uint32_t nowMs = 0;
 static volatile uint8_t gpio[80] = {};
 static std::vector<std::pair<int, int>> writes, modes;
 static std::vector<int> adcReads;
-static int adcGeneration = 0;
+static int adcGeneration = 0, adcLastPin = -1, adcChannelReads = 0;
+static bool adcNoise = false;
+static int adcFixed = -1;
 unsigned long millis() { return nowMs; }
 unsigned long micros() { return nowMs * 1000; }
 void delay(unsigned long) {}
@@ -27,8 +29,12 @@ void digitalWrite(uint8_t pin, uint8_t level) { writes.push_back({pin, level}); 
 int digitalRead(uint8_t pin) { return gpio[pin] ? HIGH : LOW; }
 int analogRead(uint8_t pin) {
   adcReads.push_back(pin);
+  if (adcLastPin != pin) { adcLastPin = pin; adcChannelReads = 0; }
   // The first conversion is deliberately wrong after each channel change.
-  return adcReads.size() % 2 ? 1023 : adcGeneration + pin;
+  if (++adcChannelReads == 1) return 1023;
+  if (adcFixed >= 0) return adcFixed;
+  if (adcNoise && pin == 54) return adcChannelReads <= 13 ? 24 : 25;
+  return adcGeneration + pin;
 }
 volatile uint8_t *portInputRegister(uint8_t pin) { return &gpio[pin]; }
 uint8_t digitalPinToPort(uint8_t pin) { return pin; }
@@ -210,31 +216,59 @@ static void testStepperPwm() {
 }
 
 static void testAdc() {
-  const byte pins[8] = {64, 65, 68, 69, 54, 55, 56, 62};
+  const byte pins[9] = {64, 65, 68, 69, 54, 55, 56, 62, 63};
   PressureAdc adc; adc.begin(pins); adcReads.clear();
   Print initial; adc.writeStatus(initial, 0);
-  assert(initial.text == ",\"adc\":[0,0,0,0,0,0,0,0],\"adcage\":-1,\"adcseq\":0");
+  assert(initial.text == ",\"adc\":[0,0,0,0,0,0,0,0,0],\"adcage\":-1,\"adcseq\":0");
   adc.poll(9); assert(adcReads.empty());
-  for (uint32_t i = 1; i <= 7; ++i) { adc.poll(i * 10); adc.poll(i * 10); }
-  assert(adcReads.size() == 14);
-  Print partial; adc.writeStatus(partial, 70); assert(partial.text == initial.text);
-  adc.poll(80);
-  assert(adcReads == std::vector<int>({64,64,65,65,68,68,69,69,54,54,55,55,56,56,62,62}));
-  Print complete; adc.writeStatus(complete, 85);
-  assert(complete.text == ",\"adc\":[64,65,68,69,54,55,56,62],\"adcage\":75,\"adcseq\":1");
+  for (uint32_t i = 1; i <= 8; ++i) { adc.poll(i * 10); adc.poll(i * 10); }
+  assert(adcReads.size() == 16);
+  Print partial; adc.writeStatus(partial, 80); assert(partial.text == initial.text);
+  adc.poll(90);
+  assert(adcReads == std::vector<int>({64,64,65,65,68,68,69,69,54,54,55,55,56,56,62,62,63,63}));
+  Print complete; adc.writeStatus(complete, 95);
+  assert(complete.text == ",\"adc\":[64,65,68,69,54,55,56,62,63],\"adcage\":85,\"adcseq\":1");
   adcGeneration = 100;
-  for (uint32_t i = 9; i <= 15; ++i) adc.poll(i * 10);
+  for (uint32_t i = 10; i <= 17; ++i) adc.poll(i * 10);
   Print concurrent; bool once = false;
-  concurrent.beforePrint = [&] { if (!once) { once = true; adc.poll(160); } };
-  adc.writeStatus(concurrent, 155);
-  assert(concurrent.text == ",\"adc\":[64,65,68,69,54,55,56,62],\"adcage\":145,\"adcseq\":1");
-  Print next; adc.writeStatus(next, 165);
-  assert(next.text == ",\"adc\":[164,165,168,169,154,155,156,162],\"adcage\":75,\"adcseq\":2");
+  concurrent.beforePrint = [&] { if (!once) { once = true; adc.poll(180); } };
+  adc.writeStatus(concurrent, 175);
+  assert(concurrent.text == ",\"adc\":[64,65,68,69,54,55,56,62,63],\"adcage\":165,\"adcseq\":1");
+  Print next; adc.writeStatus(next, 185);
+  assert(next.text == ",\"adc\":[164,165,168,169,154,155,156,162,163],\"adcage\":85,\"adcseq\":2");
   // Unsigned millis rollover continues scheduled acquisition and age arithmetic.
   PressureAdc roll; roll.begin(pins);
-  for (uint32_t i = 0; i < 8; ++i) roll.poll(uint32_t(0xffffffd0UL + i * 10));
-  Print rolled; rolled.text.clear(); roll.writeStatus(rolled, 30);
-  assert(rolled.text.find("\"adcage\":78,\"adcseq\":1") != std::string::npos);
+  for (uint32_t i = 0; i < 9; ++i) roll.poll(uint32_t(0xffffffd0UL + i * 10));
+  Print rolled; roll.writeStatus(rolled, 40);
+  assert(rolled.text.find("\"adcage\":88,\"adcseq\":1") != std::string::npos);
+}
+
+static void testAdcOversampling() {
+  const byte pins[9] = {64, 65, 68, 69, 54, 55, 56, 62, 63};
+  adcGeneration = 0; adcLastPin = -1; adcNoise = true; adcReads.clear();
+  PressureAdc adc; adc.begin(pins, 0x70);
+  for (uint32_t i = 1; i <= 9; ++i) adc.poll(i * 10);
+  // Only P5-P7 take 16 measurements; six other inputs retain one each.
+  assert(adcReads.size() == 3 * 17 + 6 * 2);
+  Print status; adc.writeStatus(status, 95);
+  assert(status.text == ",\"adc\":[64,65,68,69,25,55,56,62,63],\"adcage\":85,\"adcseq\":1,\"adcos\":112,\"adcq\":[256,260,272,276,97,220,224,248,252]");
+  // Print callbacks cannot mix a later complete scan into this snapshot.
+  adcGeneration = 100;
+  for (uint32_t i = 10; i <= 17; ++i) adc.poll(i * 10);
+  Print concurrent; bool once = false;
+  concurrent.beforePrint = [&] { if (!once) { once = true; adc.poll(180); } };
+  adc.writeStatus(concurrent, 175);
+  assert(concurrent.text.find("\"adcq\":[256,260,272,276,97,220,224,248,252]") != std::string::npos);
+  adcNoise = false;
+  for (int value : {0, 1023}) {
+    adcFixed = value; adcLastPin = -1;
+    PressureAdc extremes; extremes.begin(pins, 0x70);
+    for (uint32_t i = 1; i <= 9; ++i) extremes.poll(i * 10);
+    Print result; extremes.writeStatus(result, 95);
+    const std::string quarter = std::to_string(value * 4);
+    assert(result.text.find("\"adcq\":[" + quarter + "," + quarter) != std::string::npos);
+  }
+  adcFixed = -1;
 }
 
 static void testRelays() {
@@ -305,6 +339,6 @@ static void testLimits() {
   assert(input.rejectedGlitches == 255);
 }
 int main() {
-  testProtocol(); testReader(); testStepperPwm(); testAdc(); testRelays(); testLimits();
+  testProtocol(); testReader(); testStepperPwm(); testAdc(); testAdcOversampling(); testRelays(); testLimits();
   std::cout << "Controllino IO invariants passed\n";
 }

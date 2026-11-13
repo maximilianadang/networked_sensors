@@ -482,7 +482,7 @@ void serviceNetwork() {
 
 void setup() {
   solenoids.begin(SOLENOID_PINS, SOLENOID_ON, SOLENOID_OFF);
-  pressures.begin(PRESSURE_PINS);
+  pressures.begin(PRESSURE_PINS, PRESSURE_OVERSAMPLING ? 0x70U : 0U); // P5, P6, P7
   digitalWrite(PIN_ENABLE, DRIVER_DISABLED); pinMode(PIN_ENABLE, OUTPUT);
   digitalWrite(PIN_STEP, STEP_IDLE); digitalWrite(PIN_DIR, DIR_NEGATIVE);
   pinMode(PIN_DIR, OUTPUT); // stepper.begin() seeds and enables the STEP output.

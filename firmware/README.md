@@ -1,4 +1,4 @@
-# Controllino IO (firmware 1.6.1)
+# Controllino IO (firmware 1.6.3)
 
 All three motor builds use the LinACE encoder and expanded IO by default.
 USB and Ethernet share the same V1 motor commands and compact JSON telemetry.
@@ -73,6 +73,7 @@ three current builds. A disabled ESP32 has no top status pill.
 
 Low-pressure inputs P1–P4 are AI10–AI13; high-pressure inputs P5–P7 are
 AI0–AI2. Firmware 1.6.1 appends P8 on AI08 (Arduino A8), a fifth
+low-pressure input. Firmware 1.6.2 appends P9 on AI09 (Arduino A9), a sixth
 low-pressure input, without renumbering existing channels. In Controllino mode these replace the dashboard's ESP32 and SICK
 pressure measurements respectively. Flow measurements keep their existing
 sources. Open-flow calculations use the three logical valve states; the SICK
@@ -211,7 +212,7 @@ their original bounded duration and do not receive automatic renewal.
 
 The dashboard reads `pressure_inputs` from `system_config.json`. Missing
 entries use the shared defaults; no channel has an assumed pressure range.
-Each entry is keyed by the stable P1–P8 ID and accepts `label`,
+Each entry is keyed by the stable P1–P9 ID and accepts `label`,
 `volts_per_count` and `calibration`.
 
 - `calibration: null` leaves pressure blank; raw voltage and ADC counts remain
@@ -220,7 +221,7 @@ Each entry is keyed by the stable P1–P8 ID and accepts `label`,
   `pressure_max`, `unit` and `reference` from the sensor's specifications.
 - Calibration units may be `Pa`, `kPa`, `MPa`, `hPa`, `mbar`, `bar` or `psi`
   (case-sensitive). The host converts pressure values and summary means to
-  **mbar** for low-pressure P1–P4 and P8 and **PSI** for high-pressure P5–P7.
+  **mbar** for low-pressure P1–P4, P8 and P9 and **PSI** for high-pressure P5–P7.
   Configuration and recording metadata retain the original calibration units,
   endpoints and gauge/absolute reference. Unit conversion does not change that
   reference. Unsupported units are rejected.
@@ -232,7 +233,7 @@ Restart the dashboard after changing calibration. Invalid or stale samples
 are blank in live charts; raw evidence remains available. `merged_samples.csv`
 contains converted values and validity; `stepper_raw.csv` contains raw telemetry.
 Recording metadata freezes the configuration used for the run. New pressure
-summaries include all eight channels and never substitute old ESP32 values.
+summaries include all nine channels and never substitute old ESP32 values.
 
 The saved machine configuration currently uses:
 
@@ -242,12 +243,76 @@ The saved machine configuration currently uses:
 | P2 | AI11 | 0–10 V | 0–250 mbar | 0.03 |
 | P3 | AI12 | 0–10 V | 0–25 mbar | 0.0098 |
 | P4 | AI13 | 0–10 V | 0–25 mbar | 0.0098 |
-| P5–P7 | AI0–AI2 | 0–5 V | 0–200 PSI absolute | 0.03 |
+| P5 | AI0 | 0.507526457–4.573126457 V | 0–200 PSI absolute | 0.03333333333333333 |
+| P6 | AI1 | 0.511193123–4.576793123 V | 0–200 PSI absolute | 0.03333333333333333 |
+| P7 | AI2 | 0.513886665–4.579486665 V | 0–200 PSI absolute | 0.03345833333333333 |
 | P8 | AI08 | 0–10 V | 0–25 mbar | 0.03 |
+| P9 | AI09 | 0–10 V | 0–250 mbar | 0.03 |
+
+P6/P7 retain their October bench-measured voltage scales: 24 ADC counts
+corresponded to 0.800 V and 0.803 V respectively. P5 now uses the same
+0.800 V / 24-count factor as P6, based on the operator’s 0.8 V measurement.
+
+P5–P7 use the operator-confirmed 200 PSI span and a ratiometric model at the
+measured **5.082 V supply**: the voltage span is `0.8 * 5.082 = 4.0656 V`, giving
+**49.193231011413 PSI/V**. On 2026-11-13 a fresh 20-second, 200-sample capture
+at **1.005 bar absolute (14.576292641886 PSI)** anchored each channel:
+
+| Channel | Mean ADC-derived voltage at reference |
+|---|---|
+| P5 | 0.803833333 V |
+| P6 | 0.807500000 V |
+| P7 | 0.810193542 V |
+
+For each channel, `voltage_min = mean_voltage - reference_psi / slope` and
+`voltage_max = voltage_min + 4.0656`. Pressure endpoints remain 0 and 200 PSI
+absolute. The result is `pressure_psi = slope * (voltage_v - voltage_min)`;
+readings outside the fitted voltage endpoints are invalid, so this mapping does
+not admit negative absolute pressures. Each captured mean converts to
+14.576292641886 PSI. This replaces the earlier pressure-endpoint offset fit.
+
+ADC-to-voltage factors and acquisition are unchanged. This calibration uses the
+assumed linear ratiometric model at the measured supply; an independent second
+pressure point can validate its slope. Live samples retain their fluctuations.
+Restart the dashboard after changing these settings; no firmware upload is
+needed for this calibration update.
 
 P8 is configured in advance for the planned AI08 sensor. Its pressure range
 matches P3; its voltage conversion follows the standard input used by AI10.
+P9 on AI09 copies P2/AI11’s sensor calibration and voltage conversion.
 Sensor pressure ranges do not establish the controller's ADC voltage scale.
+
+### Optional high-pressure oversampling
+
+Firmware 1.6.3 adds a build-time boolean in `controllino_firmware.h`:
+
+```cpp
+constexpr bool PRESSURE_OVERSAMPLING = true;
+```
+
+`true` enables oversampling for P5–P7 (AI0–AI2) only; `false` restores their
+single-conversion behavior. Recompile and flash after changing it. This switch
+is in the firmware configuration header, not `system_config.json`; voltage and
+pressure calibration remain in that JSON file.
+
+After discarding the first conversion following an ADC channel change, enabled
+channels take 16 conversions and decimate the sum to two extra bits, expressed
+as quarter-count increments. Other channels retain one conversion. Work is
+bounded to one channel per 10 ms acquisition slice (up to 17 conversions with
+interrupts enabled). Nine-channel scans still target 90 ms and telemetry still
+targets 10 Hz; actual timing and effective improvement need hardware validation.
+Suitable ADC noise is necessary for the extra resolution to represent useful
+information. This does not correct calibration or sensor accuracy.
+
+The original `adc` array retains the last individual 10-bit conversion. Enabled
+firmware also reports `adcos` (channel bitmask, P5–P7 = 112) and `adcq` (nine
+quarter-count integers, 0–4092). The updated host uses `adcq / 4` on selected
+channels for voltage/pressure conversion and retains both forms in recordings:
+`stepper_pressureN_adc` and `stepper_pressureN_adc_oversampled`. The live
+`stepper_pressure_oversampling_mask` records which channels are enabled; hover
+text shows the oversampled value alongside the original count. Restart the
+dashboard after updating its code. Disabled builds and older firmware continue
+to use the original integer counts without a calibration-factor change.
 
 ## Nitrogen Pitot velocity
 
@@ -277,7 +342,9 @@ scale convention as AI10/AI11. Its sensor pressure calibration belongs in
 `system_config.json` under `pressure_inputs.8`: 0–10 V maps to 0–25 mbar,
 matching P3. AI08 retains the standard-input 0.03 V/count conversion; P3 uses
 its separate dedicated-input conversion. An analog zero cannot prove that a sensor is connected.
-The host also accepts older seven-channel firmware, leaving P8 unavailable.
+The host also accepts older seven- and eight-channel firmware, leaving
+unreported channels unavailable. P9 is recorded and displayed independently;
+it does not change the Pitot pressure formula.
 Merged recordings and CSV exports include `pitot_total_pressure_pa`,
 `pitot_static_pressure_pa`, `pitot_density_kg_m3` and `pitot_velocity_m_s`, including
 blank columns before inputs become available. Raw pressure ADCs and TC-0 remain

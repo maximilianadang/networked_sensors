@@ -2701,7 +2701,7 @@ class ControllinoProtocol:
 
     mode = "controllino"  # Dashboard behavior depends on the machine, not the cable.
     expected_fields = UsbStepperSource.expected_fields + (
-        "stepper_dro_kind", "stepper_pressure_capable", "stepper_pressure_sample_age_ms", "stepper_pressure_sequence",
+        "stepper_dro_kind", "stepper_pressure_oversampling_mask", "stepper_pressure_capable", "stepper_pressure_sample_age_ms", "stepper_pressure_sequence",
         "stepper_firmware_version", "stepper_network_protocol", "stepper_aux_kind", "stepper_aux_pin",
         "stepper_servo_capable", "stepper_servo_enabled", "stepper_servo_pulse_us",
         "stepper_servo_min_us", "stepper_servo_max_us",
@@ -2801,15 +2801,23 @@ class ControllinoProtocol:
         dro_kind = payload.get("dkind", "absolute_dro")
         if not isinstance(dro_kind, str) or not dro_kind or len(dro_kind) > 32:
             raise ValueError("Controllino DRO identity must be a short string")
-        pressure = any(key in payload for key in ("adc", "adcage", "adcseq"))
+        pressure = any(key in payload for key in ("adc", "adcage", "adcseq", "adcos", "adcq"))
         if pressure:
             adc, age, sequence = (payload.get(key) for key in ("adc", "adcage", "adcseq"))
-            if (not isinstance(adc, list) or len(adc) not in (7, len(PRESSURE_INPUTS))
+            if (not isinstance(adc, list) or not 7 <= len(adc) <= len(PRESSURE_INPUTS)
                     or any(type(value) is not int or not 0 <= value <= 1023 for value in adc)
                     or type(age) is not int or not -1 <= age <= 0x7FFFFFFF
                     or type(sequence) is not int or not 0 <= sequence <= 0xFFFFFFFF
                     or (sequence == 0) != (age == -1)):
                 raise ValueError("Invalid Controllino pressure ADC snapshot")
+            mask, quarter = payload.get("adcos", 0), payload.get("adcq")
+            if (type(mask) is not int or not 0 <= mask < (1 << len(adc))
+                    or (mask and quarter is None)
+                    or (quarter is not None and (not isinstance(quarter, list)
+                        or len(quarter) != len(adc)
+                        or any(type(value) is not int or not 0 <= value <= 4092 for value in quarter)))
+                    or (quarter is not None and not mask)):
+                raise ValueError("Invalid Controllino oversampled ADC snapshot")
 
         # The Controllino truthfully uses -1/0 for absent switches and DRO.
         # Adapt those unavailable inputs to the legacy decoder, then explicitly
@@ -2872,6 +2880,11 @@ class ControllinoProtocol:
             values[f"stepper_solenoid{number}_on"] = bool(payload[key]) if key in payload else None
         values.update({f"stepper_pressure{n['id']}_adc": payload["adc"][i]
                        if pressure and payload["adcseq"] and i < len(payload["adc"]) else None
+                       for i, n in enumerate(PRESSURE_INPUTS)})
+        values["stepper_pressure_oversampling_mask"] = payload.get("adcos", 0) if pressure else None
+        values.update({f"stepper_pressure{n['id']}_adc_oversampled": payload["adcq"][i] / 4
+                       if pressure and payload["adcseq"] and i < len(payload["adc"])
+                       and payload.get("adcos", 0) & (1 << i) else None
                        for i, n in enumerate(PRESSURE_INPUTS)})
         values.update({
             "stepper_can_motor_capable": can_motor,

@@ -65,7 +65,36 @@ class ControllinoChannelTests(unittest.TestCase):
         startup = self.controller.decode_status_line(json.dumps({**extended, "adcseq": 0, "adcage": -1}))
         self.assertIsNone(startup["stepper_pressure8_adc"])
         with self.assertRaises(ValueError):
-            self.controller.decode_status_line(json.dumps({**extended, "adc": [0] * 9}))
+            self.controller.decode_status_line(json.dumps({**extended, "adc": [0] * 10}))
+
+    def test_ninth_channel_appends_ai09_and_keeps_older_prefixes(self):
+        for count in (7, 8, 9):
+            adc = [100 + i for i in range(count)]
+            values = self.controller.decode_status_line(json.dumps({**self.controller.payload, "adc": adc}))
+            self.assertEqual(values["stepper_pressure8_adc"], 107 if count >= 8 else None)
+            self.assertEqual(values["stepper_pressure9_adc"], 108 if count >= 9 else None)
+        with self.assertRaises(ValueError):
+            self.controller.decode_status_line(json.dumps({**self.controller.payload, "adc": adc[:-1] + [1024]}))
+
+    def test_oversampled_telemetry_preserves_fraction_and_raw_conversion(self):
+        payload = {**self.controller.payload, "adc": [100, 200, 300, 400, 25, 26, 27],
+                   "adcos": 0x70, "adcq": [400, 800, 1200, 1600, 97, 102, 107]}
+        values = self.controller.decode_status_line(json.dumps(payload))
+        self.assertEqual(values["stepper_pressure_oversampling_mask"], 0x70)
+        self.assertEqual(values["stepper_pressure5_adc"], 25)
+        self.assertEqual(values["stepper_pressure5_adc_oversampled"], 24.25)
+        self.assertEqual(values["stepper_pressure6_adc_oversampled"], 25.5)
+        self.assertIsNone(values["stepper_pressure1_adc_oversampled"])
+        startup = self.controller.decode_status_line(json.dumps({**payload, "adcseq": 0, "adcage": -1}))
+        self.assertIsNone(startup["stepper_pressure5_adc_oversampled"])
+        legacy = self.controller.decode_status_line(json.dumps(self.controller.payload))
+        self.assertEqual(legacy["stepper_pressure_oversampling_mask"], 0)
+        self.assertIsNone(legacy["stepper_pressure5_adc_oversampled"])
+        for change in ({"adcos": True}, {"adcos": 128}, {"adcq": None},
+                       {"adcq": [0] * 6}, {"adcq": [True] * 7},
+                       {"adcq": [4093] * 7}, {"adcq": [1.5] * 7}, {"adcos": 0}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.controller.decode_status_line(json.dumps({**payload, **change}))
 
     def test_calibration_history_and_recording_use_the_same_values(self):
         expected_mbar = 344.7378646584181  # 5 PSI.
@@ -100,6 +129,29 @@ class ControllinoChannelTests(unittest.TestCase):
             runtime._poll_locked(.3)
         self.assertFalse(runtime.latest["stepper_pressure1_valid"])
         self.assertIsNone(runtime.latest["stepper_pressure1_value"])
+
+    def test_oversampled_pressure_keeps_fraction_in_history_and_recording(self):
+        self.fixture.config_path.write_text(json.dumps({"version": 1, "stepper": {"dro_home": None},
+            "pressure_inputs": {"5": {"volts_per_count": .8 / 24, "calibration": {
+                "voltage_min": .5, "voltage_max": 4.5, "pressure_min": 0, "pressure_max": 200,
+                "unit": "psi", "reference": "absolute"}}}}))
+        self.controller.payload.update(adc=[100, 200, 300, 400, 25, 26, 27], adcos=0x70,
+                                       adcq=[400, 800, 1200, 1600, 97, 102, 107])
+        self.controller.refresh()
+        runtime = self.runtime()
+        expected = 50 * (24.25 * .8 / 24 - .5)
+        self.assertAlmostEqual(runtime.latest["stepper_pressure5_value"], expected)
+        self.assertEqual(runtime.latest["stepper_pressure5_adc"], 25)
+        runtime.set_recording(True)
+        path = runtime.recorder.paths.merged_csv
+        with runtime._condition:
+            runtime._poll_locked(.2)
+        runtime.set_recording(False)
+        with path.open() as stream:
+            row = list(csv.DictReader(stream))[-1]
+        self.assertEqual(row["stepper_pressure5_adc"], "25")
+        self.assertEqual(float(row["stepper_pressure5_adc_oversampled"]), 24.25)
+        self.assertAlmostEqual(float(row["stepper_pressure5_value"]), expected)
 
     def test_new_encoder_requires_its_own_zero(self):
         self.fixture.config_path.write_text(json.dumps({"version": 1, "stepper": {"dro_home": 135.46}}))

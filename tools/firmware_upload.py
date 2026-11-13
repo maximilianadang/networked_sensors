@@ -1,4 +1,4 @@
-"""Safe, notebook-friendly Arduino CLI firmware upload helpers.
+"""Arduino CLI firmware uploads shared by the command line and notebook.
 
 Arduino CLI expects the main sketch file to live in a directory with the same
 name, so uploads are compiled from a hash-checked temporary copy instead of
@@ -7,6 +7,7 @@ modifying the repository. Local quoted headers are staged with the sketch withou
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -641,3 +643,41 @@ def monitor_command(
         "--config",
         f"baudrate={target.monitor_baud}",
     ]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", choices=tuple(TARGETS), help="Firmware variant to build/upload")
+    parser.add_argument("--port", default="auto", help="USB port, or auto for exact board matching")
+    parser.add_argument("--payload", type=Path, help="Alternative main .ino file")
+    parser.add_argument("--compile-only", action="store_true", help="Compile without accessing a board")
+    parser.add_argument("--safety-confirmed", action="store_true",
+                        help="Confirm supplies are off and equipment is safe for controller reset")
+    parser.add_argument("--list-ports", action="store_true", help="List USB/serial ports without uploading")
+    parser.add_argument("--arduino-cli", type=Path, help="Override Arduino CLI executable")
+    parser.add_argument("--arduino-config", type=Path, help="Override Arduino CLI configuration")
+    args = parser.parse_args(argv)
+    if not args.list_ports and args.target is None:
+        parser.error("choose --target, or use --list-ports")
+    try:
+        if args.list_ports:
+            print(format_ports(discover_ports(executable=args.arduino_cli,
+                                              config_file=args.arduino_config)))
+            return 0
+        result = compile_and_upload(
+            args.target, args.payload, port=args.port,
+            safety_confirmed=args.safety_confirmed, compile_only=args.compile_only,
+            executable=args.arduino_cli, config_file=args.arduino_config,
+        )
+    except (FirmwareUploadError, OSError) as exc:
+        print(f"Firmware upload failed: {exc}", file=sys.stderr)
+        return 1
+    action = "Uploaded and verified" if result.uploaded else "Compiled (no upload)"
+    print(f"\n{action}: {result.payload.name}")
+    print(f"Target: {result.target.key}")
+    print(f"Port: {result.port or 'not used'}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
