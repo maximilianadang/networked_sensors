@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from controllino_io import PITOT_FIELDS, transform_pitot_sample
+from controllino_io import PITOT_FIELDS, _pitot_mach, transform_pitot_sample
 from recorder import FlowRunRecorder
 
 
@@ -26,12 +26,24 @@ class PitotTests(unittest.TestCase):
         transform_pitot_sample(sample)
         self.assertEqual(sample["pitot_total_pressure_pa"], 1100)
         self.assertEqual(sample["pitot_static_pressure_pa"], 1050)
-        density = 1050 / (296.8 * 293.15)
+        mach = math.sqrt(5 * ((1100 / 1050) ** (2 / 7) - 1))
+        rt = 296.8 * 293.15 / (1 + 0.2 * mach ** 2)
+        density = 1050 / rt
         self.assertAlmostEqual(sample["pitot_density_kg_m3"], density)
-        self.assertAlmostEqual(sample["pitot_velocity_m_s"], math.sqrt(100 / density))
+        self.assertAlmostEqual(sample["pitot_velocity_m_s"], mach * math.sqrt(1.4 * rt))
         zero = measurement(stepper_pressure4_value=0)
         transform_pitot_sample(zero)
         self.assertEqual(zero["pitot_velocity_m_s"], 0)
+
+    def test_sonic_boundary_and_supersonic_velocity(self):
+        self.assertEqual(_pitot_mach(1.893), 1)
+        self.assertGreater(_pitot_mach(1.893001), 1)
+        for mach in (1.5, 3.0):
+            ratio = (1.2 * mach**2)**3.5 * (6 / (7 * mach**2 - 1))**2.5
+            sample = measurement(stepper_pressure4_value=11 * (1 - 1 / ratio))
+            transform_pitot_sample(sample)
+            speed = mach * math.sqrt(1.4 * 296.8 * 293.15 / (1 + 0.2 * mach**2))
+            self.assertAlmostEqual(sample["pitot_velocity_m_s"], speed)
 
     def test_unavailable_invalid_and_nonphysical_inputs_clear_cached_results(self):
         changes = [{f"stepper_pressure{i}_valid": False} for i in (1, 8, 3, 4)]

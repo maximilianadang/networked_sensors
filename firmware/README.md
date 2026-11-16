@@ -327,18 +327,21 @@ to use the original integer counts without a calibration-factor change.
 ## Nitrogen Pitot velocity
 
 P4 (AI13) measures total-minus-static pressure. Its dashboard reading includes
-an adjacent estimated velocity in m/s. TC-0 supplies gas temperature in Celsius;
+an adjacent estimated velocity in m/s. TC-0 is treated as stagnation temperature in Celsius;
 the calculation converts this to Kelvin and uses nitrogen's specific gas
 constant, 296.8 J/(kg K). The pressure path is:
 
 - Total absolute pressure, mbar: `6 + P1 (AI10) - P8 (AI08) + P3 (AI12)`.
 - Static absolute pressure, Pa: `100 * (total_mbar - P4)`.
-- Density, kg/m³: `static_pa / (296.8 * (TC0_c + 273.15))`.
-- Estimated velocity, m/s: `sqrt(2 * 100 * P4 / density)`.
+- Pressure ratio: `r = 1 + 100 * P4 / static_pa`.
+- For `r < 1.893`, Mach is `sqrt(5 * (r^(2/7) - 1))`; at equality it is 1.
+  Above that threshold, bisect the supersonic branch of
+  `r = (1.2 M²)^3.5 * (6 / (7 M² - 1))^2.5`.
+- Static temperature, K: `T = (TC0_c + 273.15) / (1 + 0.2 M²)`.
+- Density, kg/m³: `static_pa / (296.8 * T)`.
+- Estimated velocity, m/s: `M * sqrt(1.4 * 296.8 * T)`.
 
-The 6 mbar value is an assumed absolute reference. This is the low-speed,
-approximately incompressible Pitot relation. Appreciable compressibility requires
-a different velocity model. Displayed velocity has two decimal places; this does
+The 6 mbar value is an assumed absolute reference. Displayed velocity has two decimal places; this does
 not establish measurement accuracy.
 
 All four pressures must be calibrated and valid under the existing pressure

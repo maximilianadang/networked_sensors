@@ -275,7 +275,7 @@ export function createControllinoMeasurementsComponent({descriptors = [], getHis
       velocity.className = "value";
       velocity.textContent = "--";
       reading.append(velocityLabel, velocity);
-      reading.title = "Estimated nitrogen velocity · P4 differential · TC-0 temperature · total pressure: 6 mbar + AI10 − AI08 + AI12 · low-speed approximation";
+      reading.title = "Estimated nitrogen velocity · P4 differential · TC-0 stagnation temperature · total pressure: 6 mbar + AI10 − AI08 + AI12 · compressible Pitot model";
       row.appendChild(reading);
     }
     cards.find(card => card.group === descriptor.group).values.appendChild(row);

@@ -189,12 +189,34 @@ PITOT_FIELDS = ("pitot_total_pressure_pa", "pitot_static_pressure_pa",
 NITROGEN_GAS_CONSTANT = 296.8  # J/(kg K)
 
 
+def _pitot_mach(ratio: float) -> float:
+    if ratio < 1.893:
+        return math.sqrt(5 * (ratio ** (2 / 7) - 1))
+    if ratio == 1.893:
+        return 1.0
+
+    # Above sonic, the Rayleigh Pitot pressure ratio increases with Mach.
+    def rayleigh(mach):
+        m2 = mach * mach
+        return (1.2 * m2) ** 3.5 * (6 / (7 * m2 - 1)) ** 2.5
+
+    lo, hi = 1.0, 2.0
+    while rayleigh(hi) < ratio:
+        hi *= 2
+    for _ in range(48):
+        mid = (lo + hi) / 2
+        if rayleigh(mid) < ratio:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
 def transform_pitot_sample(sample: dict) -> None:
     """Estimate outlet velocity from P4, TC-0 and the signed pressure path.
 
     Total pressure = 6 mbar absolute + AI10 - AI08 + AI12.
-    P4 (AI13) is total-minus-static pressure. The velocity estimate assumes
-    low-speed, approximately incompressible nitrogen flow.
+    P4 (AI13) is total-minus-static pressure. TC-0 is treated as stagnation temperature.
     """
     sample.update(dict.fromkeys(PITOT_FIELDS))
     pressures = []
@@ -214,10 +236,13 @@ def transform_pitot_sample(sample: dict) -> None:
     static = total - 100 * differential
     if differential < 0 or not _finite(total) or not _finite(static) or static <= 0:
         return
-    density = static / (NITROGEN_GAS_CONSTANT * (temperature + 273.15))
+    mach = _pitot_mach(1 + 100 * differential / static)
+    static_temp_k = (temperature + 273.15) / (1 + 0.2 * mach ** 2)
+    rt = NITROGEN_GAS_CONSTANT * static_temp_k
+    density = static / rt
     if not _finite(density) or density <= 0:
         return
-    velocity = math.sqrt(2 * (100 * differential) / density)
+    velocity = mach * math.sqrt(1.4 * rt)
     if not _finite(velocity):
         return
     sample.update(zip(PITOT_FIELDS, (total, static, density, velocity)))
